@@ -1,0 +1,1 @@
+"""ClipFinder Local application package."""

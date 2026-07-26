@@ -1,0 +1,33 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+data/
+analysis_frames/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Local media: recordings, previews, exports and test captures can be very large
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.aac
+
+# Editor and Windows-local files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+.pytest_cache/

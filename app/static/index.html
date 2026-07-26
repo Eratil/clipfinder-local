@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ClipFinder Local</title>
+    <link rel="stylesheet" href="/static/style.css?v=20260727-2" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div><p class="eyebrow">LOCAL / NVIDIA GPU</p><h1>ClipFinder</h1></div>
+        <div class="header-actions"><a href="/docs" target="_blank" class="quiet">API docs</a><p id="status">Connecting...</p></div>
+      </header>
+
+      <button id="setup-toggle" class="quiet setup-toggle" aria-controls="setup-sidebar" aria-expanded="false">Saved setup</button>
+      <aside id="setup-sidebar" class="setup-sidebar" aria-label="Saved setup" aria-hidden="true">
+        <div class="section-title setup-sidebar-head"><div><h2>Saved setup</h2><p class="hint">Prompts, reference collections, captions, and text search - available at any time.</p></div><button id="setup-close" class="quiet" aria-label="Hide saved setup">Hide</button></div>
+        <div class="setup-tabs"><button class="quiet selected" data-setup-tab="clips">Clip setup</button><button class="quiet" data-setup-tab="boss">Boss deaths</button></div>
+        <div id="setup-tab-clips">
+        <div class="sidebar-search">
+          <label>Exact text search<input id="search" placeholder="e.g. giveaway, important announcement" /></label>
+          <button class="quiet" id="search-button">Find text</button>
+        </div>
+        <div class="library-grid">
+          <article class="library-card">
+            <h3>Discovery profile</h3>
+            <p class="hint">Changes how candidates are ranked. It uses your approvals and rejection reasons too.</p>
+            <form id="discovery-defaults-form">
+              <label>Content type<select id="discovery-profile"></select></label>
+              <button>Save discovery profile</button>
+            </form>
+          </article>
+          <article class="library-card">
+            <h3>Saved prompts</h3>
+            <form id="prompt-form"><input id="prompt-name" placeholder="Name, e.g. funny reactions" required /><textarea id="prompt-text" placeholder="Description, e.g. funny and emotional reactions to unexpected events" required></textarea><button>Save prompt</button></form>
+            <label>Active description prompt<textarea id="active-prompt" placeholder="Choose a saved prompt or write a temporary description"></textarea></label>
+            <button id="description-button">Search active prompt</button>
+            <div id="prompts" class="saved-list"></div>
+          </article>
+          <article class="library-card">
+            <h3>Reference collections</h3>
+            <form id="collection-form"><input id="collection-name" placeholder="e.g. best reactions" required /><button>Create collection</button></form>
+            <div id="collections" class="saved-list"></div>
+            <button id="similar-button" disabled>Find similar to active collection</button>
+            <button id="generate-prompt-button" class="quiet" disabled>Generate prompt from active collection</button>
+            <div class="reference-import">
+              <label>Folder with ready-made clips<input id="reference-folder" placeholder="C:\\clips\\best-moments" /></label>
+              <label class="check"><input id="subfolders" type="checkbox" checked /> Include subfolders</label>
+              <button id="import-folder-button" class="quiet" disabled>Save folder and import</button>
+            </div>
+            <div id="import-status" class="import-status"></div>
+            <div id="reference-sources" class="saved-list"></div>
+          </article>
+          <article class="library-card">
+            <h3>Custom rejection reasons</h3>
+            <p class="hint">Saved reasons appear in the rejection list on every clip.</p>
+            <form id="rejection-reason-form" class="prompt-row"><input id="new-rejection-reason" maxlength="80" placeholder="e.g. too much background music" required /><button class="quiet" id="save-rejection-reason">Save reason</button></form>
+            <div id="saved-rejection-reasons" class="saved-list"></div>
+          </article>
+          <article class="library-card">
+            <h3>Caption defaults</h3>
+            <p class="hint">Used for every exported clip. Set only the caption position on an individual clip.</p>
+            <form id="caption-defaults-form">
+              <label>Caption type
+                <select id="global-caption-preset">
+                  <option value="none">No captions</option>
+                  <option value="clean">Clean - white with outline</option>
+                  <option value="highlight">Word highlight - large yellow</option>
+                  <option value="minimal">Minimal - small white</option>
+                </select>
+              </label>
+              <label>Sentence colour<input id="global-caption-base-color" type="color" value="#ffffff" /></label>
+              <label>Spoken word colour<input id="global-caption-active-color" type="color" value="#ffff00" /></label>
+              <button>Save global caption settings</button>
+            </form>
+            <form id="caption-favorite-form">
+              <input id="caption-favorite-name" placeholder="Favourite name, e.g. yellow gaming" required />
+              <button class="quiet">Save current colours as favorite</button>
+            </form>
+            <div id="caption-favorites" class="saved-list"></div>
+          </article>
+          <article class="library-card">
+            <h3>Export defaults</h3>
+            <p class="hint">Applied to every exported clip. Audio track 1 is the default microphone and game mix.</p>
+            <form id="export-defaults-form">
+              <label>Clip layout
+                <select id="global-layout">
+                  <option value="original">Original (default)</option>
+                  <option value="portrait_camera">Vertical - camera center</option>
+                  <option value="portrait_game">Vertical - game center</option>
+                  <option value="portrait_split">Vertical - camera top, game bottom</option>
+                </select>
+              </label>
+              <label>Original audio track
+                <select id="global-audio-track">
+                  <option value="1">Track 1 - microphone + game (default)</option>
+                  <option value="2">Track 2</option>
+                  <option value="3">Track 3</option>
+                  <option value="4">Track 4</option>
+                </select>
+              </label>
+              <button>Save export settings</button>
+            </form>
+          </article>
+          <article class="library-card">
+            <h3>Analysis audio sources</h3>
+            <p class="hint">Used for the next analysis or reanalysis. Captions and prompt search always use the selected transcription track.</p>
+            <form id="analysis-audio-form">
+              <label>Analysis mode
+                <select id="analysis-audio-mode">
+                  <option value="single">One track - legacy analysis</option>
+                  <option value="split">Separate microphone and sound tracks</option>
+                </select>
+              </label>
+              <label id="analysis-single-track-wrap">Single track for transcription
+                <select id="analysis-single-track"><option value="1">Track 1</option><option value="2">Track 2</option><option value="3">Track 3</option><option value="4">Track 4</option></select>
+              </label>
+              <div id="analysis-split-options" class="audio-source-options">
+                <label>Only microphone - transcription track
+                  <select id="analysis-microphone-track"><option value="1">Track 1</option><option value="2">Track 2</option><option value="3">Track 3</option><option value="4">Track 4</option></select>
+                </label>
+                <label class="check switch"><input id="analysis-use-all-sounds" type="checkbox" /> Use all sounds for event scoring</label>
+                <label>All sounds track
+                  <select id="analysis-all-sounds-track"><option value="1">Track 1</option><option value="2">Track 2</option><option value="3">Track 3</option><option value="4">Track 4</option></select>
+                </label>
+                <label class="check switch"><input id="analysis-use-game" type="checkbox" /> Use only game sounds for event scoring</label>
+                <label>Only game track
+                  <select id="analysis-game-track"><option value="1">Track 1</option><option value="2">Track 2</option><option value="3">Track 3</option><option value="4">Track 4</option></select>
+                </label>
+              </div>
+              <button>Save analysis audio settings</button>
+            </form>
+          </article>
+        </div>
+        </div>
+        <div id="setup-tab-boss" hidden>
+          <p class="hint">Create one profile for each game or HUD layout. Upload a screenshot with one clear red rectangle around the whole area where the boss name can appear; its position is detected automatically.</p>
+          <article class="library-card boss-card">
+            <h3>Game death profile</h3>
+            <form id="boss-profile-form">
+              <input id="boss-profile-name" placeholder="Game / HUD profile name" required />
+              <label>Death sound sample<input id="boss-death-sound" type="file" accept="audio/*,video/mp4,video/webm" required /></label>
+              <label>Screenshot with red boss-name rectangle<input id="boss-area-image" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required /></label>
+              <label>Recording audio track used for detection
+                <select id="boss-audio-track">
+                  <option value="1">Track 1 - microphone + game</option>
+                  <option value="2">Track 2</option>
+                  <option value="3">Track 3</option>
+                  <option value="4">Track 4</option>
+                </select>
+              </label>
+              <label>Sound match threshold<input id="boss-threshold" type="number" min="0.1" max="0.99" step="0.01" value="0.72" required /></label>
+              <label>Minimum gap (seconds)<input id="boss-gap" type="number" min="1" max="60" step="1" value="4" required /></label>
+              <button>Save game profile</button>
+            </form>
+          </article>
+          <article class="library-card boss-card">
+            <h3>Analyze boss deaths</h3>
+            <form id="boss-report-form">
+              <label>Recording<select id="boss-video" required></select></label>
+              <label>Game profile<select id="boss-profile" required></select></label>
+              <label>Audio track for this report
+                <select id="boss-report-audio-track">
+                  <option value="1">Track 1 - microphone + game</option>
+                  <option value="2">Track 2</option>
+                  <option value="3">Track 3</option>
+                  <option value="4">Track 4</option>
+                </select>
+              </label>
+              <button>Analyze deaths</button>
+            </form>
+            <div id="boss-profiles" class="saved-list"></div>
+            <div id="boss-reports" class="saved-list"></div>
+          </article>
+        </div>
+      </aside>
+
+      <section class="upload">
+        <h2>New recording</h2>
+        <form id="upload-form"><input id="video-file" type="file" accept="video/mp4,video/x-matroska,video/quicktime,video/webm" required /><button>Upload and analyze</button></form>
+        <form id="remote-video-form"><input id="remote-video-url" type="url" placeholder="YouTube video or Twitch VOD URL" required /><button class="quiet">Download link and analyze</button></form>
+        <div id="upload-progress" class="upload-progress" hidden>
+          <div id="upload-progress-label" class="hint">Preparing upload...</div>
+          <div class="progress-track"><div id="upload-progress-fill" class="progress-fill"></div></div>
+        </div>
+        <p class="hint">Paste a public YouTube link or Twitch VOD URL only when you are allowed to download it. The page can be closed after upload or link submission; keep the launcher window open while processing runs.</p>
+      </section>
+
+      <section>
+        <div class="section-title"><div><h2>Recordings</h2><p id="storage-summary" class="hint">Calculating disk usage...</p></div><button class="quiet" id="refresh">Refresh now</button></div>
+        <div id="videos" class="videos"></div>
+      </section>
+
+      <section id="workspace" hidden>
+        <div class="section-title"><h2 id="selected-title">Candidates</h2></div>
+        <div class="search-panel">
+          <label>Tag
+            <select id="tag-search">
+              <option value="">All tags</option>
+              <option value="radość">Radość</option>
+              <option value="złość">Złość</option>
+              <option value="gniew">Gniew</option>
+              <option value="smutek">Smutek</option>
+              <option value="zaskoczenie">Zaskoczenie</option>
+              <option value="humor">Humor</option>
+              <option value="wyrażanie opinii">Wyrażanie opinii</option>
+              <option value="pytanie">Pytanie</option>
+              <option value="rekomendacja">Rekomendacja</option>
+              <option value="reading">Possible reading</option>
+            </select>
+          </label>
+          <label class="check"><input id="hide-reading" type="checkbox" checked /> Hide possible reading</label>
+          <label class="check"><input id="show-duplicates" type="checkbox" /> Show similar alternatives</label>
+          <button class="quiet" id="tag-search-button">Find tag</button>
+          <label>Clip status
+            <select id="rating-search">
+              <option value="">All clips</option>
+              <option value="accepted">Approved clips</option>
+              <option value="unrated">Not reviewed</option>
+              <option value="rejected">Rejected clips</option>
+            </select>
+          </label>
+          <button class="quiet" id="rating-search-button">Filter status</button>
+          <button id="top-clips-button">Show Top 10</button>
+        </div>
+        <p id="selection-summary" class="hint"></p>
+        <div id="segments" class="segments"></div>
+      </section>
+    </main>
+
+    <template id="segment-template">
+      <article class="segment">
+        <div class="time"></div><div class="ranking hint"></div><div class="tags"></div><p class="transcript"></p>
+        <p class="hint clip-select-hint">Click this clip to edit it in the right panel.</p>
+        <div class="actions"><button data-open>Open in full recording</button><button data-rating="accepted">Approve clip</button><button class="quiet" data-rating="rejected">Reject</button><button class="quiet" data-preview>Listen</button><button class="quiet" data-example>Add as reference</button></div>
+      </article>
+    </template>
+    <button id="clip-editor-toggle" class="quiet clip-editor-toggle" aria-controls="clip-editor-sidebar" aria-expanded="false" hidden>Clip editor</button>
+    <aside id="clip-editor-sidebar" class="clip-editor-sidebar" aria-label="Clip editor" aria-hidden="false">
+      <div class="section-title clip-editor-head"><div><h2>Clip editor</h2><p id="clip-editor-title" class="hint">Select a clip to edit it.</p></div><button id="clip-editor-close" class="quiet" aria-label="Hide clip editor">Hide</button></div>
+      <div id="clip-editor-empty" class="hint">Click any candidate card to edit its range, captions, review status and export.</div>
+      <div id="clip-editor-form" hidden>
+        <div class="clip-editor-fields">
+          <label>Start (seconds)<input id="editor-start" type="number" min="0" step="0.1" /></label>
+          <label>End (seconds)<input id="editor-end" type="number" min="0" step="0.1" /></label>
+          <button id="editor-save-range" class="quiet">Save range</button>
+          <label>Caption position
+            <select id="editor-caption-position"><option value="bottom">Bottom</option><option value="middle">Middle</option><option value="top">Top</option></select>
+          </label>
+          <label>Clip status
+            <select id="editor-rating-select"><option value="unrated">Not reviewed</option><option value="accepted">Approved</option><option value="rejected">Rejected</option></select>
+          </label>
+          <label>Reason if rejected
+            <select id="editor-review-reason">
+              <option value="not interesting">Not interesting enough</option>
+              <option value="reading notes">Reading notes / item text</option>
+              <option value="game dialogue">Game dialogue / cutscene</option>
+              <option value="not enough emotion">Not enough emotion</option>
+              <option value="no clear point">No clear point or punchline</option>
+              <option value="bad transcription">Bad transcription</option>
+            </select>
+          </label>
+          <button id="editor-save-rating" class="quiet">Save status</button>
+        </div>
+        <label>Caption text (you can correct the transcription)<textarea id="editor-transcript" rows="5"></textarea></label>
+        <button id="editor-save-transcript" class="quiet">Save caption text</button>
+        <label class="check censor-toggle"><input id="editor-censor-profanity" type="checkbox" /> Mute profanity from mid-word in exported audio and mask it in captions</label>
+        <label>Export file name (optional)<input id="editor-export-name" maxlength="120" placeholder="e.g. funny-reaction-01" /></label>
+        <button id="editor-export" class="quiet">Approve before export</button>
+        <audio id="editor-audio-preview" controls preload="none" hidden></audio>
+      </div>
+    </aside>
+    <dialog id="video-dialog">
+      <div class="dialog-head"><strong id="dialog-title">Full recording</strong><button id="close-dialog" class="quiet">Close</button></div>
+      <video id="full-video" controls preload="metadata"></video>
+      <p id="dialog-transcript" class="hint"></p>
+    </dialog>
+  <script src="/static/app.js?v=20260727-2"></script>
+  </body>
+</html>
