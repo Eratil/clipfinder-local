@@ -8,10 +8,13 @@ server only when it is not already running.
 from __future__ import annotations
 
 import socket
+import os
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 import uvicorn
@@ -41,6 +44,14 @@ def local_server_is_ready() -> bool:
         return False
 
 
+def configure_frozen_data_directory() -> None:
+    """Keep user videos and the database outside an installed application folder."""
+    if not getattr(sys, "frozen", False) or os.environ.get("CLIPFINDER_DATA_DIR"):
+        return
+    local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    os.environ["CLIPFINDER_DATA_DIR"] = str(local_app_data / "ClipFinder" / "data")
+
+
 def port_is_in_use() -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(0.4)
@@ -57,9 +68,11 @@ def start_local_server() -> tuple[uvicorn.Server | None, threading.Thread | None
             "or start ClipFinder's existing launcher first."
         )
 
-    server = uvicorn.Server(
-        uvicorn.Config("app.main:app", host=HOST, port=PORT, log_level="warning", access_log=False)
-    )
+    configure_frozen_data_directory()
+    # Importing directly makes the package visible to PyInstaller's analysis.
+    from app.main import app
+
+    server = uvicorn.Server(uvicorn.Config(app, host=HOST, port=PORT, log_level="warning", access_log=False))
     thread = threading.Thread(target=server.run, name="ClipFinder local server", daemon=True)
     thread.start()
 

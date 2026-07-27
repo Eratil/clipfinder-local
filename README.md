@@ -25,6 +25,18 @@ git push -u origin main
 
 For later backups use `git add .`, `git commit -m "Describe the change"`, then `git push`. Do not add `.env`, `data/` or any video files manually.
 
+## Windows installer beta
+
+`Build-Installer.ps1` creates a Windows x64 installer in `installer-output`. It uses a PyInstaller one-folder build (faster and more reliable than a single self-extracting executable for AI dependencies) and Inno Setup 6 for the installation wizard.
+
+On the build computer, install Inno Setup 6, then run:
+
+```powershell
+.\Build-Installer.ps1 -Version 0.1.0
+```
+
+The installed desktop app stores its recordings, database and exports in `%LOCALAPPDATA%\ClipFinder\data`; updates and uninstalls do not remove that data. The beta installer does not package CUDA, cuDNN, FFmpeg or downloaded AI models. The target computer still needs the supported NVIDIA/CUDA setup and FFmpeg, which must be covered by a separate licence audit before commercial distribution.
+
 ## First-time installation
 
 Requirements: Python 3.11, FFmpeg/FFprobe in PATH and an NVIDIA GPU. GPU transcription additionally requires CUDA 12 cuBLAS and cuDNN 9.
