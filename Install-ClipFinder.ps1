@@ -93,7 +93,7 @@ try {
         Write-Host 'Bez GPU mozesz uruchomic: Install-ClipFinder.cmd -CpuFallback' -ForegroundColor Yellow
     }
 
-    Write-Host "`nGotowe. Uruchom teraz Start-ClipFinder.cmd" -ForegroundColor Green
+    Write-Host "`nGotowe. Uruchom teraz Start-ClipFinder-Desktop.cmd" -ForegroundColor Green
 } catch {
     Write-Host "`nINSTALACJA NIE POWIODLA SIE: $($_.Exception.Message)" -ForegroundColor Red
     exit 1

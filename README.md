@@ -4,9 +4,9 @@ Local app for finding short clips in long MP4 recordings. It uses your NVIDIA GP
 
 ## Start the app
 
-After the one-time installation, double-click `Start-ClipFinder.cmd`. It opens the local app at `http://127.0.0.1:8000`.
+After the one-time installation, double-click `Start-ClipFinder-Desktop.cmd` to open ClipFinder in its own desktop window. The original `Start-ClipFinder.cmd` remains available for diagnostics and opens the local app at `http://127.0.0.1:8000`.
 
-The launcher automatically restarts the web server after a crash. Keep its console window open while an analysis or a reference-folder import is running.
+The original launcher automatically restarts the web server after a crash. The desktop window starts the server itself when needed; close the desktop window only after any analysis or reference-folder import has finished.
 
 ## GitHub backup (recommended)
 

@@ -96,16 +96,18 @@ Nie zmieniaj nazw plikow DLL CUDA 13 ani nie nadpisuj nimi DLL z CUDA 12.
 Po jednorazowej instalacji wystarczy dwukrotnie kliknac:
 
 ```text
-Start-ClipFinder.cmd
+Start-ClipFinder-Desktop.cmd
 ```
 
-Otworzy sie okno PowerShell. Pozostaw je otwarte podczas uploadu, analizy i eksportu. W przegladarce wejdz na:
+ClipFinder otworzy sie w osobnym oknie aplikacji i uruchomi lokalny serwer w tle. Zamykaj okno dopiero po zakonczeniu uploadu, analizy lub eksportu.
+
+Plik `Start-ClipFinder.cmd` pozostaje dostepny do diagnostyki. Otwiera on okno PowerShell oraz wersje przegladarkowa pod adresem:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-Po zmianie kodu aplikacji zamknij cale okno launchera, uruchom `Start-ClipFinder.cmd` ponownie, a potem odswiez strone przez `Ctrl+F5`.
+Po zmianie kodu aplikacji zamknij cale okno ClipFinder i uruchom `Start-ClipFinder-Desktop.cmd` ponownie.
 
 ## 7. Tryb CPU, gdy nie ma NVIDIA lub CUDA
 
