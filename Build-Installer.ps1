@@ -37,7 +37,9 @@ Write-Host 'Building the ClipFinder application folder...' -ForegroundColor Cyan
     --name ClipFinder `
     --add-data "app\static;app\static" `
     --collect-submodules app `
-    --collect-all webview `
+    --hidden-import webview.platforms.winforms `
+    --hidden-import webview.platforms.win32 `
+    --hidden-import clr `
     --collect-all faster_whisper `
     --collect-all ctranslate2 `
     --collect-all sentence_transformers `
