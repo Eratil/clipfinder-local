@@ -63,6 +63,28 @@ def backfill_segment_quality() -> None:
             )
 
 
+def remove_legacy_game_audio_bonus() -> None:
+    """Do not keep old scores where a loud game sound was treated as a reaction."""
+    items = db.rows(
+        """SELECT id, transcript, tags, word_timestamps, start_seconds, end_seconds, quality_signals
+           FROM segments
+           WHERE audio_event_score > 0 AND game_reaction_score=0 AND voice_expression_score=0"""
+    )
+    legacy_labels = {"all-sounds event", "game-audio event"}
+    with db.connection() as con:
+        for item in items:
+            previous_signals = set(json.loads(item.get("quality_signals") or "[]"))
+            if not previous_signals.intersection(legacy_labels):
+                continue
+            tags = json.loads(item.get("tags") or "[]")
+            words = json.loads(item.get("word_timestamps") or "[]")
+            score, signals, reading = assess_clip_quality(item["transcript"], words, item["start_seconds"], item["end_seconds"], tags)
+            con.execute(
+                "UPDATE segments SET quality_score=?, quality_signals=?, reading_likelihood=?, audio_event_score=0 WHERE id=?",
+                (score, json.dumps(signals), reading, item["id"]),
+            )
+
+
 def backfill_duplicate_groups() -> None:
     """Group older candidates once so the compact review list works immediately."""
     for video in db.rows("SELECT DISTINCT video_id FROM segments WHERE embedding IS NOT NULL"):
@@ -78,6 +100,7 @@ def backfill_duplicate_groups() -> None:
 async def lifespan(_: FastAPI):
     db.initialize()
     backfill_segment_quality()
+    remove_legacy_game_audio_bonus()
     backfill_duplicate_groups()
     yield
 
@@ -438,7 +461,7 @@ def update_segment_timing(segment_id: str, body: SegmentTimingUpdate):
         raise HTTPException(500, f"Unable to update captions for the new range: {exc}") from exc
     with db.connection() as con:
         con.execute(
-            "UPDATE segments SET start_seconds=?, end_seconds=?, transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, reading_likelihood=? WHERE id=?",
+            "UPDATE segments SET start_seconds=?, end_seconds=?, transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, reading_likelihood=?, audio_event_score=0, game_reaction_score=0, voice_expression_score=0 WHERE id=?",
             (body.start_seconds, body.end_seconds, transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), reading_likelihood, segment_id),
         )
     (settings.previews_dir / f"{segment_id}.mp3").unlink(missing_ok=True)

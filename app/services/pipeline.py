@@ -129,11 +129,11 @@ def transcribe_clip_range(source: Path, start: float, end: float, audio_track: i
         audio_path.unlink(missing_ok=True)
 
 
-def audio_event_scores(audio_path: Path, candidates: list[dict]) -> list[int]:
-    """Score dynamic non-verbal events from a selected audio track without transcribing it."""
+def audio_energy_windows(audio_path: Path, window_seconds: float = 0.25) -> np.ndarray:
+    """Return a compact RMS timeline used to compare game and microphone timing."""
     with wave.open(str(audio_path), "rb") as handle:
         sample_rate = handle.getframerate()
-        window_frames = max(1, sample_rate // 2)
+        window_frames = max(1, round(sample_rate * window_seconds))
         energies = []
         while True:
             raw = handle.readframes(window_frames)
@@ -141,16 +141,20 @@ def audio_event_scores(audio_path: Path, candidates: list[dict]) -> list[int]:
                 break
             samples = np.frombuffer(raw, dtype="<i2").astype(np.float32)
             energies.append(float(np.sqrt(np.mean(samples * samples))) if len(samples) else 0.0)
+    return np.asarray(energies, dtype=np.float32)
+
+
+def dynamic_audio_scores(energies: np.ndarray, candidates: list[dict], window_seconds: float = 0.25) -> list[int]:
+    """Find unusual energy changes in a track; this alone is not a clip-quality boost."""
     if len(energies) < 3:
         return [0] * len(candidates)
-    values = np.array(energies, dtype=np.float32)
-    baseline, high, peak = np.percentile(values, [55, 88, 98])
+    baseline, high, peak = np.percentile(energies, [55, 88, 98])
     spread = max(1.0, peak - high)
     scores = []
     for candidate in candidates:
-        left = max(0, int(candidate["start"] * 2))
-        right = min(len(values), max(left + 1, int(np.ceil(candidate["end"] * 2))))
-        section = values[left:right]
+        left = max(0, int(candidate["start"] / window_seconds))
+        right = min(len(energies), max(left + 1, int(np.ceil(candidate["end"] / window_seconds))))
+        section = energies[left:right]
         if not len(section):
             scores.append(0)
             continue
@@ -158,6 +162,66 @@ def audio_event_scores(audio_path: Path, candidates: list[dict]) -> list[int]:
         mean_bonus = max(0.0, float(section.mean()) - baseline) / max(1.0, high - baseline)
         scores.append(max(0, min(16, round(peak_bonus * 12 + mean_bonus * 4))))
     return scores
+
+
+def game_reaction_scores(game_energies: np.ndarray, microphone_energies: np.ndarray, candidates: list[dict], window_seconds: float = 0.25) -> list[int]:
+    """Reward a game/stream event only when a stronger microphone response follows it.
+
+    A roar, alert or jumpscare by itself gets no boost. A dynamic game sound must
+    happen first and be followed within three seconds by a clear rise in the
+    microphone track.
+    """
+    if len(game_energies) < 4 or len(microphone_energies) < 4:
+        return [0] * len(candidates)
+    length = min(len(game_energies), len(microphone_energies))
+    game_energies, microphone_energies = game_energies[:length], microphone_energies[:length]
+    _game_base, game_high, game_peak = np.percentile(game_energies, [55, 92, 99])
+    microphone_base, microphone_high, microphone_peak = np.percentile(microphone_energies, [55, 90, 99])
+    game_spread = max(1.0, game_peak - game_high)
+    microphone_spread = max(1.0, microphone_peak - microphone_high)
+    scores: list[int] = []
+    response_limit = max(1, round(3.0 / window_seconds))
+    for candidate in candidates:
+        left = max(0, int(candidate["start"] / window_seconds))
+        right = min(length, max(left + 1, int(np.ceil(candidate["end"] / window_seconds))))
+        game_section = game_energies[left:right]
+        if not len(game_section) or float(game_section.max()) < game_high:
+            scores.append(0)
+            continue
+        best = 0.0
+        # Checking a few strongest events avoids rewarding a loud sound that is
+        # unrelated to a later reaction in the same candidate.
+        event_indices = np.argsort(game_section)[-3:][::-1] + left
+        for event_index in event_indices:
+            event_energy = float(game_energies[event_index])
+            if event_energy < game_high:
+                continue
+            response_start = event_index + 1
+            response_end = min(right, response_start + response_limit)
+            if response_end <= response_start:
+                continue
+            response_peak = float(microphone_energies[response_start:response_end].max())
+            before_start = max(left, event_index - 4)
+            before_level = float(np.median(microphone_energies[before_start:event_index + 1]))
+            if response_peak < microphone_high or response_peak <= before_level * 1.08:
+                continue
+            game_strength = max(0.0, (event_energy - game_high) / game_spread)
+            response_strength = max(0.0, (response_peak - microphone_high) / microphone_spread)
+            rise_strength = max(0.0, (response_peak - before_level) / microphone_spread)
+            best = max(best, game_strength * 5 + response_strength * 7 + rise_strength * 6)
+        scores.append(max(0, min(16, round(best))))
+    return scores
+
+
+def voice_led_content(tags: list[str]) -> bool:
+    """Opinions and humour should prefer expressive delivery over game loudness."""
+    return any(
+        tag in {"humor", "gniew", "zaskoczenie"}
+        or tag.startswith("wyra")
+        or tag.startswith("rado")
+        or tag.startswith("zło")
+        for tag in tags
+    )
 
 
 def visual_interest_scores(video_path: Path, records: list[dict], limit: int = 120) -> dict[str, int]:
@@ -222,7 +286,11 @@ def analyse(video_id: str, report: Progress) -> None:
     boundaries = detect_boundaries(source)
     report(72, "Creating clip candidates")
     candidates = build_candidates(transcript, duration, boundaries)
-    source_scores: list[tuple[str, list[int]]] = []
+    microphone_energies = audio_energy_windows(audio_path)
+    # A single mixed track cannot distinguish a loud game event from the voice.
+    # In that legacy mode we keep audio neutral instead of inventing a reaction.
+    microphone_expression_scores = dynamic_audio_scores(microphone_energies, candidates) if mode == "split" else [0] * len(candidates)
+    event_energies: list[tuple[str, np.ndarray]] = []
     temporary_audio: list[Path] = []
     for label, track in dict(event_tracks).items():
         event_path = audio_path if track == transcript_track else settings.work_dir / f"{video_id}-track{track}-{uuid.uuid4()}.wav"
@@ -230,23 +298,33 @@ def analyse(video_id: str, report: Progress) -> None:
             report(74, f"Reading {label}")
             extract_audio(source, event_path, track, sample_rate=8000)
             temporary_audio.append(event_path)
-        source_scores.append((label, audio_event_scores(event_path, candidates)))
+        event_energies.append((label, audio_energy_windows(event_path)))
+    # Prefer the clean game track. The all-sounds mix is a fallback for users
+    # who only have one combined stream track.
+    reaction_sources = [item for item in event_energies if item[0] == "game-audio event"] or event_energies
+    reaction_scores = [0] * len(candidates)
+    for _label, energies in reaction_sources:
+        reaction_scores = [max(current, incoming) for current, incoming in zip(reaction_scores, game_reaction_scores(energies, microphone_energies, candidates))]
     vectors = embed_texts([item["text"] or "bez wypowiedzi" for item in candidates])
     records: list[dict] = []
     for index, (candidate, vector) in enumerate(zip(candidates, vectors)):
         keywords = [word.strip(".,!?;:").lower() for word in candidate["text"].split() if len(word.strip(".,!?;:")) >= 6][:12]
         tags = infer_tags(candidate["text"], vector)
         quality_score, quality_signals, reading_likelihood = assess_clip_quality(candidate["text"], candidate.get("words", []), candidate["start"], candidate["end"], tags)
+        game_reaction_score = reaction_scores[index]
+        voice_expression_score = microphone_expression_scores[index]
         event_score = 0
-        for label, scores in source_scores:
-            source_score = scores[index]
-            event_score = max(event_score, source_score)
-            if source_score >= 7:
-                quality_score = min(99, quality_score + source_score)
-                quality_signals.append(label)
+        if game_reaction_score >= 7:
+            event_score = game_reaction_score
+            quality_score = min(99, quality_score + min(10, game_reaction_score))
+            quality_signals.append("game sound followed by microphone reaction")
+        elif voice_led_content(tags) and voice_expression_score >= 7:
+            event_score = voice_expression_score
+            quality_score = min(99, quality_score + min(8, voice_expression_score))
+            quality_signals.append("expressive microphone delivery")
         if reading_likelihood >= 0.55:
             tags = list(dict.fromkeys(tags + ["reading"]))
-        records.append({"id": str(uuid.uuid4()), "start": candidate["start"], "end": candidate["end"], "text": candidate["text"], "words": candidate.get("words", []), "vector": vector, "keywords": keywords, "tags": tags, "quality_score": quality_score, "quality_signals": quality_signals, "reading_likelihood": reading_likelihood, "audio_event_score": event_score, "duplicate_group": ""})
+        records.append({"id": str(uuid.uuid4()), "start": candidate["start"], "end": candidate["end"], "text": candidate["text"], "words": candidate.get("words", []), "vector": vector, "keywords": keywords, "tags": tags, "quality_score": quality_score, "quality_signals": quality_signals, "reading_likelihood": reading_likelihood, "audio_event_score": event_score, "game_reaction_score": game_reaction_score, "voice_expression_score": voice_expression_score, "duplicate_group": ""})
     assign_duplicate_groups(records)
     report(82, "Checking visual action in the strongest candidates")
     visual_scores = visual_interest_scores(source, records)
@@ -258,8 +336,8 @@ def analyse(video_id: str, report: Progress) -> None:
         con.execute("DELETE FROM segments WHERE video_id = ?", (video_id,))
         for record in records:
             con.execute(
-                "INSERT INTO segments (id, video_id, start_seconds, end_seconds, transcript, keywords, tags, word_timestamps, embedding, quality_score, quality_signals, reading_likelihood, audio_event_score, vision_score, duplicate_group, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record["id"], video_id, record["start"], record["end"], record["text"], json.dumps(record["keywords"], ensure_ascii=False), json.dumps(record["tags"], ensure_ascii=False), json.dumps(record["words"], ensure_ascii=False), json.dumps(record["vector"]), record["quality_score"], json.dumps(record["quality_signals"]), record["reading_likelihood"], record["audio_event_score"], record["vision_score"], record["duplicate_group"], db.now()),
+                "INSERT INTO segments (id, video_id, start_seconds, end_seconds, transcript, keywords, tags, word_timestamps, embedding, quality_score, quality_signals, reading_likelihood, audio_event_score, game_reaction_score, voice_expression_score, vision_score, duplicate_group, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (record["id"], video_id, record["start"], record["end"], record["text"], json.dumps(record["keywords"], ensure_ascii=False), json.dumps(record["tags"], ensure_ascii=False), json.dumps(record["words"], ensure_ascii=False), json.dumps(record["vector"]), record["quality_score"], json.dumps(record["quality_signals"]), record["reading_likelihood"], record["audio_event_score"], record["game_reaction_score"], record["voice_expression_score"], record["vision_score"], record["duplicate_group"], db.now()),
             )
         con.execute("UPDATE videos SET status='ready', updated_at=? WHERE id=?", (db.now(), video_id))
     audio_path.unlink(missing_ok=True)

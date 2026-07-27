@@ -65,6 +65,8 @@ def initialize() -> None:
                 quality_signals TEXT NOT NULL DEFAULT '[]',
                 reading_likelihood REAL NOT NULL DEFAULT 0,
                 audio_event_score INTEGER NOT NULL DEFAULT 0,
+                game_reaction_score INTEGER NOT NULL DEFAULT 0,
+                voice_expression_score INTEGER NOT NULL DEFAULT 0,
                 vision_score INTEGER NOT NULL DEFAULT 0,
                 duplicate_group TEXT NOT NULL DEFAULT '',
                 censor_profanity INTEGER NOT NULL DEFAULT 0,
@@ -180,6 +182,10 @@ def initialize() -> None:
             con.execute("ALTER TABLE segments ADD COLUMN reading_likelihood REAL NOT NULL DEFAULT 0")
         if "audio_event_score" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN audio_event_score INTEGER NOT NULL DEFAULT 0")
+        if "game_reaction_score" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN game_reaction_score INTEGER NOT NULL DEFAULT 0")
+        if "voice_expression_score" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN voice_expression_score INTEGER NOT NULL DEFAULT 0")
         if "vision_score" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN vision_score INTEGER NOT NULL DEFAULT 0")
         if "duplicate_group" not in columns:

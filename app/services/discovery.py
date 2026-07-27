@@ -69,6 +69,8 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
         strongest_rejection_reason, strongest_rejection = max(rejection_matches.items(), key=lambda item: item[1], default=("", 0.0))
         quality = int(candidate.get("quality_score") or 0)
         audio = int(candidate.get("audio_event_score") or 0)
+        game_reaction = int(candidate.get("game_reaction_score") or 0)
+        voice_expression = int(candidate.get("voice_expression_score") or 0)
         visual = int(candidate.get("vision_score") or 0)
         reading = float(candidate.get("reading_likelihood") or 0)
         tag_bonus = sum(weight for tag, weight in definition["tag_weights"].items() if tag in json.loads(candidate.get("tags") or "[]"))
@@ -88,8 +90,10 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
             reasons.insert(0, f"prompt match {round(max(0, prompt_match) * 100)}%")
         if len(accepted) >= 4 and approval_match >= 0.30:
             reasons.append("matches your approvals")
-        if audio >= 7:
-            reasons.append("strong audio moment")
+        if game_reaction >= 7:
+            reasons.append("game event followed by microphone reaction")
+        elif voice_expression >= 7 and audio >= 7:
+            reasons.append("expressive microphone delivery")
         if visual >= 7:
             reasons.append("visual action")
         if tag_bonus >= 7:
