@@ -64,6 +64,12 @@ On a new Windows computer, the simpler option is to double-click `Install-ClipFi
 6. To use finished clips from another folder, select a collection, enter the full folder path, then choose **Import folder as references**. The app transcribes the reference videos locally and adds their semantic profiles to the collection.
 7. Select a recording and use **Find similar to collection**.
 
+## Chat reaction analysis
+
+After selecting a recording, use **Chat reaction analysis** to import a `.json`, `.csv`, `.tsv` or `.txt` transcript of the live chat. The file must use relative timestamps from the beginning of the recording, for example `01:23:45`; JSON exports using Twitch's `content_offset_seconds` are supported too. Set the expected delay between what happens on stream and the chat response (start with `6` seconds, then correct it if the displayed messages appear too early or too late).
+
+ClipFinder compares the message burst after each spoken clip with the recent background activity of the chat. It boosts only clear bursts, shows message count and distinct chatters in the ranking, and displays a few relevant chat lines below the candidate. Chat content remains in the local application database.
+
 ## Separate microphone and sound analysis
 
 In **Saved setup -> Clip setup -> Analysis audio sources**, choose either the original single-track workflow or split processing. In split mode, captions, text search and prompts use only the microphone track; optional all-sounds and game tracks are scanned for dynamic sound events that improve clip ranking without adding game dialogue to the transcript. The default mapping is Track 1 = all sounds, Track 2 = microphone, Track 3 = game. These settings apply when a recording is newly analyzed or reanalyzed.

@@ -68,11 +68,29 @@ def initialize() -> None:
                 game_reaction_score INTEGER NOT NULL DEFAULT 0,
                 voice_expression_score INTEGER NOT NULL DEFAULT 0,
                 vision_score INTEGER NOT NULL DEFAULT 0,
+                chat_reaction_score INTEGER NOT NULL DEFAULT 0,
+                chat_message_count INTEGER NOT NULL DEFAULT 0,
+                chat_unique_authors INTEGER NOT NULL DEFAULT 0,
+                chat_surge REAL NOT NULL DEFAULT 0,
+                chat_messages TEXT NOT NULL DEFAULT '[]',
                 duplicate_group TEXT NOT NULL DEFAULT '',
                 censor_profanity INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_segments_video_time ON segments(video_id, start_seconds);
+            CREATE TABLE IF NOT EXISTS chat_settings (
+                video_id TEXT PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+                source_name TEXT NOT NULL DEFAULT '',
+                delay_seconds REAL NOT NULL DEFAULT 6,
+                imported_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+                seconds REAL NOT NULL,
+                author TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_video_time ON chat_messages(video_id, seconds);
             CREATE TABLE IF NOT EXISTS collections (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
@@ -188,6 +206,16 @@ def initialize() -> None:
             con.execute("ALTER TABLE segments ADD COLUMN voice_expression_score INTEGER NOT NULL DEFAULT 0")
         if "vision_score" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN vision_score INTEGER NOT NULL DEFAULT 0")
+        if "chat_reaction_score" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN chat_reaction_score INTEGER NOT NULL DEFAULT 0")
+        if "chat_message_count" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN chat_message_count INTEGER NOT NULL DEFAULT 0")
+        if "chat_unique_authors" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN chat_unique_authors INTEGER NOT NULL DEFAULT 0")
+        if "chat_surge" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN chat_surge REAL NOT NULL DEFAULT 0")
+        if "chat_messages" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN chat_messages TEXT NOT NULL DEFAULT '[]'")
         if "duplicate_group" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN duplicate_group TEXT NOT NULL DEFAULT ''")
         video_columns = {item["name"] for item in con.execute("PRAGMA table_info(videos)").fetchall()}
@@ -233,6 +261,7 @@ def serialize_segment(segment: dict) -> dict:
     segment["tags"] = json.loads(segment.get("tags") or "[]")
     segment["word_timestamps"] = json.loads(segment.get("word_timestamps") or "[]")
     segment["quality_signals"] = json.loads(segment.get("quality_signals") or "[]")
+    segment["chat_messages"] = json.loads(segment.get("chat_messages") or "[]")
     segment["censor_profanity"] = bool(segment.get("censor_profanity"))
     segment.pop("embedding", None)
     return segment

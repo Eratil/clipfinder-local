@@ -27,6 +27,10 @@ class SegmentCensorUpdate(BaseModel):
     censor_profanity: bool
 
 
+class ChatDelayUpdate(BaseModel):
+    delay_seconds: float = Field(default=6, ge=0, le=60)
+
+
 class ExampleCreate(BaseModel):
     segment_id: str
 

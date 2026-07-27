@@ -1,4 +1,4 @@
-const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, resultMode: 'all', activeResults: null, previewAudio: null, editingSegment: null, clipEditorOpen: true, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1 }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0 };
+const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, editingSegment: null, clipEditorOpen: true, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1 }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0 };
 const $ = (selector) => document.querySelector(selector);
 const fmt = (seconds) => new Date(seconds * 1000).toISOString().slice(11, 19);
 const clamp = (number) => Math.max(0, Math.min(100, Number(number || 0)));
@@ -93,7 +93,7 @@ async function loadVideos() {
 
 async function selectVideo(video) {
   state.videoId = video.id; state.resultMode = 'all'; state.activeResults = null; state.captionPositions = {}; state.exportNames = {}; clearClipEditor(); $('#workspace').hidden = false; $('#selected-title').textContent = `Candidates: ${video.original_name}`;
-  updateSelectionSummary(); await Promise.all([loadVideos(), loadSegments()]);
+  updateSelectionSummary(); await Promise.all([loadVideos(), loadSegments(), loadChatSummary()]);
 }
 
 async function legacyLoadSegments(custom = null) {
@@ -113,6 +113,7 @@ async function legacyLoadSegments(custom = null) {
     const tags = node.querySelector('.tags');
     for (const tag of segment.tags || []) tags.append(make('span', 'tag', tag));
     node.querySelector('.transcript').textContent = segment.transcript || 'No recognized speech';
+    renderChatReaction(node, segment);
     const startInput = node.querySelector('[data-start]'); const endInput = node.querySelector('[data-end]'); const captionPosition = node.querySelector('[data-caption-position]'); const ratingSelect = node.querySelector('[data-rating-select]'); const reviewReason = node.querySelector('[data-review-reason]'); const transcriptInput = node.querySelector('[data-transcript]'); const censorToggle = node.querySelector('[data-censor-profanity]'); const exportName = node.querySelector('[data-export-name]');
     startInput.value = Number(segment.start_seconds).toFixed(1); endInput.value = Number(segment.end_seconds).toFixed(1);
     for (const reason of state.rejectionReasons) { if (![...reviewReason.options].some((option) => option.value === reason)) { const option = document.createElement('option'); option.value = reason; option.textContent = reason; reviewReason.append(option); } }
@@ -230,6 +231,7 @@ async function loadSegments(custom = null) {
     const tags = node.querySelector('.tags');
     for (const tag of segment.tags || []) tags.append(make('span', 'tag', tag));
     node.querySelector('.transcript').textContent = segment.transcript || 'No recognized speech';
+    renderChatReaction(node, segment);
     node.querySelector('[data-open]').onclick = () => openSegmentInRecording(segment);
     node.querySelectorAll('[data-rating]').forEach((button) => button.onclick = () => { selectClipForEditor(segment); saveSegmentRating(segment, button.dataset.rating).catch((error) => message(error.message, true)); });
     node.querySelector('[data-example]').onclick = async () => { if (!state.collectionId) return message('Choose a reference collection first.', true); await api(`/collections/${state.collectionId}/examples`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({segment_id:segment.id}) }); message('Reference added.'); await refreshLibrary(); };
@@ -244,6 +246,32 @@ async function loadSegments(custom = null) {
 
 async function reloadActiveSegments() {
   await loadSegments(state.resultMode === 'all' ? null : (state.activeResults || []));
+}
+
+function renderChatReaction(node, segment) {
+  const reaction = node.querySelector('.chat-reaction'); const messages = node.querySelector('.chat-messages');
+  const score = Number(segment.chat_reaction_score || 0); const count = Number(segment.chat_message_count || 0); const people = Number(segment.chat_unique_authors || 0); const surge = Number(segment.chat_surge || 0);
+  if (!score || !count) { reaction.hidden = true; messages.hidden = true; return; }
+  const multiplier = surge >= 1.2 ? ` / ${surge.toFixed(1)}x normal activity` : '';
+  reaction.textContent = `Chat reaction ${score}/20 - ${count} messages${people ? ` from ${people} people` : ''}${multiplier}`;
+  reaction.hidden = false;
+  const previews = (segment.chat_messages || []).slice(0, 3).map((item) => `${item.author ? `${item.author}: ` : ''}${item.message}`).filter(Boolean);
+  messages.textContent = previews.join('  |  '); messages.hidden = !previews.length;
+}
+
+function renderChatSummary(summary) {
+  state.chat = summary;
+  const box = $('#chat-summary'); const delay = $('#chat-delay');
+  if (!summary?.available) { box.textContent = 'No chat transcript imported for this recording yet.'; return; }
+  if (document.activeElement !== delay) delay.value = Number(summary.delay_seconds || 0);
+  const authors = summary.unique_authors ? ` / ${summary.unique_authors} named viewers` : '';
+  box.textContent = `${summary.source_name}: ${summary.message_count} messages${authors}. Delay: ${Number(summary.delay_seconds || 0).toFixed(1)} s.`;
+}
+
+async function loadChatSummary() {
+  if (!state.videoId) return;
+  try { renderChatSummary(await api(`/videos/${state.videoId}/chat`)); }
+  catch (error) { $('#chat-summary').textContent = `Chat data unavailable: ${error.message}`; }
 }
 
 async function loadCollections() {
@@ -405,6 +433,37 @@ editorPlayer.onplay = () => { if (state.previewAudio && state.previewAudio !== e
 editorPlayer.onpause = () => { if (state.previewAudio === editorPlayer) state.previewAudio = null; };
 editorPlayer.onended = () => { if (state.previewAudio === editorPlayer) state.previewAudio = null; };
 editorPlayer.onerror = () => message('Audio preview could not be played.', true);
+
+async function uploadChatTranscript(file, delay) {
+  const data = new FormData(); data.append('chat_file', file); data.append('delay_seconds', String(delay));
+  const response = await fetch(`/api/videos/${state.videoId}/chat`, { method:'POST', body:data });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.detail || 'Chat import failed.');
+  return body;
+}
+
+$('#chat-import-form').onsubmit = async (event) => {
+  event.preventDefault();
+  if (!state.videoId) return message('Choose a recording first.', true);
+  const file = $('#chat-file').files[0]; const delay = Number($('#chat-delay').value);
+  if (!file) return message('Choose a chat transcript first.', true);
+  if (!Number.isFinite(delay) || delay < 0 || delay > 60) return message('Enter a chat delay between 0 and 60 seconds.', true);
+  const button = event.target.querySelector('button'); button.disabled = true; button.textContent = 'Importing chat...';
+  try { renderChatSummary(await uploadChatTranscript(file, delay)); event.target.reset(); $('#chat-delay').value = delay; await reloadActiveSegments(); message('Chat imported and candidate scores recalculated.'); }
+  catch (error) { message(error.message, true); }
+  finally { button.disabled = false; button.textContent = 'Import chat and score clips'; }
+};
+
+$('#chat-delay-form').onsubmit = async (event) => {
+  event.preventDefault();
+  if (!state.videoId) return message('Choose a recording first.', true);
+  const delay = Number($('#chat-delay').value);
+  if (!Number.isFinite(delay) || delay < 0 || delay > 60) return message('Enter a chat delay between 0 and 60 seconds.', true);
+  const button = event.target.querySelector('button'); button.disabled = true;
+  try { renderChatSummary(await api(`/videos/${state.videoId}/chat`, { method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({delay_seconds:delay}) })); await reloadActiveSegments(); message('Chat delay saved and candidate scores recalculated.'); }
+  catch (error) { message(error.message, true); }
+  finally { button.disabled = false; }
+};
 
 $('#upload-form').onsubmit = async (event) => { event.preventDefault(); const file = $('#video-file').files[0]; if (!file) return message('Choose a video file first.', true); const submit = event.target.querySelector('button'); submit.disabled = true; setUploadProgress(0, `Preparing ${file.name} for upload...`); try { await uploadVideo(file); setUploadProgress(100, 'Upload complete. Analysis runs in the background.'); message('Upload complete. Analysis runs in the background.'); event.target.reset(); await refreshDashboard(); } catch (error) { setUploadProgress(0, error.message, true); message(error.message, true); } finally { submit.disabled = false; } };
 $('#remote-video-form').onsubmit = async (event) => { event.preventDefault(); const url = $('#remote-video-url').value.trim(); const submit = event.target.querySelector('button'); if (!url) return message('Paste a YouTube or Twitch VOD link first.', true); submit.disabled = true; try { await api('/videos/from-url', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source_url:url}) }); event.target.reset(); message('Download queued. Its progress appears in Recordings.'); await refreshDashboard(); } catch (error) { message(error.message, true); } finally { submit.disabled = false; } };

@@ -26,6 +26,14 @@ select { width:100%; min-height:38px; color:var(--text); background:#111722; bor
 @keyframes action-click { 0% { transform:scale(1); } 35% { transform:scale(.9); background-color:#b0f7df; } 70% { transform:scale(1.06); } 100% { transform:scale(1); } }
 .upload-progress { display:grid; gap:7px; margin-top:12px; }
 .upload-progress.error .progress-fill { background:var(--danger); }
+.chat-panel { display:grid; gap:10px; margin:18px 0; padding:16px 18px; background:var(--panel); border:1px solid var(--line); border-radius:12px; }
+.chat-panel h3 { margin:0; }
+.chat-panel p { margin:4px 0 0; }
+.chat-panel form { margin:0; }
+.chat-delay-form { align-items:center; }
+.chat-delay-form #chat-summary { flex:1 1 260px; }
+.chat-reaction { margin-top:8px; color:var(--accent); font-weight:700; }
+.chat-messages { margin:4px 0 0 !important; font-style:italic; overflow-wrap:anywhere; }
 .setup-toggle { position:fixed; left:18px; bottom:18px; z-index:30; box-shadow:0 8px 26px rgba(0,0,0,.34); }
 .setup-sidebar { position:fixed; z-index:40; inset:0 auto 0 0; width:min(450px,92vw); overflow-y:auto; padding:22px; background:var(--panel); border-right:1px solid var(--line); box-shadow:12px 0 35px rgba(0,0,0,.42); transform:translateX(-105%); transition:transform .24s ease; }
 .setup-sidebar.open { transform:translateX(0); }

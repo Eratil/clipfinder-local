@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ClipFinder Local</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260727-3" />
+    <link rel="stylesheet" href="/static/style.css?v=20260728-1" />
   </head>
   <body>
     <main>
@@ -151,6 +151,18 @@
 
       <section id="workspace" hidden>
         <div class="section-title"><h2 id="selected-title">Candidates</h2></div>
+        <section class="chat-panel">
+          <div><h3>Chat reaction analysis</h3><p class="hint">Import a chat transcript with timestamps from the start of the recording. Messages are scored after your clip, using the delay below.</p></div>
+          <form id="chat-import-form">
+            <label>Chat transcript (.json, .csv, .tsv or .txt)<input id="chat-file" type="file" accept=".json,.csv,.tsv,.txt,application/json,text/csv,text/plain" required /></label>
+            <label>Expected chat delay (seconds)<input id="chat-delay" type="number" min="0" max="60" step="0.5" value="6" /></label>
+            <button>Import chat and score clips</button>
+          </form>
+          <form id="chat-delay-form" class="chat-delay-form">
+            <button class="quiet">Save delay and recalculate</button>
+            <div id="chat-summary" class="hint">Choose a recording to import its chat transcript.</div>
+          </form>
+        </section>
         <div class="search-panel">
           <label>Tag
             <select id="tag-search">
@@ -188,7 +200,7 @@
 
     <template id="segment-template">
       <article class="segment">
-        <div class="time"></div><div class="ranking hint"></div><div class="tags"></div><p class="transcript"></p>
+        <div class="time"></div><div class="ranking hint"></div><div class="tags"></div><p class="transcript"></p><div class="chat-reaction hint" hidden></div><p class="chat-messages hint" hidden></p>
         <p class="hint clip-select-hint">Click this clip to edit it in the right panel.</p>
         <div class="actions"><button data-open>Open in full recording</button><button data-rating="accepted">Approve clip</button><button class="quiet" data-rating="rejected">Reject</button><button class="quiet" data-preview>Listen</button><button class="quiet" data-example>Add as reference</button></div>
       </article>
@@ -233,6 +245,6 @@
       <video id="full-video" controls preload="metadata"></video>
       <p id="dialog-transcript" class="hint"></p>
     </dialog>
-    <script src="/static/app.js?v=20260727-3"></script>
+    <script src="/static/app.js?v=20260728-1"></script>
   </body>
 </html>

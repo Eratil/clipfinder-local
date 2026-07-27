@@ -16,6 +16,7 @@ from app.models import (
     CaptionDefaultsUpdate,
     CaptionFavoriteCreate,
     AnalysisAudioDefaultsUpdate,
+    ChatDelayUpdate,
     DiscoveryDefaultsUpdate,
     CollectionCreate,
     DescriptionSearch,
@@ -33,6 +34,7 @@ from app.models import (
     SimilaritySearch,
 )
 from app.services.embeddings import cosine, embed_texts
+from app.services.chat import apply_chat_reactions, chat_summary, import_chat, update_chat_delay
 from app.services.discovery import (
     active_profile,
     assign_duplicate_groups,
@@ -425,6 +427,40 @@ def video_segments(video_id: str, q: str = "", rating: str = "", tag: str = "", 
     return [db.serialize_segment(item) for item in ranked]
 
 
+@app.get("/api/videos/{video_id}/chat")
+def video_chat_summary(video_id: str):
+    if not db.row("SELECT id FROM videos WHERE id=?", (video_id,)):
+        not_found("Video not found")
+    return chat_summary(video_id)
+
+
+@app.post("/api/videos/{video_id}/chat")
+async def upload_video_chat(video_id: str, chat_file: UploadFile = File(...), delay_seconds: float = Form(6)):
+    if not db.row("SELECT id FROM videos WHERE id=?", (video_id,)):
+        not_found("Video not found")
+    if not 0 <= delay_seconds <= 60:
+        raise HTTPException(400, "Chat delay must be between 0 and 60 seconds.")
+    raw = await chat_file.read()
+    if not raw:
+        raise HTTPException(400, "The chat file is empty.")
+    if len(raw) > 50 * 1024 * 1024:
+        raise HTTPException(400, "The chat file is too large (maximum 50 MB).")
+    try:
+        return import_chat(video_id, chat_file.filename or "chat.txt", raw, delay_seconds)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.patch("/api/videos/{video_id}/chat")
+def update_video_chat_delay(video_id: str, body: ChatDelayUpdate):
+    if not db.row("SELECT id FROM videos WHERE id=?", (video_id,)):
+        not_found("Video not found")
+    try:
+        return update_chat_delay(video_id, body.delay_seconds)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.patch("/api/segments/{segment_id}")
 def rate_segment(segment_id: str, body: RatingUpdate):
     with db.connection() as con:
@@ -464,6 +500,7 @@ def update_segment_timing(segment_id: str, body: SegmentTimingUpdate):
             "UPDATE segments SET start_seconds=?, end_seconds=?, transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, reading_likelihood=?, audio_event_score=0, game_reaction_score=0, voice_expression_score=0 WHERE id=?",
             (body.start_seconds, body.end_seconds, transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), reading_likelihood, segment_id),
         )
+    apply_chat_reactions(segment["video_id"])
     (settings.previews_dir / f"{segment_id}.mp3").unlink(missing_ok=True)
     updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
     return db.serialize_segment(updated)

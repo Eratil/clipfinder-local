@@ -14,6 +14,7 @@ from app.services.discovery import assign_duplicate_groups
 from app.services.media import duration_seconds, extract_audio, extract_audio_range
 from app.services.scenes import detect_boundaries
 from app.services.tagging import assess_clip_quality, infer_tags
+from app.services.chat import apply_chat_reactions
 
 Progress = Callable[[int, str], None]
 _transcription_model = None
@@ -340,6 +341,9 @@ def analyse(video_id: str, report: Progress) -> None:
                 (record["id"], video_id, record["start"], record["end"], record["text"], json.dumps(record["keywords"], ensure_ascii=False), json.dumps(record["tags"], ensure_ascii=False), json.dumps(record["words"], ensure_ascii=False), json.dumps(record["vector"]), record["quality_score"], json.dumps(record["quality_signals"]), record["reading_likelihood"], record["audio_event_score"], record["game_reaction_score"], record["voice_expression_score"], record["vision_score"], record["duplicate_group"], db.now()),
             )
         con.execute("UPDATE videos SET status='ready', updated_at=? WHERE id=?", (db.now(), video_id))
+    # A chat transcript may have been imported before a reanalysis. Reapply it
+    # after replacing segments so its delayed reaction score is never stale.
+    apply_chat_reactions(video_id)
     audio_path.unlink(missing_ok=True)
     for path in temporary_audio:
         path.unlink(missing_ok=True)

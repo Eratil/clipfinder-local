@@ -72,9 +72,12 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
         game_reaction = int(candidate.get("game_reaction_score") or 0)
         voice_expression = int(candidate.get("voice_expression_score") or 0)
         visual = int(candidate.get("vision_score") or 0)
+        chat = int(candidate.get("chat_reaction_score") or 0)
+        chat_messages = int(candidate.get("chat_message_count") or 0)
+        chat_authors = int(candidate.get("chat_unique_authors") or 0)
         reading = float(candidate.get("reading_likelihood") or 0)
         tag_bonus = sum(weight for tag, weight in definition["tag_weights"].items() if tag in json.loads(candidate.get("tags") or "[]"))
-        score = 22 + quality * 0.46 + audio * 0.75 + visual * 0.65 + tag_bonus - reading * 28
+        score = 22 + quality * 0.46 + audio * 0.75 + visual * 0.65 + chat * 0.85 + tag_bonus - reading * 28
         if reference:
             score += prompt_match * 27
         if len(accepted):
@@ -96,6 +99,9 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
             reasons.append("expressive microphone delivery")
         if visual >= 7:
             reasons.append("visual action")
+        if chat >= 7:
+            people = f" / {chat_authors} viewers" if chat_authors else ""
+            reasons.append(f"chat reacted: {chat_messages} messages{people}")
         if tag_bonus >= 7:
             reasons.append("matches active content profile")
         if strongest_rejection >= 0.42:
