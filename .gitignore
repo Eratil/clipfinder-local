@@ -17,6 +17,10 @@ installer-output/
 *.sqlite3
 *.db
 
+# Temporary source files created while preparing app icons
+assets/*-chroma.png
+assets/*-transparent.png
+
 # Local media: recordings, previews, exports and test captures can be very large
 *.mp4
 *.mkv
