@@ -56,12 +56,6 @@ class RemoteVideoCreate(BaseModel):
     source_url: str = Field(min_length=10, max_length=2000)
 
 
-class BossReportCreate(BaseModel):
-    video_id: str
-    profile_id: str
-    audio_track: int = Field(default=1, ge=1, le=4)
-
-
 class ExportRequest(BaseModel):
     lead_in_seconds: float = Field(default=0, ge=0, le=10)
     lead_out_seconds: float = Field(default=0, ge=0, le=10)

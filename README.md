@@ -52,12 +52,6 @@ On a new Windows computer, the simpler option is to double-click `Install-ClipFi
 6. To use finished clips from another folder, select a collection, enter the full folder path, then choose **Import folder as references**. The app transcribes the reference videos locally and adds their semantic profiles to the collection.
 7. Select a recording and use **Find similar to collection**.
 
-## Boss-death report for Soulslikes
-
-In **Saved setup -> Boss deaths**, save a profile once for every game or HUD layout. Add a short (0.25-8 seconds), clean sample of the death sound and a game screenshot with one clear red rectangle around the entire area where the boss name can appear. The app detects that rectangle automatically and stores it as a resolution-independent crop.
-
-Choose the recording audio track that has the clean game sound in the profile or directly before **Analyze deaths** (for example, a separate track without background music). The app finds matches in that selected track, reads the boss label from a frame immediately before each match, and produces a downloadable CSV. Its first rows are the death count per boss; the later rows list every detected death with its timecode and sound-match score. The first run can download EasyOCR's local recognition model.
-
 ## Separate microphone and sound analysis
 
 In **Saved setup -> Clip setup -> Analysis audio sources**, choose either the original single-track workflow or split processing. In split mode, captions, text search and prompts use only the microphone track; optional all-sounds and game tracks are scanned for dynamic sound events that improve clip ranking without adding game dialogue to the transcript. The default mapping is Track 1 = all sounds, Track 2 = microphone, Track 3 = game. These settings apply when a recording is newly analyzed or reanalyzed.

@@ -1,4 +1,4 @@
-const state = { videoId: null, collectionId: null, collectionName: '', videos: [], bossProfiles: [], bossProfileId: '', rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, resultMode: 'all', activeResults: null, previewAudio: null, editingSegment: null, clipEditorOpen: true, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1 }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0 };
+const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, resultMode: 'all', activeResults: null, previewAudio: null, editingSegment: null, clipEditorOpen: true, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1 }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0 };
 const $ = (selector) => document.querySelector(selector);
 const fmt = (seconds) => new Date(seconds * 1000).toISOString().slice(11, 19);
 const clamp = (number) => Math.max(0, Math.min(100, Number(number || 0)));
@@ -79,7 +79,6 @@ function setClipEditorOpen(open) {
 async function loadVideos() {
   const [videos, storage] = await Promise.all([api('/videos'), api('/storage')]); state.videos = videos; const box = $('#videos'); box.replaceChildren();
   $('#storage-summary').textContent = `Source recordings: ${bytes(storage.video_bytes)} (${storage.video_count}) / exported clips: ${bytes(storage.clip_bytes)} (${storage.clip_count})`;
-  renderBossVideoOptions();
   if (!videos.length) { box.append(make('p', 'hint', 'No recordings yet.')); return; }
   for (const video of videos) {
     const card = make('article', `video ${video.status} ${state.videoId === video.id ? 'selected' : ''}`);
@@ -346,59 +345,6 @@ function rememberAnalysisAudio() {
   updateAnalysisAudioModeUi();
 }
 
-function renderBossVideoOptions() {
-  const select = $('#boss-video'); if (!select) return;
-  const previous = select.value; select.replaceChildren();
-  for (const video of state.videos) {
-    if (!['ready', 'processing', 'queued'].includes(video.status)) continue;
-    const option = document.createElement('option'); option.value = video.id; option.textContent = video.original_name; select.append(option);
-  }
-  if ([...select.options].some((option) => option.value === previous)) select.value = previous;
-  else if (state.videoId && [...select.options].some((option) => option.value === state.videoId)) select.value = state.videoId;
-  updateBossReportAvailability();
-}
-
-function updateBossReportAvailability() {
-  const form = $('#boss-report-form');
-  if (!form) return;
-  form.querySelector('button').disabled = !state.bossProfiles.length || !$('#boss-video').options.length;
-}
-
-function applyBossProfileAudioDefault() {
-  const profile = state.bossProfiles.find((item) => item.id === $('#boss-profile').value);
-  const track = $('#boss-report-audio-track');
-  if (profile) { track.value = String(profile.audio_track || 1); track.dataset.profileId = profile.id; }
-}
-
-async function loadBossData() {
-  const [profiles, reports] = await Promise.all([api('/boss-profiles'), api('/boss-reports')]);
-  state.bossProfiles = profiles;
-  if (state.bossProfileId && !profiles.some((profile) => profile.id === state.bossProfileId)) state.bossProfileId = '';
-  const profileSelect = $('#boss-profile'); const previous = profileSelect.value; profileSelect.replaceChildren();
-  for (const profile of profiles) {
-    const option = document.createElement('option'); option.value = profile.id; option.textContent = profile.name; profileSelect.append(option);
-  }
-  if ([...profileSelect.options].some((option) => option.value === previous)) profileSelect.value = previous;
-  else if (state.bossProfileId) profileSelect.value = state.bossProfileId;
-  else if (profileSelect.options.length) profileSelect.selectedIndex = 0;
-  profileSelect.onchange = applyBossProfileAudioDefault;
-  if ($('#boss-report-audio-track').dataset.profileId !== profileSelect.value) applyBossProfileAudioDefault();
-  const profilesBox = $('#boss-profiles'); profilesBox.replaceChildren();
-  for (const profile of profiles) {
-    const button = make('button', `collection ${state.bossProfileId === profile.id ? 'selected' : ''}`, `${profile.name} (track ${profile.audio_track || 1}, threshold ${profile.threshold})`);
-    button.onclick = () => { state.bossProfileId = profile.id; profileSelect.value = profile.id; applyBossProfileAudioDefault(); loadBossData(); };
-    profilesBox.append(button);
-  }
-  const reportsBox = $('#boss-reports'); reportsBox.replaceChildren();
-  for (const report of reports) {
-    const row = make('div', 'source-row'); row.append(make('strong', '', `${report.profile_name}: ${report.event_count} deaths`), make('p', '', `${report.original_name} / track ${report.audio_track || 1} / ${report.state} (${clamp(report.progress)}%): ${report.message}`));
-    if (report.state === 'completed' && report.result_path) { const download = make('button', 'quiet', 'Download CSV'); download.onclick = () => { window.location.href = `/api/boss-reports/${report.id}/download`; }; row.append(download); }
-    reportsBox.append(row);
-  }
-  renderBossVideoOptions();
-  updateBossReportAvailability();
-}
-
 async function loadReferenceSources() {
   const sources = await api('/reference-sources'); const box = $('#reference-sources'); box.replaceChildren();
   for (const source of sources) {
@@ -416,7 +362,7 @@ async function loadImportStatus() {
 }
 
 async function loadRejectionReasons() { state.rejectionReasons = (await api('/rejection-reasons')).map((item) => item.reason); const box = $('#saved-rejection-reasons'); box.replaceChildren(); for (const reason of state.rejectionReasons) box.append(make('div', 'hint', reason)); if (state.editingSegment) addRejectionReasons($('#editor-review-reason')); }
-async function refreshLibrary() { await Promise.all([loadCollections(), loadPrompts(), loadReferenceSources(), loadCaptionSettings(), loadExportSettings(), loadAnalysisAudioSettings(), loadDiscoverySettings(), loadBossData(), loadRejectionReasons()]); if (state.collectionId) await loadImportStatus(); }
+async function refreshLibrary() { await Promise.all([loadCollections(), loadPrompts(), loadReferenceSources(), loadCaptionSettings(), loadExportSettings(), loadAnalysisAudioSettings(), loadDiscoverySettings(), loadRejectionReasons()]); if (state.collectionId) await loadImportStatus(); }
 async function refreshDashboard() {
   try { await Promise.all([loadVideos(), refreshLibrary()]); const current = state.videos.find((video) => video.id === state.videoId); const editing = document.activeElement?.matches('input, textarea, select'); if (current?.status === 'ready' && state.resultMode === 'all' && !state.previewAudio && !editing) await loadSegments(); if (Date.now() >= state.statusErrorUntil) message('Local API online'); } catch (error) { message(`Reconnecting to local API: ${error.message}`, true); }
 }
@@ -462,8 +408,6 @@ editorPlayer.onerror = () => message('Audio preview could not be played.', true)
 
 $('#upload-form').onsubmit = async (event) => { event.preventDefault(); const file = $('#video-file').files[0]; if (!file) return message('Choose a video file first.', true); const submit = event.target.querySelector('button'); submit.disabled = true; setUploadProgress(0, `Preparing ${file.name} for upload...`); try { await uploadVideo(file); setUploadProgress(100, 'Upload complete. Analysis runs in the background.'); message('Upload complete. Analysis runs in the background.'); event.target.reset(); await refreshDashboard(); } catch (error) { setUploadProgress(0, error.message, true); message(error.message, true); } finally { submit.disabled = false; } };
 $('#remote-video-form').onsubmit = async (event) => { event.preventDefault(); const url = $('#remote-video-url').value.trim(); const submit = event.target.querySelector('button'); if (!url) return message('Paste a YouTube or Twitch VOD link first.', true); submit.disabled = true; try { await api('/videos/from-url', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source_url:url}) }); event.target.reset(); message('Download queued. Its progress appears in Recordings.'); await refreshDashboard(); } catch (error) { message(error.message, true); } finally { submit.disabled = false; } };
-$('#boss-profile-form').onsubmit = async (event) => { event.preventDefault(); const sound = $('#boss-death-sound').files[0]; const areaImage = $('#boss-area-image').files[0]; if (!sound || !areaImage) return message('Choose a death-sound sample and a screenshot with a red boss-name rectangle.', true); const submit = event.target.querySelector('button'); submit.disabled = true; const data = new FormData(); data.append('name', $('#boss-profile-name').value); data.append('death_sound', sound); data.append('boss_area_image', areaImage); for (const [field, input] of [['threshold', '#boss-threshold'], ['minimum_gap_seconds', '#boss-gap'], ['audio_track', '#boss-audio-track']]) data.append(field, $(input).value); try { const response = await fetch('/api/boss-profiles', { method:'POST', body:data }); if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || 'Could not save boss profile.'); const profile = await response.json(); state.bossProfileId = profile.id; event.target.reset(); await loadBossData(); message(`Boss profile saved. Name area: ${profile.crop_x}% / ${profile.crop_y}% / ${profile.crop_width}% / ${profile.crop_height}%.`); } catch (error) { message(error.message, true); } finally { submit.disabled = false; } };
-$('#boss-report-form').onsubmit = async (event) => { event.preventDefault(); const profile_id = $('#boss-profile').value; const video_id = $('#boss-video').value; const audio_track = Number($('#boss-report-audio-track').value); if (!profile_id || !video_id) return message('Choose a recording and a boss profile.', true); const submit = event.target.querySelector('button'); submit.disabled = true; try { await api('/boss-reports', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({profile_id, video_id, audio_track}) }); message('Boss-death analysis queued. Progress appears in the Boss deaths tab.'); await loadBossData(); } catch (error) { message(error.message, true); } finally { submit.disabled = false; } };
 $('#rejection-reason-form').onsubmit = async (event) => { event.preventDefault(); const input = $('#new-rejection-reason'); const reason = input.value.trim(); if (!reason) return message('Enter a custom rejection reason first.', true); const button = $('#save-rejection-reason'); button.disabled = true; try { const saved = await api('/rejection-reasons', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({reason}) }); input.value = ''; await loadRejectionReasons(); document.querySelectorAll('[data-review-reason]').forEach((select) => { if (![...select.options].some((option) => option.value === saved.reason)) { const option = document.createElement('option'); option.value = saved.reason; option.textContent = saved.reason; select.append(option); } }); message(`Custom rejection reason saved: ${saved.reason}`); } catch (error) { message(error.message, true); } finally { button.disabled = false; } };
 $('#collection-form').onsubmit = async (event) => { event.preventDefault(); try { const collection = await api('/collections', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:$('#collection-name').value})}); state.collectionId = collection.id; state.collectionName = collection.name; event.target.reset(); await refreshLibrary(); } catch (error) { message(error.message, true); } };
 $('#prompt-form').onsubmit = async (event) => { event.preventDefault(); try { const prompt = await api('/prompts', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:$('#prompt-name').value, prompt:$('#prompt-text').value}) }); $('#active-prompt').value = prompt.prompt; event.target.reset(); updateSelectionSummary(); await loadPrompts(); } catch (error) { message(error.message, true); } };
@@ -506,8 +450,6 @@ $('#setup-close').onclick = () => setSetupSidebar(false);
 $('#clip-editor-close').onclick = () => setClipEditorOpen(false);
 $('#clip-editor-toggle').onclick = () => setClipEditorOpen(true);
 try { setClipEditorOpen(localStorage.getItem('clipfinder-clip-editor-open') !== 'false'); } catch { setClipEditorOpen(true); }
-function setSetupTab(tab) { $('#setup-tab-clips').hidden = tab !== 'clips'; $('#setup-tab-boss').hidden = tab !== 'boss'; document.querySelectorAll('[data-setup-tab]').forEach((button) => button.classList.toggle('selected', button.dataset.setupTab === tab)); }
-document.querySelectorAll('[data-setup-tab]').forEach((button) => button.onclick = () => setSetupTab(button.dataset.setupTab));
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') setSetupSidebar(false); });
 $('#close-dialog').onclick = () => { $('#full-video').pause(); $('#video-dialog').close(); };
 api('/health').then(refreshDashboard).catch(() => message('Local API unavailable', true)); setInterval(refreshDashboard, 4000);

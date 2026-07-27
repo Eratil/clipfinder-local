@@ -139,19 +139,7 @@ Trzy pionowe uklady zostaly przygotowane pod nagrania 1920x1080, w ktorych kamer
 
 Na innym kanale lub przy innym ukladzie sceny OBS aplikacja bedzie dzialac, ale kadrowanie kamery i gry moze wymagac dostrojenia w kodzie.
 
-## 10. Raport zgonow bossow (Soulslike)
-
-W menu **Saved setup -> Boss deaths** dodaj profil dla danej gry lub ukladu HUD:
-
-1. Przygotuj czysta probke dzwieku smierci, najlepiej 0,25-8 sekund (WAV, MP3 albo krotki wycinek MP4).
-2. Wybierz sciezke audio nagrania, na ktorej slychac gre bez muzyki w tle. To ustawienie jest zapamietywane w profilu jako domyslne, ale mozna je tez zmienic przy uruchamianiu konkretnego raportu.
-3. Ustaw prog dopasowania. Zacznij od `0.72`; podnies go, jesli raport liczy falszywe zgony, albo obniz, jezeli omija prawdziwe.
-4. Dodaj screenshot z gry, na ktorym rysujesz jeden wyrazny czerwony prostokat obejmujacy caly obszar, w ktorym moze pojawic sie nazwa bossa. Program sam odczyta ten obszar; ustawienie zapisuje sie w profilu, wiec robisz je tylko raz dla danej gry/HUD.
-5. Wybierz nagranie oraz profil i kliknij **Analyze deaths**. Analiza korzysta z zapisanej sciezki audio, odczytuje nazwe bossa z klatki tuz przed dzwiekiem smierci i tworzy plik CSV.
-
-Pobrany CSV zawiera najpierw podsumowanie: nazwa bossa i liczba zgonow, a nizej wszystkie wykryte zdarzenia z timecodem oraz wynikiem dopasowania dzwieku. Przy pierwszym uzyciu OCR moze pobrac jednokrotnie lokalny model rozpoznawania tekstu, wiec potrzebny jest Internet.
-
-## 11. Najczestsze problemy
+## 10. Najczestsze problemy
 
 | Problem | Rozwiazanie |
 | --- | --- |

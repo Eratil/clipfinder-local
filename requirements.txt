@@ -8,4 +8,3 @@ scenedetect[opencv]==0.6.6
 numpy==2.1.3
 yt-dlp
 scipy==1.14.1
-easyocr==1.7.2

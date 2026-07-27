@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ClipFinder Local</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260727-2" />
+    <link rel="stylesheet" href="/static/style.css?v=20260727-3" />
   </head>
   <body>
     <main>
@@ -16,8 +16,6 @@
       <button id="setup-toggle" class="quiet setup-toggle" aria-controls="setup-sidebar" aria-expanded="false">Saved setup</button>
       <aside id="setup-sidebar" class="setup-sidebar" aria-label="Saved setup" aria-hidden="true">
         <div class="section-title setup-sidebar-head"><div><h2>Saved setup</h2><p class="hint">Prompts, reference collections, captions, and text search - available at any time.</p></div><button id="setup-close" class="quiet" aria-label="Hide saved setup">Hide</button></div>
-        <div class="setup-tabs"><button class="quiet selected" data-setup-tab="clips">Clip setup</button><button class="quiet" data-setup-tab="boss">Boss deaths</button></div>
-        <div id="setup-tab-clips">
         <div class="sidebar-search">
           <label>Exact text search<input id="search" placeholder="e.g. giveaway, important announcement" /></label>
           <button class="quiet" id="search-button">Find text</button>
@@ -133,47 +131,6 @@
             </form>
           </article>
         </div>
-        </div>
-        <div id="setup-tab-boss" hidden>
-          <p class="hint">Create one profile for each game or HUD layout. Upload a screenshot with one clear red rectangle around the whole area where the boss name can appear; its position is detected automatically.</p>
-          <article class="library-card boss-card">
-            <h3>Game death profile</h3>
-            <form id="boss-profile-form">
-              <input id="boss-profile-name" placeholder="Game / HUD profile name" required />
-              <label>Death sound sample<input id="boss-death-sound" type="file" accept="audio/*,video/mp4,video/webm" required /></label>
-              <label>Screenshot with red boss-name rectangle<input id="boss-area-image" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required /></label>
-              <label>Recording audio track used for detection
-                <select id="boss-audio-track">
-                  <option value="1">Track 1 - microphone + game</option>
-                  <option value="2">Track 2</option>
-                  <option value="3">Track 3</option>
-                  <option value="4">Track 4</option>
-                </select>
-              </label>
-              <label>Sound match threshold<input id="boss-threshold" type="number" min="0.1" max="0.99" step="0.01" value="0.72" required /></label>
-              <label>Minimum gap (seconds)<input id="boss-gap" type="number" min="1" max="60" step="1" value="4" required /></label>
-              <button>Save game profile</button>
-            </form>
-          </article>
-          <article class="library-card boss-card">
-            <h3>Analyze boss deaths</h3>
-            <form id="boss-report-form">
-              <label>Recording<select id="boss-video" required></select></label>
-              <label>Game profile<select id="boss-profile" required></select></label>
-              <label>Audio track for this report
-                <select id="boss-report-audio-track">
-                  <option value="1">Track 1 - microphone + game</option>
-                  <option value="2">Track 2</option>
-                  <option value="3">Track 3</option>
-                  <option value="4">Track 4</option>
-                </select>
-              </label>
-              <button>Analyze deaths</button>
-            </form>
-            <div id="boss-profiles" class="saved-list"></div>
-            <div id="boss-reports" class="saved-list"></div>
-          </article>
-        </div>
       </aside>
 
       <section class="upload">
@@ -276,6 +233,6 @@
       <video id="full-video" controls preload="metadata"></video>
       <p id="dialog-transcript" class="hint"></p>
     </dialog>
-  <script src="/static/app.js?v=20260727-2"></script>
+    <script src="/static/app.js?v=20260727-3"></script>
   </body>
 </html>

@@ -161,33 +161,6 @@ def initialize() -> None:
                 active_profile TEXT NOT NULL DEFAULT 'general',
                 updated_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS boss_profiles (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                sound_path TEXT NOT NULL,
-                crop_x REAL NOT NULL DEFAULT 10,
-                crop_y REAL NOT NULL DEFAULT 74,
-                crop_width REAL NOT NULL DEFAULT 80,
-                crop_height REAL NOT NULL DEFAULT 16,
-                threshold REAL NOT NULL DEFAULT 0.72,
-                minimum_gap_seconds REAL NOT NULL DEFAULT 4,
-                audio_track INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS boss_reports (
-                id TEXT PRIMARY KEY,
-                video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
-                profile_id TEXT NOT NULL REFERENCES boss_profiles(id) ON DELETE CASCADE,
-                state TEXT NOT NULL,
-                progress INTEGER NOT NULL DEFAULT 0,
-                message TEXT NOT NULL DEFAULT '',
-                audio_track INTEGER NOT NULL DEFAULT 1,
-                result_path TEXT,
-                event_count INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
             """
         )
         columns = {item["name"] for item in con.execute("PRAGMA table_info(segments)").fetchall()}
@@ -218,12 +191,6 @@ def initialize() -> None:
             con.execute("ALTER TABLE videos ADD COLUMN transcript_audio_track INTEGER NOT NULL DEFAULT 1")
         if "audio_analysis_mode" not in video_columns:
             con.execute("ALTER TABLE videos ADD COLUMN audio_analysis_mode TEXT NOT NULL DEFAULT 'single'")
-        boss_profile_columns = {item["name"] for item in con.execute("PRAGMA table_info(boss_profiles)").fetchall()}
-        if "audio_track" not in boss_profile_columns:
-            con.execute("ALTER TABLE boss_profiles ADD COLUMN audio_track INTEGER NOT NULL DEFAULT 1")
-        boss_report_columns = {item["name"] for item in con.execute("PRAGMA table_info(boss_reports)").fetchall()}
-        if "audio_track" not in boss_report_columns:
-            con.execute("ALTER TABLE boss_reports ADD COLUMN audio_track INTEGER NOT NULL DEFAULT 1")
         con.execute(
             "INSERT OR IGNORE INTO caption_defaults (id, captions_preset, base_color, active_color, updated_at) VALUES (1, 'highlight', '#FFFFFF', '#FFFF00', ?)",
             (now(),),
@@ -243,7 +210,6 @@ def initialize() -> None:
         con.execute("UPDATE jobs SET state='interrupted', message='Server was restarted', updated_at=? WHERE state IN ('queued', 'running')", (now(),))
         con.execute("UPDATE videos SET status='interrupted', updated_at=? WHERE status IN ('queued', 'processing')", (now(),))
         con.execute("UPDATE reference_imports SET state='interrupted', message='Server was restarted', updated_at=? WHERE state IN ('queued', 'running')", (now(),))
-        con.execute("UPDATE boss_reports SET state='interrupted', message='Server was restarted', updated_at=? WHERE state IN ('queued', 'running')", (now(),))
 
 
 def rows(query: str, parameters: tuple = ()) -> list[dict]:

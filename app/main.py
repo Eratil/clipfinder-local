@@ -17,7 +17,6 @@ from app.models import (
     CaptionFavoriteCreate,
     AnalysisAudioDefaultsUpdate,
     DiscoveryDefaultsUpdate,
-    BossReportCreate,
     CollectionCreate,
     DescriptionSearch,
     ExampleCreate,
@@ -41,7 +40,6 @@ from app.services.discovery import (
     score_candidates,
     suppress_duplicate_groups,
 )
-from app.services.boss_detection import create_report, detect_red_boss_area
 from app.services.media import MediaError, export_audio_preview, export_clip, write_caption_ass
 from app.services.pipeline import analyse, import_reference_folder, transcribe_clip_range
 from app.services.tagging import assess_clip_quality, build_reference_prompt, infer_tags
@@ -202,28 +200,6 @@ def run_remote_import(video_id: str, job_id: str) -> None:
         update_job(job_id, 100, str(exc), "failed")
 
 
-def update_boss_report(report_id: str, progress: int, message: str, state: str = "running") -> None:
-    with db.connection() as con:
-        con.execute("UPDATE boss_reports SET state=?, progress=?, message=?, updated_at=? WHERE id=?", (state, max(0, min(progress, 100)), message, db.now(), report_id))
-
-
-def run_boss_report(report_id: str) -> None:
-    report = db.row(
-        """SELECT r.*, v.path AS video_path, p.name AS profile_name, p.sound_path, p.crop_x, p.crop_y, p.crop_width, p.crop_height, p.threshold, p.minimum_gap_seconds
-           FROM boss_reports r JOIN videos v ON v.id=r.video_id JOIN boss_profiles p ON p.id=r.profile_id WHERE r.id=?""",
-        (report_id,),
-    )
-    if not report:
-        return
-    try:
-        destination = settings.boss_reports_dir / f"boss-deaths-{report_id}.csv"
-        count = create_report(Path(report["video_path"]), report, destination, lambda progress, message: update_boss_report(report_id, progress, message))
-        with db.connection() as con:
-            con.execute("UPDATE boss_reports SET state='completed', progress=100, message=?, result_path=?, event_count=?, updated_at=? WHERE id=?", (f"Report completed: {count} deaths", str(destination), count, db.now(), report_id))
-    except Exception as exc:
-        update_boss_report(report_id, 100, str(exc), "failed")
-
-
 def update_reference_import(import_id: str, progress: int, message: str, state: str = "running", imported_files: int | None = None) -> None:
     with db.connection() as con:
         if imported_files is None:
@@ -260,78 +236,6 @@ def home():
 @app.get("/api/health")
 def health():
     return {"status": "ok", "data_dir": str(settings.clipfinder_data_dir)}
-
-
-@app.get("/api/boss-profiles")
-def boss_profiles():
-    return db.rows("SELECT * FROM boss_profiles ORDER BY updated_at DESC")
-
-
-@app.post("/api/boss-profiles", status_code=201)
-async def create_boss_profile(
-    name: str = Form(...),
-    death_sound: UploadFile = File(...),
-    boss_area_image: UploadFile = File(...),
-    threshold: float = Form(0.72),
-    minimum_gap_seconds: float = Form(4),
-    audio_track: int = Form(1),
-):
-    if not death_sound.filename or Path(death_sound.filename).suffix.lower() not in {".wav", ".mp3", ".m4a", ".ogg", ".mp4", ".webm"}:
-        raise HTTPException(400, "Upload a short WAV, MP3, M4A, OGG, MP4 or WebM death-sound sample.")
-    if not boss_area_image.filename or Path(boss_area_image.filename).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
-        raise HTTPException(400, "Upload a PNG, JPG, WebP or BMP screenshot with a red rectangle around the boss-name area.")
-    try:
-        crop_x, crop_y, crop_width, crop_height = detect_red_boss_area(await boss_area_image.read())
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    if not name.strip() or not 0.1 <= threshold <= 0.99 or not 1 <= minimum_gap_seconds <= 60 or audio_track not in {1, 2, 3, 4}:
-        raise HTTPException(400, "Invalid boss profile settings.")
-    profile_id, timestamp = str(uuid.uuid4()), db.now()
-    sound_path = settings.boss_profiles_dir / f"{profile_id}{Path(death_sound.filename).suffix.lower()}"
-    with sound_path.open("wb") as output:
-        shutil.copyfileobj(death_sound.file, output)
-    try:
-        with db.connection() as con:
-            con.execute(
-                "INSERT INTO boss_profiles (id, name, sound_path, crop_x, crop_y, crop_width, crop_height, threshold, minimum_gap_seconds, audio_track, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (profile_id, name.strip(), str(sound_path), crop_x, crop_y, crop_width, crop_height, threshold, minimum_gap_seconds, audio_track, timestamp, timestamp),
-            )
-    except Exception as exc:
-        sound_path.unlink(missing_ok=True)
-        raise HTTPException(409, "A boss profile with that name already exists.") from exc
-    return db.row("SELECT * FROM boss_profiles WHERE id=?", (profile_id,))
-
-
-@app.get("/api/boss-reports")
-def boss_reports():
-    return db.rows(
-        """SELECT r.*, v.original_name, p.name AS profile_name
-           FROM boss_reports r JOIN videos v ON v.id=r.video_id JOIN boss_profiles p ON p.id=r.profile_id
-           ORDER BY r.created_at DESC"""
-    )
-
-
-@app.post("/api/boss-reports", status_code=202)
-def create_boss_report(body: BossReportCreate, background_tasks: BackgroundTasks):
-    video = db.row("SELECT * FROM videos WHERE id=?", (body.video_id,))
-    profile = db.row("SELECT id FROM boss_profiles WHERE id=?", (body.profile_id,))
-    if not video or not Path(video["path"]).is_file():
-        raise HTTPException(400, "Choose a downloaded or uploaded recording that is available locally.")
-    if not profile:
-        not_found("Boss profile not found")
-    report_id, timestamp = str(uuid.uuid4()), db.now()
-    with db.connection() as con:
-        con.execute("INSERT INTO boss_reports (id, video_id, profile_id, state, progress, message, audio_track, created_at, updated_at) VALUES (?, ?, ?, 'queued', 0, 'Queued boss-death analysis', ?, ?, ?)", (report_id, body.video_id, body.profile_id, body.audio_track, timestamp, timestamp))
-    background_tasks.add_task(run_boss_report, report_id)
-    return {"report_id": report_id}
-
-
-@app.get("/api/boss-reports/{report_id}/download")
-def download_boss_report(report_id: str):
-    report = db.row("SELECT * FROM boss_reports WHERE id=?", (report_id,))
-    if not report or not report.get("result_path") or not Path(report["result_path"]).is_file():
-        not_found("Boss report file not found")
-    return FileResponse(report["result_path"], media_type="text/csv", filename=f"boss-deaths-{report_id}.csv")
 
 
 @app.post("/api/videos", status_code=201)
@@ -438,22 +342,14 @@ def delete_video(video_id: str):
         except OSError as exc:
             raise HTTPException(500, f"Could not delete the source recording: {exc}") from exc
     segment_ids = [item["id"] for item in db.rows("SELECT id FROM segments WHERE video_id=?", (video_id,))]
-    boss_report_paths = [Path(item["result_path"]) for item in db.rows("SELECT result_path FROM boss_reports WHERE video_id=? AND result_path IS NOT NULL", (video_id,))]
     with db.connection() as con:
         con.execute("DELETE FROM collection_examples WHERE segment_id IN (SELECT id FROM segments WHERE video_id=?)", (video_id,))
-        con.execute("DELETE FROM boss_reports WHERE video_id=?", (video_id,))
         con.execute("DELETE FROM jobs WHERE video_id=?", (video_id,))
         con.execute("DELETE FROM segments WHERE video_id=?", (video_id,))
         con.execute("DELETE FROM videos WHERE id=?", (video_id,))
     for segment_id in segment_ids:
         for preview in settings.previews_dir.glob(f"{segment_id}-*"):
             preview.unlink(missing_ok=True)
-    for report_path in boss_report_paths:
-        try:
-            report_path.resolve().relative_to(settings.boss_reports_dir.resolve())
-            report_path.unlink(missing_ok=True)
-        except ValueError:
-            pass
     return {"ok": True}
 
 
