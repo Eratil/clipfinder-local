@@ -24,6 +24,7 @@ OutputBaseFilename=ClipFinder-Setup-{#MyAppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\assets\clipfinder.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Files]

@@ -35,7 +35,9 @@ Write-Host 'Building the ClipFinder application folder...' -ForegroundColor Cyan
 & $python -m PyInstaller `
     --noconfirm --clean --onedir --windowed `
     --name ClipFinder `
+    --icon "assets\clipfinder.ico" `
     --add-data "app\static;app\static" `
+    --add-data "assets\clipfinder.ico;assets" `
     --collect-submodules app `
     --hidden-import webview.platforms.winforms `
     --hidden-import webview.platforms.win32 `
