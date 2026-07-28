@@ -27,7 +27,9 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\installer-output
 OutputBaseFilename=ClipFinder-Setup-{#MyAppVersion}{#MyInstallerSuffix}
-Compression=lzma2/ultra64
+; AI libraries are already compressed. A fast setting keeps release builds
+; practical without changing what the tester installs.
+Compression=lzma2/fast
 SolidCompression=yes
 WizardStyle=modern
 SetupIconFile=..\assets\clipfinder.ico
