@@ -45,6 +45,7 @@ select { width:100%; min-height:38px; color:var(--text); background:#111722; bor
 .setup-sidebar { position:fixed; z-index:40; inset:0 auto 0 0; width:min(450px,92vw); overflow-y:auto; padding:22px; background:var(--panel); border-right:1px solid var(--line); box-shadow:12px 0 35px rgba(0,0,0,.42); transform:translateX(-105%); transition:transform .24s ease; }
 .setup-sidebar.open { transform:translateX(0); }
 .setup-sidebar .library-grid { grid-template-columns:1fr; }
+.setup-sidebar .updates-card { margin-top:16px; }
 .setup-sidebar-head { position:sticky; top:-22px; z-index:4; align-items:flex-start; margin:-22px -22px 16px; padding:22px 22px 16px; background:var(--panel); border-bottom:1px solid var(--line); box-shadow:0 8px 16px rgba(0,0,0,.16); }
 .setup-sidebar-head h2 { margin-top:2px; }
 .setup-sidebar-head .hint { max-width:320px; margin-bottom:0; }
