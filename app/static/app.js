@@ -1,4 +1,4 @@
-const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, editingSegment: null, clipEditorOpen: true, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1 }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0 };
+const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, editingSegment: null, clipEditorOpen: false, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1 }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0 };
 const $ = (selector) => document.querySelector(selector);
 const fmt = (seconds) => new Date(seconds * 1000).toISOString().slice(11, 19);
 const clamp = (number) => Math.max(0, Math.min(100, Number(number || 0)));
@@ -176,7 +176,8 @@ function clearClipEditor() {
   $('#clip-editor-form').hidden = true;
 }
 
-function selectClipForEditor(segment) {
+function selectClipForEditor(segment, openPanel = true) {
+  if (openPanel) setClipEditorOpen(true);
   state.editingSegment = segment;
   $('#clip-editor-title').textContent = `${fmt(segment.start_seconds)} - ${fmt(segment.end_seconds)}`;
   $('#clip-editor-empty').hidden = true;
@@ -204,7 +205,6 @@ async function saveSegmentRating(segment, rating) {
 }
 
 async function playClipAudio(segment) {
-  selectClipForEditor(segment);
   const player = $('#global-audio-player');
   $('#audio-now-playing-title').textContent = 'Listening to clip';
   $('#audio-now-playing-detail').textContent = `${fmt(segment.start_seconds)} - ${fmt(segment.end_seconds)} / ${segment.transcript || 'No recognized speech'}`;
@@ -239,7 +239,7 @@ async function loadSegments(custom = null) {
     if (segment.id === editingId) refreshedEditingSegment = segment;
     box.append(node);
   }
-  if (refreshedEditingSegment) selectClipForEditor(refreshedEditingSegment);
+  if (refreshedEditingSegment) selectClipForEditor(refreshedEditingSegment, state.clipEditorOpen);
   else if (editingId) clearClipEditor();
 }
 
@@ -514,6 +514,7 @@ $('#check-updates').onclick = checkForUpdates;
 function setSetupSidebar(open) {
   const sidebar = $('#setup-sidebar'); const trigger = $('#setup-toggle');
   sidebar.classList.toggle('open', open);
+  document.body.classList.toggle('setup-sidebar-open', open);
   document.querySelector('main').classList.toggle('setup-sidebar-open', open);
   sidebar.setAttribute('aria-hidden', String(!open));
   trigger.setAttribute('aria-expanded', String(open));
@@ -522,7 +523,7 @@ $('#setup-toggle').onclick = () => setSetupSidebar(!$('#setup-sidebar').classLis
 $('#setup-close').onclick = () => setSetupSidebar(false);
 $('#clip-editor-close').onclick = () => setClipEditorOpen(false);
 $('#clip-editor-toggle').onclick = () => setClipEditorOpen(true);
-try { setClipEditorOpen(localStorage.getItem('clipfinder-clip-editor-open') !== 'false'); } catch { setClipEditorOpen(true); }
+setClipEditorOpen(false);
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') setSetupSidebar(false); });
 $('#close-dialog').onclick = () => { $('#full-video').pause(); $('#video-dialog').close(); };
 api('/health').then(refreshDashboard).catch(() => message('Local API unavailable', true)); setInterval(refreshDashboard, 4000);

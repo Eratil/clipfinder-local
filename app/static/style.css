@@ -34,7 +34,7 @@ select { width:100%; min-height:38px; color:var(--text); background:#111722; bor
 .chat-delay-form #chat-summary { flex:1 1 260px; }
 .chat-reaction { margin-top:8px; color:var(--accent); font-weight:700; }
 .chat-messages { margin:4px 0 0 !important; font-style:italic; overflow-wrap:anywhere; }
-.audio-now-playing { position:fixed; z-index:80; left:50%; bottom:18px; width:min(720px,calc(100vw - 32px)); transform:translateX(-50%); display:flex; align-items:center; gap:12px; padding:10px 12px 10px 16px; background:rgba(23,30,42,.98); border:1px solid var(--accent); border-radius:12px; box-shadow:0 12px 32px rgba(0,0,0,.42); }
+.audio-now-playing { position:fixed; z-index:80; left:calc(50% - min(210px,17vw)); bottom:18px; width:min(720px,calc(100vw - min(420px,34vw) - 32px)); transform:translateX(-50%); transition:left .24s ease, width .24s ease; display:flex; align-items:center; gap:12px; padding:10px 12px 10px 16px; background:rgba(23,30,42,.98); border:1px solid var(--accent); border-radius:12px; box-shadow:0 12px 32px rgba(0,0,0,.42); }
 .audio-now-playing > div { min-width:150px; flex:0 1 210px; }
 .audio-now-playing p { margin:1px 0 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .audio-now-playing audio { min-width:180px; flex:1 1 280px; height:34px; }
@@ -82,8 +82,12 @@ label.switch input { appearance:none; width:38px; min-height:22px; margin:0; bor
   main.setup-sidebar-open { width:calc(100% - min(420px,34vw) - min(450px,92vw)); max-width:none; margin-left:min(450px,92vw); margin-right:min(420px,34vw); }
   body.clip-editor-closed main { width:100%; max-width:1200px; margin:0 auto; }
   body.clip-editor-closed main.setup-sidebar-open { width:calc(100% - min(450px,92vw)); max-width:none; margin-left:min(450px,92vw); margin-right:0; }
+  body.clip-editor-closed .audio-now-playing { left:50%; width:min(720px,calc(100vw - 32px)); }
+  body:not(.clip-editor-closed).setup-sidebar-open .audio-now-playing { left:calc(50% + min(225px,46vw) - min(210px,17vw)); width:min(720px,calc(100vw - min(450px,92vw) - min(420px,34vw) - 32px)); }
+  body.clip-editor-closed.setup-sidebar-open .audio-now-playing { left:calc(50% + min(225px,46vw)); width:min(720px,calc(100vw - min(450px,92vw) - 32px)); }
 }
 @media (max-width:960px) {
+  .audio-now-playing { left:50%; width:min(720px,calc(100vw - 32px)); }
   .clip-editor-sidebar { position:static; width:auto; height:auto; margin:0 14px 24px; border:1px solid var(--line); border-radius:12px; box-shadow:none; }
   .clip-editor-head { top:0; margin:0 0 16px; padding:0 0 14px; box-shadow:none; }
 }

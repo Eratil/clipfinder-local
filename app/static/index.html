@@ -4,9 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ClipFinder Local</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260728-3" />
+    <link rel="stylesheet" href="/static/style.css?v=20260728-4" />
   </head>
-  <body>
+  <body class="clip-editor-closed">
     <main>
       <header>
         <div><p class="eyebrow">LOCAL / NVIDIA GPU</p><h1>ClipFinder</h1></div>
@@ -211,7 +211,7 @@
       </article>
     </template>
     <button id="clip-editor-toggle" class="quiet clip-editor-toggle" aria-controls="clip-editor-sidebar" aria-expanded="false" hidden>Clip editor</button>
-    <aside id="clip-editor-sidebar" class="clip-editor-sidebar" aria-label="Clip editor" aria-hidden="false">
+    <aside id="clip-editor-sidebar" class="clip-editor-sidebar" aria-label="Clip editor" aria-hidden="true">
       <div class="section-title clip-editor-head"><div><h2>Clip editor</h2><p id="clip-editor-title" class="hint">Select a clip to edit it.</p></div><button id="clip-editor-close" class="quiet" aria-label="Hide clip editor">Hide</button></div>
       <div id="clip-editor-empty" class="hint">Click any candidate card to edit its range, captions, review status and export.</div>
       <div id="clip-editor-form" hidden>
@@ -254,6 +254,6 @@
       <video id="full-video" controls preload="metadata"></video>
       <p id="dialog-transcript" class="hint"></p>
     </dialog>
-    <script src="/static/app.js?v=20260728-3"></script>
+    <script src="/static/app.js?v=20260728-4"></script>
   </body>
 </html>
