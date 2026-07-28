@@ -18,7 +18,7 @@ Aplikacja zawiera własny Python oraz pakiety ClipFinder — tester nie musi oso
 
 ## NVIDIA GPU (opcjonalnie)
 
-Jeżeli otrzymałeś instalator z dopiskiem `-GPU`, podczas instalacji możesz zaznaczyć **Install NVIDIA GPU support**. Opcja uruchamia dołączone instalatory CUDA 12.9 i cuDNN 9.24; Windows może poprosić o zgodę administratora.
+Jeżeli otrzymałeś instalator z dopiskiem `-GPU`, może on zawierać plik `.exe` i dodatkowe pliki `.bin`. Wszystkie muszą pozostać w tym samym folderze — nie uruchamiaj samego `.exe` po przeniesieniu go osobno. Podczas instalacji możesz zaznaczyć **Install NVIDIA GPU support**. Opcja uruchamia dołączone instalatory CUDA 12.9 i cuDNN 9.24; Windows może poprosić o zgodę administratora.
 
 Wybierz ją tylko na komputerze z kartą NVIDIA. Bez tej opcji aplikacja zapisze profil CPU i nadal będzie działała, ale analiza będzie wolniejsza. Po ręcznej instalacji CUDA/cuDNN uruchom z menu Start **Configure ClipFinder runtime**, a następnie uruchom aplikację ponownie.
 

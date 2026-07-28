@@ -43,7 +43,7 @@ To create a larger GPU test installer that additionally contains the CUDA 12.9.2
 .\Build-Installer.ps1 -Version 0.1.1 -IncludeGpuDependencies
 ```
 
-The GPU build is about 5.2 GB larger and shows an unchecked **Install NVIDIA GPU support** option in the wizard. It should only be distributed to testers with NVIDIA hardware. Keep the standard installer as the normal release artifact; do not publish the GPU variant as the automatic-update asset. The installed desktop app stores its recordings, database and exports in `%LOCALAPPDATA%\ClipFinder\data`; updates and uninstalls do not remove that data. CUDA/cuDNN redistribution and all third-party components still require a licence audit before commercial distribution.
+The GPU build is about 5.2 GB larger and is intentionally split by Inno Setup into a setup executable plus `.bin` data files. Keep those files together; send the GPU setup files in one ZIP or the entire `installer-output` folder. It shows an unchecked **Install NVIDIA GPU support** option in the wizard and should only be distributed to testers with NVIDIA hardware. Keep the standard installer as the normal release artifact; do not publish the GPU variant as the automatic-update asset. The installed desktop app stores its recordings, database and exports in `%LOCALAPPDATA%\ClipFinder\data`; updates and uninstalls do not remove that data. CUDA/cuDNN redistribution and all third-party components still require a licence audit before commercial distribution.
 
 ## Updating the desktop app
 

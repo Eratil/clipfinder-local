@@ -36,6 +36,10 @@ OutputDir=..\installer-output
 OutputBaseFilename=ClipFinder-Setup-{#MyAppVersion}{#MyInstallerSuffix}
 Compression=lzma2/ultra64
 SolidCompression=yes
+#if MyIncludeGpuDependencies
+DiskSpanning=yes
+DiskSliceSize=2000000000
+#endif
 WizardStyle=modern
 SetupIconFile=..\assets\clipfinder.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}

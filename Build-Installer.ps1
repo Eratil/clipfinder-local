@@ -78,3 +78,6 @@ if ($LASTEXITCODE -ne 0) { throw 'Inno Setup could not build the installer.' }
 
 $suffix = if ($IncludeGpuDependencies) { '-GPU' } else { '' }
 Write-Host "`nReady: installer-output\ClipFinder-Setup-$Version$suffix.exe" -ForegroundColor Green
+if ($IncludeGpuDependencies) {
+    Write-Host 'Keep the generated .bin files next to the GPU setup executable. Send the whole installer-output folder or put all of its GPU setup files into one ZIP.' -ForegroundColor Yellow
+}
