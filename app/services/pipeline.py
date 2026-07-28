@@ -13,7 +13,7 @@ from app.services.cuda_runtime import cuda12_runtime_error
 from app.services.discovery import assign_duplicate_groups
 from app.services.media import duration_seconds, extract_audio, extract_audio_range
 from app.services.scenes import detect_boundaries
-from app.services.tagging import assess_clip_quality, infer_tags
+from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_logical_sense, infer_tags
 from app.services.chat import apply_chat_reactions
 
 Progress = Callable[[int, str], None]
@@ -312,10 +312,12 @@ def analyse(video_id: str, report: Progress) -> None:
         keywords = [word.strip(".,!?;:").lower() for word in candidate["text"].split() if len(word.strip(".,!?;:")) >= 6][:12]
         tags = infer_tags(candidate["text"], vector)
         quality_score, quality_signals, reading_likelihood = assess_clip_quality(candidate["text"], candidate.get("words", []), candidate["start"], candidate["end"], tags)
+        logical_sense_score = assess_logical_sense(candidate["text"])
         game_reaction_score = reaction_scores[index]
         voice_expression_score = microphone_expression_scores[index]
         event_score = 0
         if game_reaction_score >= 7:
+            tags = list(dict.fromkeys(tags + [GAME_REACTION_TAG]))
             event_score = game_reaction_score
             quality_score = min(99, quality_score + min(10, game_reaction_score))
             quality_signals.append("game sound followed by microphone reaction")
@@ -325,7 +327,7 @@ def analyse(video_id: str, report: Progress) -> None:
             quality_signals.append("expressive microphone delivery")
         if reading_likelihood >= 0.55:
             tags = list(dict.fromkeys(tags + ["reading"]))
-        records.append({"id": str(uuid.uuid4()), "start": candidate["start"], "end": candidate["end"], "text": candidate["text"], "words": candidate.get("words", []), "vector": vector, "keywords": keywords, "tags": tags, "quality_score": quality_score, "quality_signals": quality_signals, "reading_likelihood": reading_likelihood, "audio_event_score": event_score, "game_reaction_score": game_reaction_score, "voice_expression_score": voice_expression_score, "duplicate_group": ""})
+        records.append({"id": str(uuid.uuid4()), "start": candidate["start"], "end": candidate["end"], "text": candidate["text"], "words": candidate.get("words", []), "vector": vector, "keywords": keywords, "tags": tags, "quality_score": quality_score, "quality_signals": quality_signals, "logical_sense_score": logical_sense_score, "reading_likelihood": reading_likelihood, "audio_event_score": event_score, "game_reaction_score": game_reaction_score, "voice_expression_score": voice_expression_score, "duplicate_group": ""})
     assign_duplicate_groups(records)
     report(82, "Checking visual action in the strongest candidates")
     visual_scores = visual_interest_scores(source, records)
@@ -337,8 +339,8 @@ def analyse(video_id: str, report: Progress) -> None:
         con.execute("DELETE FROM segments WHERE video_id = ?", (video_id,))
         for record in records:
             con.execute(
-                "INSERT INTO segments (id, video_id, start_seconds, end_seconds, transcript, keywords, tags, word_timestamps, embedding, quality_score, quality_signals, reading_likelihood, audio_event_score, game_reaction_score, voice_expression_score, vision_score, duplicate_group, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record["id"], video_id, record["start"], record["end"], record["text"], json.dumps(record["keywords"], ensure_ascii=False), json.dumps(record["tags"], ensure_ascii=False), json.dumps(record["words"], ensure_ascii=False), json.dumps(record["vector"]), record["quality_score"], json.dumps(record["quality_signals"]), record["reading_likelihood"], record["audio_event_score"], record["game_reaction_score"], record["voice_expression_score"], record["vision_score"], record["duplicate_group"], db.now()),
+                "INSERT INTO segments (id, video_id, start_seconds, end_seconds, transcript, keywords, tags, word_timestamps, embedding, quality_score, quality_signals, logical_sense_score, reading_likelihood, audio_event_score, game_reaction_score, voice_expression_score, vision_score, duplicate_group, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (record["id"], video_id, record["start"], record["end"], record["text"], json.dumps(record["keywords"], ensure_ascii=False), json.dumps(record["tags"], ensure_ascii=False), json.dumps(record["words"], ensure_ascii=False), json.dumps(record["vector"]), record["quality_score"], json.dumps(record["quality_signals"]), record["logical_sense_score"], record["reading_likelihood"], record["audio_event_score"], record["game_reaction_score"], record["voice_expression_score"], record["vision_score"], record["duplicate_group"], db.now()),
             )
         con.execute("UPDATE videos SET status='ready', updated_at=? WHERE id=?", (db.now(), video_id))
     # A chat transcript may have been imported before a reanalysis. Reapply it

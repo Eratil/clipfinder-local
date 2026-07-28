@@ -249,10 +249,11 @@ async function reloadActiveSegments() {
 
 function renderChatReaction(node, segment) {
   const reaction = node.querySelector('.chat-reaction'); const messages = node.querySelector('.chat-messages');
-  const score = Number(segment.chat_reaction_score || 0); const count = Number(segment.chat_message_count || 0); const people = Number(segment.chat_unique_authors || 0); const surge = Number(segment.chat_surge || 0);
+  const score = Number(segment.chat_reaction_score || 0); const joy = Number(segment.chat_joy_score || 0); const count = Number(segment.chat_message_count || 0); const people = Number(segment.chat_unique_authors || 0); const surge = Number(segment.chat_surge || 0);
   if (!score || !count) { reaction.hidden = true; messages.hidden = true; return; }
   const multiplier = surge >= 1.2 ? ` / ${surge.toFixed(1)}x normal activity` : '';
-  reaction.textContent = `Chat reaction ${score}/20 - ${count} messages${people ? ` from ${people} people` : ''}${multiplier}`;
+  const positive = joy >= 4 ? ` / positive-funny reaction ${joy}/14` : '';
+  reaction.textContent = `Chat reaction ${score}/20 - ${count} messages${people ? ` from ${people} people` : ''}${multiplier}${positive}`;
   reaction.hidden = false;
   const previews = (segment.chat_messages || []).slice(0, 3).map((item) => `${item.author ? `${item.author}: ` : ''}${item.message}`).filter(Boolean);
   messages.textContent = previews.join('  |  '); messages.hidden = !previews.length;

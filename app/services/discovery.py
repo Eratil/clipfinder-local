@@ -73,11 +73,31 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
         voice_expression = int(candidate.get("voice_expression_score") or 0)
         visual = int(candidate.get("vision_score") or 0)
         chat = int(candidate.get("chat_reaction_score") or 0)
+        chat_joy = int(candidate.get("chat_joy_score") or 0)
         chat_messages = int(candidate.get("chat_message_count") or 0)
         chat_authors = int(candidate.get("chat_unique_authors") or 0)
         reading = float(candidate.get("reading_likelihood") or 0)
-        tag_bonus = sum(weight for tag, weight in definition["tag_weights"].items() if tag in json.loads(candidate.get("tags") or "[]"))
+        logical_sense = int(candidate.get("logical_sense_score") or 0)
+        if logical_sense <= 0:
+            logical_sense = 50
+        tags = json.loads(candidate.get("tags") or "[]")
+        tag_bonus = sum(weight for tag, weight in definition["tag_weights"].items() if tag in tags)
+        if "reakcja na grę" in tags:
+            tag_bonus += {"general": 6, "soulslike": 10, "horror": 8}.get(profile, 4)
         score = 22 + quality * 0.46 + audio * 0.75 + visual * 0.65 + chat * 0.85 + tag_bonus - reading * 28
+        strong_emotion = bool({"humor", "gniew", "zaskoczenie", "radość", "złość"}.intersection(tags)) or game_reaction >= 7 or voice_expression >= 9
+        happy_chat = chat_joy >= 4 and chat >= 5
+        context_penalty = 0
+        context_bonus = 0
+        if not strong_emotion:
+            if logical_sense < 42:
+                if happy_chat:
+                    context_bonus = min(12, 4 + chat_joy)
+                else:
+                    context_penalty = min(22, 8 + round((42 - logical_sense) * 0.45))
+            elif logical_sense >= 68:
+                context_bonus = 4
+        score += context_bonus - context_penalty
         if reference:
             score += prompt_match * 27
         if len(accepted):
@@ -102,6 +122,12 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
         if chat >= 7:
             people = f" / {chat_authors} viewers" if chat_authors else ""
             reasons.append(f"chat reacted: {chat_messages} messages{people}")
+        if not strong_emotion and logical_sense >= 68:
+            reasons.append("clear standalone thought")
+        elif not strong_emotion and logical_sense < 42 and happy_chat:
+            reasons.append("chat enjoyed an unexpected or absurd moment")
+        elif not strong_emotion and logical_sense < 42:
+            reasons.append("contextless or incomplete speech without chat reaction")
         if tag_bonus >= 7:
             reasons.append("matches active content profile")
         if strongest_rejection >= 0.42:

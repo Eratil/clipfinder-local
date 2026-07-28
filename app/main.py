@@ -44,7 +44,7 @@ from app.services.discovery import (
 )
 from app.services.media import MediaError, export_audio_preview, export_clip, write_caption_ass
 from app.services.pipeline import analyse, import_reference_folder, transcribe_clip_range
-from app.services.tagging import assess_clip_quality, build_reference_prompt, infer_tags
+from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_logical_sense, build_reference_prompt, infer_tags
 from app.services.updates import update_status
 from app.version import __version__
 
@@ -64,6 +64,26 @@ def backfill_segment_quality() -> None:
             con.execute(
                 "UPDATE segments SET tags=?, quality_score=?, quality_signals=?, reading_likelihood=? WHERE id=?",
                 (json.dumps(tags, ensure_ascii=False), score, json.dumps(signals), reading, item["id"]),
+            )
+
+
+def backfill_context_signals() -> None:
+    """Make the new context and game-reaction signals available for old clips."""
+    items = db.rows(
+        "SELECT id, transcript, tags, game_reaction_score FROM segments "
+        "WHERE logical_sense_score < 0 OR (game_reaction_score >= 7 AND tags NOT LIKE ?) ",
+        (f'%"{GAME_REACTION_TAG}"%',),
+    )
+    if not items:
+        return
+    with db.connection() as con:
+        for item in items:
+            tags = json.loads(item.get("tags") or "[]")
+            if int(item.get("game_reaction_score") or 0) >= 7:
+                tags = list(dict.fromkeys(tags + [GAME_REACTION_TAG]))
+            con.execute(
+                "UPDATE segments SET tags=?, logical_sense_score=? WHERE id=?",
+                (json.dumps(tags, ensure_ascii=False), assess_logical_sense(item["transcript"]), item["id"]),
             )
 
 
@@ -104,8 +124,11 @@ def backfill_duplicate_groups() -> None:
 async def lifespan(_: FastAPI):
     db.initialize()
     backfill_segment_quality()
+    backfill_context_signals()
     remove_legacy_game_audio_bonus()
     backfill_duplicate_groups()
+    for item in db.rows("SELECT video_id FROM chat_settings"):
+        apply_chat_reactions(item["video_id"])
     yield
 
 
@@ -498,14 +521,15 @@ def update_segment_timing(segment_id: str, body: SegmentTimingUpdate):
         keywords = [word.strip(".,!?;:").lower() for word in transcript.split() if len(word.strip(".,!?;:")) >= 6][:12]
         tags = infer_tags(transcript, vector)
         quality_score, quality_signals, reading_likelihood = assess_clip_quality(transcript, words, body.start_seconds, body.end_seconds, tags)
+        logical_sense_score = assess_logical_sense(transcript)
         if reading_likelihood >= 0.55:
             tags = list(dict.fromkeys(tags + ["reading"]))
     except Exception as exc:
         raise HTTPException(500, f"Unable to update captions for the new range: {exc}") from exc
     with db.connection() as con:
         con.execute(
-            "UPDATE segments SET start_seconds=?, end_seconds=?, transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, reading_likelihood=?, audio_event_score=0, game_reaction_score=0, voice_expression_score=0 WHERE id=?",
-            (body.start_seconds, body.end_seconds, transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), reading_likelihood, segment_id),
+            "UPDATE segments SET start_seconds=?, end_seconds=?, transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, logical_sense_score=?, reading_likelihood=?, audio_event_score=0, game_reaction_score=0, voice_expression_score=0 WHERE id=?",
+            (body.start_seconds, body.end_seconds, transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), logical_sense_score, reading_likelihood, segment_id),
         )
     apply_chat_reactions(segment["video_id"])
     (settings.previews_dir / f"{segment_id}.mp3").unlink(missing_ok=True)
@@ -524,12 +548,13 @@ def update_segment_transcript(segment_id: str, body: SegmentTranscriptUpdate):
     tags = infer_tags(transcript, vector)
     words = approximate_word_timestamps(transcript, segment["start_seconds"], segment["end_seconds"])
     quality_score, quality_signals, reading_likelihood = assess_clip_quality(transcript, words, segment["start_seconds"], segment["end_seconds"], tags)
+    logical_sense_score = assess_logical_sense(transcript)
     if reading_likelihood >= 0.55:
         tags = list(dict.fromkeys(tags + ["reading"]))
     with db.connection() as con:
         con.execute(
-            "UPDATE segments SET transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, reading_likelihood=? WHERE id=?",
-            (transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), reading_likelihood, segment_id),
+            "UPDATE segments SET transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, logical_sense_score=?, reading_likelihood=? WHERE id=?",
+            (transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), logical_sense_score, reading_likelihood, segment_id),
         )
     updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
     return db.serialize_segment(updated)

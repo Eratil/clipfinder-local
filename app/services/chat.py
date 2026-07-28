@@ -16,6 +16,7 @@ from app import database as db
 TIME_PATTERN = re.compile(r"^\s*\[?(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?\]?\s*$")
 TEXT_TIME_PATTERN = re.compile(r"^\s*\[?(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?\]?\s*(?:[-|]\s*)?(.*)$")
 REACTION_PATTERN = re.compile(r"\b(xd+|lol+|lmao|omg|o+\s*m+\s*g+|haha+|heh+|rip|gg|coo+|niee+|ja+\s*pier|what+)\b|[!?]{2,}", re.I)
+JOY_PATTERN = re.compile(r"\b(xd+|lol+|lmao|rofl|kekw|lul+w*|haha+|heh+|bek+a*|śmiesz|zajebist|kocham|dobre+|piękne+)\b|(?:🤣|😂|😄|😆|💀)", re.I)
 
 
 def _decode(raw: bytes) -> str:
@@ -179,6 +180,7 @@ def apply_chat_reactions(video_id: str) -> int:
         expected = baseline_rate * (response_end - response_start)
         surge = (count + 1.0) / (expected + 1.0)
         expressive = sum(1 for message in reaction if REACTION_PATTERN.search(message["message"]))
+        joy = sum(1 for message in reaction if JOY_PATTERN.search(message["message"]))
         score = 0
         if count >= 2:
             score += min(7, count * 2)
@@ -189,11 +191,19 @@ def apply_chat_reactions(video_id: str) -> int:
         if expressive >= 2:
             score += min(4, expressive)
         score = max(0, min(20, score))
+        joy_score = 0
+        if joy:
+            joy_score += min(6, joy * 2)
+        if joy >= 2 and unique >= 2:
+            joy_score += min(4, unique)
+        if joy and count >= max(3, expected * 1.5):
+            joy_score += min(4, round(max(0.0, surge - 1) * 2.5))
+        joy_score = max(0, min(14, joy_score))
         previews = [{"author": message["author"], "message": message["message"], "seconds": message["seconds"]} for message in reaction[:4]]
-        updates.append((score, count, unique, round(surge, 2), json.dumps(previews, ensure_ascii=False), segment["id"]))
+        updates.append((score, joy_score, count, unique, round(surge, 2), json.dumps(previews, ensure_ascii=False), segment["id"]))
     with db.connection() as con:
         con.executemany(
-            "UPDATE segments SET chat_reaction_score=?, chat_message_count=?, chat_unique_authors=?, chat_surge=?, chat_messages=? WHERE id=?",
+            "UPDATE segments SET chat_reaction_score=?, chat_joy_score=?, chat_message_count=?, chat_unique_authors=?, chat_surge=?, chat_messages=? WHERE id=?",
             updates,
         )
     return len(updates)

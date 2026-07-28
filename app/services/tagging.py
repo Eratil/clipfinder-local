@@ -15,6 +15,11 @@ TAG_DEFINITIONS = (
     ("rekomendacja", "recommendation, advice, suggestion or endorsement", ("polecam", "warto", "radzę", "powinien", "najlepsz")),
 )
 
+_FILLERS = {"yyy", "eee", "hmm", "um", "jakby", "znaczy"}
+_TRAILING_CONNECTORS = {"a", "ale", "bo", "czy", "i", "jak", "że", "żeby", "więc", "to"}
+_COHERENCE_CONNECTORS = {"bo", "dlatego", "więc", "ale", "jednak", "potem", "teraz", "jeśli", "gdy", "ponieważ"}
+GAME_REACTION_TAG = "reakcja na gr\u0119"
+
 _tag_vectors: list[list[float]] | None = None
 
 
@@ -33,6 +38,41 @@ def infer_tags(text: str, embedding: list[float], limit: int = 4) -> list[str]:
     ]
     semantic_tags = [name for score, name in sorted(semantic, reverse=True) if score >= 0.34]
     return list(dict.fromkeys(lexical + semantic_tags))[:limit]
+
+
+def assess_logical_sense(text: str) -> int:
+    """Estimate whether a transcript is understandable as a standalone thought.
+
+    This is a transparent text-structure heuristic, not a claim that the app
+    understands every joke or stream reference. Positive chat feedback is
+    considered separately by the ranking layer.
+    """
+    normalized = " ".join((text or "").split())
+    tokens = re.findall(r"[\wĂ€-Ăż]+", normalized.lower())
+    if len(tokens) < 3:
+        return 15
+
+    score = 42
+    if 7 <= len(tokens) <= 75:
+        score += 18
+    elif len(tokens) >= 4:
+        score += 7
+
+    filler_count = sum(token in _FILLERS for token in tokens)
+    score -= min(28, filler_count * 8)
+    if filler_count / len(tokens) >= 0.18:
+        score -= 12
+    if normalized.endswith((".", "!", "?")):
+        score += 12
+    if any(token in _COHERENCE_CONNECTORS for token in tokens):
+        score += 8
+    if "?" in normalized and len(tokens) >= 5:
+        score += 5
+    if normalized.endswith(("...", ",", ";", ":", "-")) or tokens[-1] in _TRAILING_CONNECTORS:
+        score -= 18
+    if re.search(r"\b(yyy|eee|hmm)\b.*\b(yyy|eee|hmm)\b", normalized, re.I):
+        score -= 8
+    return max(1, min(99, round(score)))
 
 
 def assess_clip_quality(text: str, words: list[dict], start: float, end: float, tags: list[str]) -> tuple[int, list[str], float]:

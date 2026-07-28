@@ -69,11 +69,13 @@ def initialize() -> None:
                 voice_expression_score INTEGER NOT NULL DEFAULT 0,
                 vision_score INTEGER NOT NULL DEFAULT 0,
                 chat_reaction_score INTEGER NOT NULL DEFAULT 0,
+                chat_joy_score INTEGER NOT NULL DEFAULT 0,
                 chat_message_count INTEGER NOT NULL DEFAULT 0,
                 chat_unique_authors INTEGER NOT NULL DEFAULT 0,
                 chat_surge REAL NOT NULL DEFAULT 0,
                 chat_messages TEXT NOT NULL DEFAULT '[]',
                 duplicate_group TEXT NOT NULL DEFAULT '',
+                logical_sense_score INTEGER NOT NULL DEFAULT -1,
                 censor_profanity INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
@@ -208,6 +210,8 @@ def initialize() -> None:
             con.execute("ALTER TABLE segments ADD COLUMN vision_score INTEGER NOT NULL DEFAULT 0")
         if "chat_reaction_score" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN chat_reaction_score INTEGER NOT NULL DEFAULT 0")
+        if "chat_joy_score" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN chat_joy_score INTEGER NOT NULL DEFAULT 0")
         if "chat_message_count" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN chat_message_count INTEGER NOT NULL DEFAULT 0")
         if "chat_unique_authors" not in columns:
@@ -218,6 +222,8 @@ def initialize() -> None:
             con.execute("ALTER TABLE segments ADD COLUMN chat_messages TEXT NOT NULL DEFAULT '[]'")
         if "duplicate_group" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN duplicate_group TEXT NOT NULL DEFAULT ''")
+        if "logical_sense_score" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN logical_sense_score INTEGER NOT NULL DEFAULT -1")
         video_columns = {item["name"] for item in con.execute("PRAGMA table_info(videos)").fetchall()}
         if "source_url" not in video_columns:
             con.execute("ALTER TABLE videos ADD COLUMN source_url TEXT")
