@@ -48,7 +48,7 @@ def assess_logical_sense(text: str) -> int:
     considered separately by the ranking layer.
     """
     normalized = " ".join((text or "").split())
-    tokens = re.findall(r"[\wĂ€-Ăż]+", normalized.lower())
+    tokens = re.findall(r"[^\W_]+", normalized.lower())
     if len(tokens) < 3:
         return 15
 
@@ -78,7 +78,7 @@ def assess_logical_sense(text: str) -> int:
 def assess_clip_quality(text: str, words: list[dict], start: float, end: float, tags: list[str]) -> tuple[int, list[str], float]:
     """Fast local heuristics used to rank clips and flag likely reading aloud."""
     duration = max(1.0, end - start)
-    tokens = re.findall(r"[\wÀ-ÿ]+", text.lower())
+    tokens = re.findall(r"[^\W_]+", text.lower())
     word_rate = len(tokens) / duration
     pauses = [float(words[index]["start"]) - float(words[index - 1]["end"]) for index in range(1, len(words)) if words[index].get("start") is not None and words[index - 1].get("end") is not None]
     long_pauses = sum(1 for pause in pauses if pause >= 0.9)
