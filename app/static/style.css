@@ -35,6 +35,7 @@ select { width:100%; min-height:38px; color:var(--text); background:#111722; bor
 .chat-reaction { margin-top:8px; color:var(--accent); font-weight:700; }
 .chat-messages { margin:4px 0 0 !important; font-style:italic; overflow-wrap:anywhere; }
 .audio-now-playing { position:fixed; z-index:80; left:calc(50% - min(210px,17vw)); bottom:18px; width:min(720px,calc(100vw - min(420px,34vw) - 32px)); transform:translateX(-50%); transition:left .24s ease, width .24s ease; display:flex; align-items:center; gap:12px; padding:10px 12px 10px 16px; background:rgba(23,30,42,.98); border:1px solid var(--accent); border-radius:12px; box-shadow:0 12px 32px rgba(0,0,0,.42); }
+.audio-now-playing[hidden] { display:none; }
 .audio-now-playing > div { min-width:150px; flex:0 1 210px; }
 .audio-now-playing p { margin:1px 0 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .audio-now-playing audio { min-width:180px; flex:1 1 280px; height:34px; }
