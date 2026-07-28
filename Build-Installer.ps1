@@ -27,6 +27,10 @@ if (-not $iscc) {
 }
 
 Set-Location $projectRoot
+$appVersion = (& $python -c "from app.version import __version__; print(__version__)" | Select-Object -Last 1).Trim()
+if ($appVersion -ne $Version) {
+    throw "Version mismatch: app/version.py is $appVersion but -Version is $Version. Bump app/version.py before building a release."
+}
 Write-Host 'Installing build dependencies...' -ForegroundColor Cyan
 & $python -m pip install -r requirements-dev.txt
 if ($LASTEXITCODE -ne 0) { throw 'Could not install build dependencies.' }

@@ -37,6 +37,21 @@ On the build computer, install Inno Setup 6, then run:
 
 The installed desktop app stores its recordings, database and exports in `%LOCALAPPDATA%\ClipFinder\data`; updates and uninstalls do not remove that data. The beta installer does not package CUDA, cuDNN, FFmpeg or downloaded AI models. The target computer still needs the supported NVIDIA/CUDA setup and FFmpeg, which must be covered by a separate licence audit before commercial distribution.
 
+## Updating the desktop app
+
+You do **not** need to uninstall ClipFinder or remove its local data before an update. Each installer uses the same Windows application identity and install directory. Close ClipFinder, then run the newer `ClipFinder-Setup-x.y.z.exe`; it updates the program in place and keeps recordings, results, settings and exports in `%LOCALAPPDATA%\ClipFinder\data`.
+
+The **Saved setup** panel has a manual **Check for updates** button. It only checks the latest public GitHub Release and opens its installer download link; it never downloads or runs software automatically. This is intentionally safer for a local desktop tool.
+
+To publish an update:
+
+1. Change the version in `app/version.py`, for example to `0.1.1`.
+2. Commit and push the code.
+3. Build the matching installer: `./Build-Installer.ps1 -Version 0.1.1`.
+4. Create a GitHub Release with tag `v0.1.1` and upload `ClipFinder-Setup-0.1.1.exe` as its asset.
+
+The app can check releases only when the repository and release are public. A private repository would require a separate authenticated update service; do not embed a GitHub access token in the installed application.
+
 ## First-time installation
 
 Requirements: Python 3.11, FFmpeg/FFprobe in PATH and an NVIDIA GPU. GPU transcription additionally requires CUDA 12 cuBLAS and cuDNN 9.

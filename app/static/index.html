@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ClipFinder Local</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260728-2" />
+    <link rel="stylesheet" href="/static/style.css?v=20260728-3" />
   </head>
   <body>
     <main>
@@ -28,6 +28,11 @@
               <label>Content type<select id="discovery-profile"></select></label>
               <button>Save discovery profile</button>
             </form>
+          </article>
+          <article class="library-card">
+            <h3>Software updates</h3>
+            <p id="update-status" class="hint">Check manually for a newer ClipFinder release.</p>
+            <div class="prompt-row"><button id="check-updates" class="quiet">Check for updates</button><a id="download-update" class="quiet" target="_blank" rel="noopener" hidden>Download update</a></div>
           </article>
           <article class="library-card">
             <h3>Saved prompts</h3>
@@ -249,6 +254,6 @@
       <video id="full-video" controls preload="metadata"></video>
       <p id="dialog-transcript" class="hint"></p>
     </dialog>
-    <script src="/static/app.js?v=20260728-2"></script>
+    <script src="/static/app.js?v=20260728-3"></script>
   </body>
 </html>

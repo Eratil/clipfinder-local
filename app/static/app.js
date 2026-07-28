@@ -273,6 +273,19 @@ async function loadChatSummary() {
   catch (error) { $('#chat-summary').textContent = `Chat data unavailable: ${error.message}`; }
 }
 
+async function checkForUpdates() {
+  const status = $('#update-status'); const button = $('#check-updates'); const download = $('#download-update');
+  button.disabled = true; download.hidden = true; status.textContent = 'Checking GitHub releases...';
+  try {
+    const update = await api('/update-status');
+    if (update.error) { status.textContent = `Version ${update.current_version}: ${update.error}`; return; }
+    if (!update.update_available) { status.textContent = `ClipFinder ${update.current_version} is up to date (latest: ${update.latest_version}).`; return; }
+    status.textContent = `Update available: ${update.current_version} -> ${update.latest_version}. Download the installer, close ClipFinder, then run it to update in place.`;
+    download.href = update.download_url; download.hidden = !update.download_url;
+  } catch (error) { status.textContent = `Could not check for updates: ${error.message}`; }
+  finally { button.disabled = false; }
+}
+
 async function loadCollections() {
   const collections = await api('/collections'); const box = $('#collections'); box.replaceChildren();
   if (state.collectionId && !collections.some((item) => item.id === state.collectionId)) { state.collectionId = null; state.collectionName = ''; }
@@ -497,6 +510,7 @@ $('#top-clips-button').onclick = async () => { if (!state.videoId) return messag
 $('#description-button').onclick = async () => { const description = $('#active-prompt').value.trim(); if (!state.videoId || description.length < 3) return message('Choose a recording and enter a prompt first.', true); try { const results = await api('/search/description', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({video_id:state.videoId, description}) }); state.resultMode = 'description'; state.activeResults = results; await loadSegments(results); } catch (error) { message(error.message, true); } };
 $('#similar-button').onclick = async () => { if (!state.videoId || !state.collectionId) return message('Choose a recording and a collection first.', true); try { const results = await api(`/collections/${state.collectionId}/search`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({video_id:state.videoId})}); state.resultMode = 'similar'; state.activeResults = results; await loadSegments(results); } catch (error) { message(error.message, true); } };
 $('#active-prompt').oninput = updateSelectionSummary; $('#refresh').onclick = refreshDashboard;
+$('#check-updates').onclick = checkForUpdates;
 function setSetupSidebar(open) {
   const sidebar = $('#setup-sidebar'); const trigger = $('#setup-toggle');
   sidebar.classList.toggle('open', open);

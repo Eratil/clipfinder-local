@@ -45,6 +45,8 @@ from app.services.discovery import (
 from app.services.media import MediaError, export_audio_preview, export_clip, write_caption_ass
 from app.services.pipeline import analyse, import_reference_folder, transcribe_clip_range
 from app.services.tagging import assess_clip_quality, build_reference_prompt, infer_tags
+from app.services.updates import update_status
+from app.version import __version__
 
 
 def backfill_segment_quality() -> None:
@@ -268,7 +270,12 @@ def home():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "data_dir": str(settings.clipfinder_data_dir)}
+    return {"status": "ok", "data_dir": str(settings.clipfinder_data_dir), "version": __version__}
+
+
+@app.get("/api/update-status")
+def app_update_status():
+    return update_status()
 
 
 @app.post("/api/videos", status_code=201)
