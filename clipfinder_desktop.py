@@ -12,6 +12,7 @@ import os
 import sys
 import threading
 import time
+import json
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -30,6 +31,36 @@ def bundled_asset_path(relative_path: str) -> Path:
     """Resolve an included asset in both source and PyInstaller builds."""
     root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return root / relative_path
+
+
+def user_configuration_directory() -> Path:
+    local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return local_app_data / "ClipFinder"
+
+
+def apply_runtime_configuration() -> None:
+    """Load the per-user choices made by the Windows installer bootstrap."""
+    if not getattr(sys, "frozen", False):
+        return
+    config_path = user_configuration_directory() / "runtime.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return
+
+    allowed_values = {
+        "whisper_device": {"cuda", "cpu"},
+        "whisper_compute_type": {"float16", "int8", "int8_float16"},
+        "whisper_model": {"tiny", "base", "small", "medium", "large-v3"},
+    }
+    for key, values in allowed_values.items():
+        value = str(config.get(key, "")).lower()
+        if value in values:
+            os.environ[key.upper()] = value
+
+    ffmpeg_directory = Path(str(config.get("ffmpeg_bin_dir", "")))
+    if (ffmpeg_directory / "ffmpeg.exe").is_file():
+        os.environ["PATH"] = str(ffmpeg_directory) + os.pathsep + os.environ.get("PATH", "")
 
 
 def show_error(title: str, text: str) -> None:
@@ -54,8 +85,7 @@ def configure_frozen_data_directory() -> None:
     """Keep user videos and the database outside an installed application folder."""
     if not getattr(sys, "frozen", False) or os.environ.get("CLIPFINDER_DATA_DIR"):
         return
-    local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    os.environ["CLIPFINDER_DATA_DIR"] = str(local_app_data / "ClipFinder" / "data")
+    os.environ["CLIPFINDER_DATA_DIR"] = str(user_configuration_directory() / "data")
 
 
 def port_is_in_use() -> bool:
@@ -75,6 +105,7 @@ def start_local_server() -> tuple[uvicorn.Server | None, threading.Thread | None
         )
 
     configure_frozen_data_directory()
+    apply_runtime_configuration()
     # Importing directly makes the package visible to PyInstaller's analysis.
     from app.main import app
 

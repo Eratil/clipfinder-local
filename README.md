@@ -25,17 +25,25 @@ git push -u origin main
 
 For later backups use `git add .`, `git commit -m "Describe the change"`, then `git push`. Do not add `.env`, `data/` or any video files manually.
 
-## Windows installer beta
+## Windows tester installer
 
-`Build-Installer.ps1` creates a Windows x64 installer in `installer-output`. It uses a PyInstaller one-folder build (faster and more reliable than a single self-extracting executable for AI dependencies) and Inno Setup 6 for the installation wizard.
+`Build-Installer.ps1` creates a Windows x64 installer in `installer-output`. It uses a PyInstaller one-folder build (faster and more reliable than a single self-extracting executable for AI dependencies) and Inno Setup 6 for the installation wizard. The packaged app already includes Python and ClipFinder's Python packages.
 
 On the build computer, install Inno Setup 6, then run:
 
 ```powershell
-.\Build-Installer.ps1 -Version 0.1.0
+.\Build-Installer.ps1 -Version 0.1.1
 ```
 
-The installed desktop app stores its recordings, database and exports in `%LOCALAPPDATA%\ClipFinder\data`; updates and uninstalls do not remove that data. The beta installer does not package CUDA, cuDNN, FFmpeg or downloaded AI models. The target computer still needs the supported NVIDIA/CUDA setup and FFmpeg, which must be covered by a separate licence audit before commercial distribution.
+At the end of installation, `Configure-ClipFinder.ps1` checks for and installs missing FFmpeg, Microsoft Edge WebView2 Runtime and Microsoft Visual C++ Redistributable with `winget`. It also writes a per-user runtime profile: full NVIDIA support uses CUDA; computers without a ready CUDA setup automatically use the working CPU fallback. The tester needs internet access for those system components and for the first Whisper model download.
+
+To create a larger GPU test installer that additionally contains the CUDA 12.9.2 and cuDNN 9.24 installers placed in this project's parent `outputs` folder, run:
+
+```powershell
+.\Build-Installer.ps1 -Version 0.1.1 -IncludeGpuDependencies
+```
+
+The GPU build is about 5.2 GB larger and shows an unchecked **Install NVIDIA GPU support** option in the wizard. It should only be distributed to testers with NVIDIA hardware. Keep the standard installer as the normal release artifact; do not publish the GPU variant as the automatic-update asset. The installed desktop app stores its recordings, database and exports in `%LOCALAPPDATA%\ClipFinder\data`; updates and uninstalls do not remove that data. CUDA/cuDNN redistribution and all third-party components still require a licence audit before commercial distribution.
 
 ## Updating the desktop app
 
