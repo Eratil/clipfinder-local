@@ -174,9 +174,6 @@ function clearClipEditor() {
   $('#clip-editor-title').textContent = 'Select a clip to edit it.';
   $('#clip-editor-empty').hidden = false;
   $('#clip-editor-form').hidden = true;
-  const player = $('#editor-audio-preview');
-  player.pause(); player.removeAttribute('src'); player.hidden = true;
-  if (state.previewAudio === player) state.previewAudio = null;
 }
 
 function selectClipForEditor(segment) {
@@ -208,9 +205,11 @@ async function saveSegmentRating(segment, rating) {
 
 async function playClipAudio(segment) {
   selectClipForEditor(segment);
-  const player = $('#editor-audio-preview');
+  const player = $('#global-audio-player');
+  $('#audio-now-playing-title').textContent = 'Listening to clip';
+  $('#audio-now-playing-detail').textContent = `${fmt(segment.start_seconds)} - ${fmt(segment.end_seconds)} / ${segment.transcript || 'No recognized speech'}`;
+  $('#audio-now-playing').hidden = false;
   player.src = `/api/segments/${segment.id}/audio-preview?audio_track=${encodeURIComponent(state.globalExport.audio_track)}`;
-  player.hidden = false;
   try { await player.play(); } catch { message('Audio preview could not be started.', true); }
 }
 
@@ -428,11 +427,12 @@ $('#editor-export').onclick = () => {
   const position = state.captionPositions[segment.id] || $('#editor-caption-position').value; const settings = state.globalCaption; const output = state.globalExport; const filename = state.exportNames[segment.id] || $('#editor-export-name').value;
   window.location.href = `/api/segments/${segment.id}/export?captions_preset=${encodeURIComponent(settings.captions_preset)}&caption_position=${encodeURIComponent(position)}&base_color=${encodeURIComponent(settings.base_color)}&active_color=${encodeURIComponent(settings.active_color)}&layout=${encodeURIComponent(output.layout)}&audio_track=${encodeURIComponent(output.audio_track)}&filename=${encodeURIComponent(filename)}`;
 };
-const editorPlayer = $('#editor-audio-preview');
-editorPlayer.onplay = () => { if (state.previewAudio && state.previewAudio !== editorPlayer) state.previewAudio.pause(); state.previewAudio = editorPlayer; };
-editorPlayer.onpause = () => { if (state.previewAudio === editorPlayer) state.previewAudio = null; };
-editorPlayer.onended = () => { if (state.previewAudio === editorPlayer) state.previewAudio = null; };
-editorPlayer.onerror = () => message('Audio preview could not be played.', true);
+const globalAudioPlayer = $('#global-audio-player');
+globalAudioPlayer.onplay = () => { if (state.previewAudio && state.previewAudio !== globalAudioPlayer) state.previewAudio.pause(); state.previewAudio = globalAudioPlayer; };
+globalAudioPlayer.onpause = () => { if (state.previewAudio === globalAudioPlayer) state.previewAudio = null; };
+globalAudioPlayer.onended = () => { if (state.previewAudio === globalAudioPlayer) state.previewAudio = null; $('#audio-now-playing').hidden = true; };
+globalAudioPlayer.onerror = () => { $('#audio-now-playing').hidden = true; message('Audio preview could not be played.', true); };
+$('#stop-listening').onclick = () => { globalAudioPlayer.pause(); globalAudioPlayer.removeAttribute('src'); globalAudioPlayer.load(); $('#audio-now-playing').hidden = true; };
 
 async function uploadChatTranscript(file, delay) {
   const data = new FormData(); data.append('chat_file', file); data.append('delay_seconds', String(delay));

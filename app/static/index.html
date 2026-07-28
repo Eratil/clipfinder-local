@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ClipFinder Local</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260728-1" />
+    <link rel="stylesheet" href="/static/style.css?v=20260728-2" />
   </head>
   <body>
     <main>
@@ -237,14 +237,18 @@
         <label class="check censor-toggle"><input id="editor-censor-profanity" type="checkbox" /> Mute profanity from mid-word in exported audio and mask it in captions</label>
         <label>Export file name (optional)<input id="editor-export-name" maxlength="120" placeholder="e.g. funny-reaction-01" /></label>
         <button id="editor-export" class="quiet">Approve before export</button>
-        <audio id="editor-audio-preview" controls preload="none" hidden></audio>
       </div>
     </aside>
+    <section id="audio-now-playing" class="audio-now-playing" aria-live="polite" hidden>
+      <div><strong id="audio-now-playing-title">Listening</strong><p id="audio-now-playing-detail" class="hint"></p></div>
+      <audio id="global-audio-player" controls preload="none"></audio>
+      <button id="stop-listening" class="quiet">Stop</button>
+    </section>
     <dialog id="video-dialog">
       <div class="dialog-head"><strong id="dialog-title">Full recording</strong><button id="close-dialog" class="quiet">Close</button></div>
       <video id="full-video" controls preload="metadata"></video>
       <p id="dialog-transcript" class="hint"></p>
     </dialog>
-    <script src="/static/app.js?v=20260728-1"></script>
+    <script src="/static/app.js?v=20260728-2"></script>
   </body>
 </html>

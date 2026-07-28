@@ -34,6 +34,12 @@ select { width:100%; min-height:38px; color:var(--text); background:#111722; bor
 .chat-delay-form #chat-summary { flex:1 1 260px; }
 .chat-reaction { margin-top:8px; color:var(--accent); font-weight:700; }
 .chat-messages { margin:4px 0 0 !important; font-style:italic; overflow-wrap:anywhere; }
+.audio-now-playing { position:fixed; z-index:80; left:50%; bottom:18px; width:min(720px,calc(100vw - 32px)); transform:translateX(-50%); display:flex; align-items:center; gap:12px; padding:10px 12px 10px 16px; background:rgba(23,30,42,.98); border:1px solid var(--accent); border-radius:12px; box-shadow:0 12px 32px rgba(0,0,0,.42); }
+.audio-now-playing > div { min-width:150px; flex:0 1 210px; }
+.audio-now-playing p { margin:1px 0 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.audio-now-playing audio { min-width:180px; flex:1 1 280px; height:34px; }
+.audio-now-playing button { flex:0 0 auto; }
+@media (max-width:600px) { .audio-now-playing { align-items:stretch; flex-wrap:wrap; } .audio-now-playing > div { flex:1 1 calc(100% - 70px); } .audio-now-playing audio { flex-basis:100%; } }
 .setup-toggle { position:fixed; left:18px; bottom:18px; z-index:30; box-shadow:0 8px 26px rgba(0,0,0,.34); }
 .setup-sidebar { position:fixed; z-index:40; inset:0 auto 0 0; width:min(450px,92vw); overflow-y:auto; padding:22px; background:var(--panel); border-right:1px solid var(--line); box-shadow:12px 0 35px rgba(0,0,0,.42); transform:translateX(-105%); transition:transform .24s ease; }
 .setup-sidebar.open { transform:translateX(0); }
@@ -71,7 +77,6 @@ label.switch input { appearance:none; width:38px; min-height:22px; margin:0; bor
 .clip-editor-fields button { margin-bottom:0; }
 .clip-editor-sidebar > div > label { margin-top:12px; }
 .clip-editor-sidebar > div > button { margin-top:10px; }
-#editor-audio-preview { width:100%; margin-top:14px; }
 @media (min-width:961px) {
   main { width:calc(100% - min(420px,34vw)); max-width:none; margin:0 min(420px,34vw) 0 0; }
   main.setup-sidebar-open { width:calc(100% - min(420px,34vw) - min(450px,92vw)); max-width:none; margin-left:min(450px,92vw); margin-right:min(420px,34vw); }
