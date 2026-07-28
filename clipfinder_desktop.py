@@ -26,6 +26,12 @@ APP_URL = f"http://{HOST}:{PORT}/"
 HEALTH_URL = f"{APP_URL}api/health"
 
 
+def bundled_asset_path(relative_path: str) -> Path:
+    """Resolve an included asset in both source and PyInstaller builds."""
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return root / relative_path
+
+
 def show_error(title: str, text: str) -> None:
     """Show a useful message even when launched through pythonw.exe."""
     try:
@@ -121,7 +127,7 @@ def run() -> None:
             background_color="#0e121a",
         )
         window.events.closing += lambda *_: stop_server(server, thread)
-        webview.start()
+        webview.start(icon=str(bundled_asset_path("assets/clipfinder.ico")))
     except Exception as exc:
         show_error("ClipFinder desktop window", str(exc))
         stop_server(server, thread)
