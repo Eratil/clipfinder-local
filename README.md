@@ -37,13 +37,13 @@ On the build computer, install Inno Setup 6, then run:
 
 At the end of installation, `Configure-ClipFinder.ps1` checks for and installs missing FFmpeg, Microsoft Edge WebView2 Runtime and Microsoft Visual C++ Redistributable with `winget`. It also writes a per-user runtime profile: full NVIDIA support uses CUDA; computers without a ready CUDA setup automatically use the working CPU fallback. The tester needs internet access for those system components and for the first Whisper model download.
 
-To create a larger GPU test installer that additionally contains the CUDA 12.9.2 and cuDNN 9.24 installers placed in this project's parent `outputs` folder, run:
+To create the separate NVIDIA GPU add-on containing CUDA 12.9.2 and cuDNN 9.24 installers placed in this project's parent `outputs` folder, run:
 
 ```powershell
-.\Build-Installer.ps1 -Version 0.1.1 -IncludeGpuDependencies
+.\Build-Installer.ps1 -Version 0.1.1 -GpuAddon
 ```
 
-The GPU build is about 5.2 GB larger and is intentionally split by Inno Setup into a setup executable plus `.bin` data files. Keep those files together; send the GPU setup files in one ZIP or the entire `installer-output` folder. It shows an unchecked **Install NVIDIA GPU support** option in the wizard and should only be distributed to testers with NVIDIA hardware. Keep the standard installer as the normal release artifact; do not publish the GPU variant as the automatic-update asset. The installed desktop app stores its recordings, database and exports in `%LOCALAPPDATA%\ClipFinder\data`; updates and uninstalls do not remove that data. CUDA/cuDNN redistribution and all third-party components still require a licence audit before commercial distribution.
+The GPU add-on is intentionally split by Inno Setup into a setup executable plus `.bin` data files. Keep those files together; send the whole GPU add-on folder in one ZIP. It must only be distributed to testers with NVIDIA hardware. The add-on runs CUDA/cuDNN while its temporary files still exist and verifies the runtime afterward; if extraction fails, ClipFinder remains usable in CPU mode instead of showing an unhandled system error. Keep the standard installer as the normal release artifact; do not publish the GPU add-on as the automatic-update asset. The installed desktop app stores its recordings, database and exports in `%LOCALAPPDATA%\ClipFinder\data`; updates and uninstalls do not remove that data. CUDA/cuDNN redistribution and all third-party components still require a licence audit before commercial distribution.
 
 ## Updating the desktop app
 
