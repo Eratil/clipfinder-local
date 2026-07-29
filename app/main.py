@@ -56,6 +56,7 @@ from app.services.discovery import (
 from app.services.media import MediaError, export_audio_preview, export_clip, write_caption_ass
 from app.services.pipeline import analyse, import_reference_folder, transcribe_clip_range
 from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_logical_sense, build_reference_prompt, infer_tags
+from app.services.updater import automatic_updates_available, install_downloaded_update, job_status as update_download_status, start_download as start_update_download
 from app.services.updates import update_status
 from app.version import __version__
 
@@ -342,7 +343,32 @@ def health():
 
 @app.get("/api/update-status")
 def app_update_status():
-    return update_status()
+    return {**update_status(), "automatic_install_available": automatic_updates_available()}
+
+
+@app.post("/api/updates/download")
+def download_app_update():
+    try:
+        return start_update_download()
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/updates/downloads/{job_id}")
+def app_update_download_status(job_id: str):
+    job = update_download_status(job_id)
+    if not job:
+        raise HTTPException(404, "Update download was not found.")
+    return job
+
+
+@app.post("/api/updates/downloads/{job_id}/install")
+def install_app_update(job_id: str):
+    try:
+        install_downloaded_update(job_id)
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"state": "installing"}
 
 
 @app.post("/api/videos", status_code=201)

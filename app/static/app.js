@@ -1,4 +1,4 @@
-const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, editingSegment: null, clipEditorOpen: false, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1 }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0 };
+const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, editingSegment: null, clipEditorOpen: false, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1 }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0, updateDownloadId: null };
 const $ = (selector) => document.querySelector(selector);
 const fmt = (seconds) => new Date(seconds * 1000).toISOString().slice(11, 19);
 const clamp = (number) => Math.max(0, Math.min(100, Number(number || 0)));
@@ -275,16 +275,53 @@ async function loadChatSummary() {
 }
 
 async function checkForUpdates() {
-  const status = $('#update-status'); const button = $('#check-updates'); const download = $('#download-update');
-  button.disabled = true; download.hidden = true; status.textContent = 'Checking GitHub releases...';
+  const status = $('#update-status'); const button = $('#check-updates'); const download = $('#download-update'); const install = $('#install-update');
+  button.disabled = true; download.hidden = true; install.hidden = true; $('#update-download-progress').hidden = true; status.textContent = 'Checking GitHub releases...';
   try {
     const update = await api('/update-status');
     if (update.error) { status.textContent = `Version ${update.current_version}: ${update.error}`; return; }
     if (!update.update_available) { status.textContent = `ClipFinder ${update.current_version} is up to date (latest: ${update.latest_version}).`; return; }
-    status.textContent = `Update available: ${update.current_version} -> ${update.latest_version}. Download the installer, close ClipFinder, then run it to update in place.`;
+    const size = update.asset_size ? ` (${bytes(update.asset_size)})` : '';
     download.href = update.download_url; download.hidden = !update.download_url;
+    if (update.automatic_install_available) {
+      status.textContent = `Update available: ${update.current_version} -> ${update.latest_version}${size}.`;
+      install.textContent = 'Download update'; install.onclick = startAutomaticUpdate; install.hidden = false;
+    } else {
+      status.textContent = `Update available: ${update.current_version} -> ${update.latest_version}${size}. Download the installer, close ClipFinder, then run it to update in place.`;
+    }
   } catch (error) { status.textContent = `Could not check for updates: ${error.message}`; }
   finally { button.disabled = false; }
+}
+
+async function startAutomaticUpdate() {
+  const status = $('#update-status'); const install = $('#install-update'); const progress = $('#update-download-progress'); const fill = $('#update-download-fill');
+  try {
+    install.disabled = true; status.textContent = 'Preparing update download...'; progress.hidden = false; fill.style.width = '0%';
+    const job = await api('/updates/download', { method:'POST' }); state.updateDownloadId = job.id;
+    const poll = async () => {
+      try {
+        const current = await api(`/updates/downloads/${state.updateDownloadId}`);
+        const percent = Number(current.progress || 0); fill.style.width = `${percent}%`;
+        const amount = current.total_bytes ? ` ${bytes(current.downloaded_bytes)} / ${bytes(current.total_bytes)}` : '';
+        status.textContent = `${current.message || 'Downloading update'}${amount}${percent ? ` (${percent}%)` : ''}`;
+        if (current.state === 'completed') {
+          fill.style.width = '100%'; status.textContent = 'Update is ready. ClipFinder will close, install the update, then reopen.';
+          install.disabled = false; install.textContent = 'Restart and install update'; install.onclick = installAutomaticUpdate; return;
+        }
+        if (current.state === 'failed') { install.disabled = false; status.textContent = `Update download failed: ${current.message}`; return; }
+        window.setTimeout(poll, 700);
+      } catch (error) { install.disabled = false; status.textContent = `Update download failed: ${error.message}`; }
+    };
+    poll();
+  } catch (error) { install.disabled = false; status.textContent = `Could not start the update: ${error.message}`; }
+}
+
+async function installAutomaticUpdate() {
+  const status = $('#update-status'); const install = $('#install-update');
+  try {
+    install.disabled = true; status.textContent = 'Closing ClipFinder and installing the update...';
+    await api(`/updates/downloads/${state.updateDownloadId}/install`, { method:'POST' });
+  } catch (error) { install.disabled = false; status.textContent = `Could not install the update: ${error.message}`; }
 }
 
 async function loadCollections() {

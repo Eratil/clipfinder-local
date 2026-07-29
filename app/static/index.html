@@ -134,7 +134,10 @@
         <article class="library-card updates-card">
           <h3>Software updates</h3>
           <p id="update-status" class="hint">Check manually for a newer ClipFinder release.</p>
-          <div class="prompt-row"><button id="check-updates" class="quiet">Check for updates</button><a id="download-update" class="quiet" target="_blank" rel="noopener" hidden>Download update</a></div>
+          <div id="update-download-progress" class="upload-progress" hidden>
+            <div class="progress-track"><div id="update-download-fill" class="progress-fill"></div></div>
+          </div>
+          <div class="prompt-row"><button id="check-updates" class="quiet">Check for updates</button><button id="install-update" class="quiet" hidden>Download update</button><a id="download-update" class="quiet" target="_blank" rel="noopener" hidden>Download manually</a></div>
         </article>
       </aside>
 

@@ -77,6 +77,13 @@ else {
         clipfinder_desktop.py
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller could not build the installer.' }
 
+    Write-Host 'Building the small update helper...' -ForegroundColor Cyan
+    & $python -m PyInstaller --noconfirm --clean --onefile --windowed `
+        --name ClipFinderUpdateHelper `
+        clipfinder_update_helper.py
+    if ($LASTEXITCODE -ne 0) { throw 'PyInstaller could not build the update helper.' }
+    Copy-Item -LiteralPath 'dist\ClipFinderUpdateHelper.exe' -Destination 'dist\ClipFinder\ClipFinderUpdateHelper.exe' -Force
+
     # PyTorch's Windows wheel carries development archives and an entire CUDA
     # runtime. Text embeddings safely fall back to CPU; GPU transcription is
     # supplied by the optional CUDA/cuDNN add-on. Keeping these files here
