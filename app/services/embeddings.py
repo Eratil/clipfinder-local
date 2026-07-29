@@ -4,6 +4,11 @@ _model = None
 _model_device: str | None = None
 
 
+def current_device() -> str | None:
+    """The device of the already loaded similarity model, if any."""
+    return _model_device
+
+
 def embed_texts(texts: list[str]) -> list[list[float]]:
     """Lazy-load a multilingual model only after a completed transcription."""
     global _model, _model_device

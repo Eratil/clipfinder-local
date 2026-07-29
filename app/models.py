@@ -81,6 +81,18 @@ class CaptionDefaultsUpdate(BaseModel):
 class ExportDefaultsUpdate(BaseModel):
     layout: str = Field(default="original", pattern="^(original|portrait_camera|portrait_game|portrait_split)$")
     audio_track: int = Field(default=1, ge=1, le=4)
+    camera_x: float = Field(default=0.78, ge=0, le=1)
+    camera_y: float = Field(default=0.03, ge=0, le=1)
+    camera_width: float = Field(default=0.11, gt=0.02, le=1)
+    camera_height: float = Field(default=0.11, gt=0.02, le=1)
+    game_x: float = Field(default=0.22, ge=0, le=1)
+    game_y: float = Field(default=0.0, ge=0, le=1)
+    game_width: float = Field(default=0.56, gt=0.02, le=1)
+    game_height: float = Field(default=1.0, gt=0.02, le=1)
+
+
+class LayoutPresetCreate(ExportDefaultsUpdate):
+    name: str = Field(min_length=1, max_length=80)
 
 
 class AnalysisAudioDefaultsUpdate(BaseModel):

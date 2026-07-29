@@ -74,6 +74,25 @@ function Test-VCRedist {
     return $runtime -and $runtime.Installed -eq 1
 }
 
+function Install-VCRedist {
+    $installedWithWinget = Install-WingetPackage 'Microsoft.VCRedist.2015+.x64' 'Microsoft Visual C++ Redistributable 2015-2022 (x64)'
+    if ($installedWithWinget) {
+        return $true
+    }
+    $installer = Join-Path $env:TEMP 'ClipFinder-vc_redist.x64.exe'
+    try {
+        Write-Setup 'Downloading the official Microsoft Visual C++ Runtime installer...' 'Cyan'
+        Invoke-WebRequest -Uri 'https://aka.ms/vc14/vc_redist.x64.exe' -OutFile $installer -UseBasicParsing
+        Start-Process -FilePath $installer -ArgumentList '/install', '/quiet', '/norestart' -Verb RunAs -Wait
+        return (Test-VCRedist)
+    } catch {
+        Write-Setup "[warning] Could not install Microsoft Visual C++ Redistributable automatically: $($_.Exception.Message)" 'Yellow'
+        return $false
+    } finally {
+        Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-CudaProfile {
     $nvidia = Get-Command nvidia-smi -ErrorAction SilentlyContinue
     $cudaRoot = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA'
@@ -112,7 +131,7 @@ if (Test-WebView2Runtime) { Write-Setup '[ok] Microsoft Edge WebView2 Runtime is
 else { Write-Setup '[warning] WebView2 Runtime could not be verified. Install it manually if the desktop window does not open.' 'Yellow' }
 
 if (-not (Test-VCRedist)) {
-    Install-WingetPackage 'Microsoft.VCRedist.2015+.x64' 'Microsoft Visual C++ Redistributable 2015-2022 (x64)' | Out-Null
+    Install-VCRedist | Out-Null
 }
 if (Test-VCRedist) { Write-Setup '[ok] Microsoft Visual C++ Redistributable is available.' 'Green' }
 else { Write-Setup '[warning] Visual C++ Redistributable could not be verified.' 'Yellow' }

@@ -1,4 +1,4 @@
-const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, editingSegment: null, clipEditorOpen: false, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1 }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0, updateDownloadId: null };
+const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, editingSegment: null, clipEditorOpen: false, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1, camera_x:.78, camera_y:.03, camera_width:.11, camera_height:.11, game_x:.22, game_y:0, game_width:.56, game_height:1 }, layoutCalibration: { mode:'camera', drawing:null }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0, updateDownloadId: null };
 const $ = (selector) => document.querySelector(selector);
 const fmt = (seconds) => new Date(seconds * 1000).toISOString().slice(11, 19);
 const clamp = (number) => Math.max(0, Math.min(100, Number(number || 0)));
@@ -45,6 +45,13 @@ function uploadVideo(file) {
   });
 }
 function message(text, error = false) { if (error) state.statusErrorUntil = Date.now() + 12000; const el = $('#status'); el.textContent = text; el.style.color = error ? 'var(--danger)' : 'var(--muted)'; }
+async function loadRuntimeStatus() {
+  const runtime = await api('/runtime-status');
+  $('#runtime-headline').textContent = runtime.headline;
+  const gpu = runtime.gpu ? `${runtime.gpu.name} / ${runtime.gpu.memory_mb} MB VRAM` : 'No NVIDIA GPU detected';
+  $('#runtime-detail').textContent = `Transcription: ${runtime.transcription.label}. Similarity search: ${runtime.embeddings.label}. ${gpu}.`;
+  $('#runtime-headline').classList.toggle('runtime-warning', runtime.transcription.mode === 'unavailable');
+}
 function setUploadProgress(percent, label, error = false) {
   const block = $('#upload-progress'); block.hidden = false; block.classList.toggle('error', error);
   $('#upload-progress-label').textContent = label;
@@ -371,10 +378,85 @@ async function loadCaptionSettings() {
 async function loadExportSettings() {
   const defaults = await api('/export-defaults');
   if (!state.exportDirty) {
-    state.globalExport = { layout: defaults.layout, audio_track: Number(defaults.audio_track) };
+    state.globalExport = { ...defaults, audio_track: Number(defaults.audio_track) };
     $('#global-layout').value = state.globalExport.layout;
     $('#global-audio-track').value = String(state.globalExport.audio_track);
+    drawLayoutOverlay();
   }
+}
+
+async function loadLayoutPresets() {
+  const presets = await api('/layout-presets'); const box = $('#layout-presets'); box.replaceChildren();
+  for (const preset of presets) {
+    const row = make('div', 'prompt-row'); row.append(make('strong', '', `${preset.name} - ${preset.layout.replace('portrait_', 'vertical ')}`));
+    const use = make('button', 'quiet', 'Use'); use.onclick = async () => { try { state.globalExport = await api(`/layout-presets/${preset.id}/apply`, {method:'POST'}); state.globalExport.audio_track = Number(state.globalExport.audio_track); state.exportDirty = false; await loadExportSettings(); message(`Layout preset "${preset.name}" is active.`); } catch (error) { message(error.message, true); } };
+    const remove = make('button', 'quiet', 'Delete'); remove.onclick = async () => { try { await api(`/layout-presets/${preset.id}`, {method:'DELETE'}); await loadLayoutPresets(); } catch (error) { message(error.message, true); } };
+    row.append(use, remove); box.append(row);
+  }
+}
+
+function calibratedRect(kind) {
+  const output = state.globalExport;
+  return kind === 'camera'
+    ? { x:Number(output.camera_x), y:Number(output.camera_y), width:Number(output.camera_width), height:Number(output.camera_height) }
+    : { x:Number(output.game_x), y:Number(output.game_y), width:Number(output.game_width), height:Number(output.game_height) };
+}
+function storeCalibratedRect(kind, rect) {
+  if (kind === 'camera') Object.assign(state.globalExport, { camera_x:rect.x, camera_y:rect.y, camera_width:rect.width, camera_height:rect.height });
+  else Object.assign(state.globalExport, { game_x:rect.x, game_y:rect.y, game_width:rect.width, game_height:rect.height });
+  state.exportDirty = true;
+}
+function layoutCanvas() { return $('#layout-overlay'); }
+function resizeLayoutCanvas() {
+  const video = $('#layout-source-video'); const canvas = layoutCanvas();
+  if (!video.videoWidth) return;
+  const box = video.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.round(box.width)); canvas.height = Math.max(1, Math.round(box.height));
+  canvas.style.width = `${box.width}px`; canvas.style.height = `${box.height}px`;
+}
+function rectanglePixels(rect, canvas) { return { x:rect.x * canvas.width, y:rect.y * canvas.height, width:rect.width * canvas.width, height:rect.height * canvas.height }; }
+function drawRect(ctx, rect, color, label, canvas) {
+  const box = rectanglePixels(rect, canvas); ctx.strokeStyle = color; ctx.fillStyle = `${color}22`; ctx.lineWidth = 3; ctx.fillRect(box.x, box.y, box.width, box.height); ctx.strokeRect(box.x, box.y, box.width, box.height); ctx.fillStyle = color; ctx.font = 'bold 13px system-ui'; ctx.fillText(label, box.x + 6, Math.max(16, box.y + 17));
+}
+function drawCroppedCover(ctx, video, rect, target) {
+  const sourceX = rect.x * video.videoWidth; const sourceY = rect.y * video.videoHeight; const sourceW = rect.width * video.videoWidth; const sourceH = rect.height * video.videoHeight;
+  const scale = Math.max(target.width / sourceW, target.height / sourceH); const width = sourceW * scale; const height = sourceH * scale;
+  ctx.drawImage(video, sourceX, sourceY, sourceW, sourceH, target.x + (target.width - width) / 2, target.y + (target.height - height) / 2, width, height);
+}
+function drawCroppedContain(ctx, video, rect, target) {
+  const sourceX = rect.x * video.videoWidth; const sourceY = rect.y * video.videoHeight; const sourceW = rect.width * video.videoWidth; const sourceH = rect.height * video.videoHeight;
+  const scale = Math.min(target.width / sourceW, target.height / sourceH); const width = sourceW * scale; const height = sourceH * scale;
+  ctx.drawImage(video, sourceX, sourceY, sourceW, sourceH, target.x + (target.width - width) / 2, target.y + (target.height - height) / 2, width, height);
+}
+function renderLayoutPreview() {
+  const video = $('#layout-source-video'); const preview = $('#layout-output-preview'); if (!video.videoWidth) return;
+  const ctx = preview.getContext('2d'); const camera = calibratedRect('camera'); const game = calibratedRect('game'); const layout = $('#global-layout').value;
+  ctx.fillStyle = '#10141d'; ctx.fillRect(0, 0, preview.width, preview.height);
+  try {
+    if (layout === 'portrait_camera') drawCroppedCover(ctx, video, camera, {x:0,y:0,width:preview.width,height:preview.height});
+    else if (layout === 'portrait_game') drawCroppedCover(ctx, video, game, {x:0,y:0,width:preview.width,height:preview.height});
+    else if (layout === 'portrait_split') { drawCroppedContain(ctx, video, camera, {x:0,y:0,width:preview.width,height:preview.height / 3}); drawCroppedCover(ctx, video, game, {x:0,y:preview.height / 3,width:preview.width,height:preview.height * 2 / 3}); }
+    else drawCroppedContain(ctx, video, {x:0,y:0,width:1,height:1}, {x:0,y:0,width:preview.width,height:preview.height});
+  } catch { /* The video frame is simply not ready yet. */ }
+}
+function drawLayoutOverlay() {
+  const video = $('#layout-source-video'); const canvas = layoutCanvas(); if (!video.videoWidth || !canvas.width) return;
+  const ctx = canvas.getContext('2d'); ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawRect(ctx, calibratedRect('camera'), '#77e3c0', 'Camera', canvas); drawRect(ctx, calibratedRect('game'), '#6db4ff', 'Gameplay', canvas);
+  if (state.layoutCalibration.drawing) drawRect(ctx, state.layoutCalibration.drawing, '#ffd166', `New ${state.layoutCalibration.mode}`, canvas);
+  renderLayoutPreview();
+}
+function canvasPoint(event) {
+  const canvas = layoutCanvas(); const box = canvas.getBoundingClientRect();
+  return { x:Math.max(0, Math.min(1, (event.clientX - box.left) / box.width)), y:Math.max(0, Math.min(1, (event.clientY - box.top) / box.height)) };
+}
+function setCalibrationMode(mode) {
+  state.layoutCalibration.mode = mode; $('#layout-calibration-status').textContent = `Drawing ${mode} area: drag over the preview frame.`; layoutCanvas().classList.add('drawing');
+}
+function startLayoutPreview() {
+  const video = state.videos.find((item) => item.id === state.videoId); if (!video) return message('Choose a recording first.', true);
+  const player = $('#layout-source-video'); $('#layout-source-wrap').hidden = false; $('#layout-calibration-status').textContent = 'Pause on a representative frame, then draw the camera and gameplay areas.';
+  player.src = `/api/videos/${video.id}/stream#t=1`; player.onloadedmetadata = () => { resizeLayoutCanvas(); drawLayoutOverlay(); }; player.onseeked = drawLayoutOverlay; player.ontimeupdate = drawLayoutOverlay; window.setTimeout(() => { resizeLayoutCanvas(); drawLayoutOverlay(); }, 300);
 }
 
 function updateAnalysisAudioModeUi() {
@@ -440,7 +522,7 @@ async function loadImportStatus() {
 }
 
 async function loadRejectionReasons() { state.rejectionReasons = (await api('/rejection-reasons')).map((item) => item.reason); const box = $('#saved-rejection-reasons'); box.replaceChildren(); for (const reason of state.rejectionReasons) box.append(make('div', 'hint', reason)); if (state.editingSegment) addRejectionReasons($('#editor-review-reason')); }
-async function refreshLibrary() { await Promise.all([loadCollections(), loadPrompts(), loadReferenceSources(), loadCaptionSettings(), loadExportSettings(), loadAnalysisAudioSettings(), loadDiscoverySettings(), loadRejectionReasons()]); if (state.collectionId) await loadImportStatus(); }
+async function refreshLibrary() { await Promise.all([loadCollections(), loadPrompts(), loadReferenceSources(), loadCaptionSettings(), loadExportSettings(), loadLayoutPresets(), loadAnalysisAudioSettings(), loadDiscoverySettings(), loadRejectionReasons()]); if (state.collectionId) await loadImportStatus(); }
 async function refreshDashboard() {
   try { await Promise.all([loadVideos(), refreshLibrary()]); const current = state.videos.find((video) => video.id === state.videoId); const editing = document.activeElement?.matches('input, textarea, select'); if (current?.status === 'ready' && state.resultMode === 'all' && !state.previewAudio && !editing) await loadSegments(); if (Date.now() >= state.statusErrorUntil) message('Local API online'); } catch (error) { message(`Reconnecting to local API: ${error.message}`, true); }
 }
@@ -527,10 +609,18 @@ $('#global-caption-base-color').oninput = rememberGlobalCaption;
 $('#global-caption-active-color').oninput = rememberGlobalCaption;
 $('#caption-defaults-form').onsubmit = async (event) => { event.preventDefault(); try { state.globalCaption = await api('/caption-defaults', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({captions_preset:$('#global-caption-preset').value, base_color:$('#global-caption-base-color').value, active_color:$('#global-caption-active-color').value}) }); state.captionDirty = false; await loadCaptionSettings(); message('Global caption settings saved.'); } catch (error) { message(error.message, true); } };
 $('#caption-favorite-form').onsubmit = async (event) => { event.preventDefault(); try { await api('/caption-favorites', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:$('#caption-favorite-name').value, captions_preset:$('#global-caption-preset').value, base_color:$('#global-caption-base-color').value, active_color:$('#global-caption-active-color').value}) }); event.target.reset(); await loadCaptionSettings(); message('Caption favorite saved.'); } catch (error) { message(error.message, true); } };
-function rememberGlobalExport() { state.globalExport = { layout: $('#global-layout').value, audio_track: Number($('#global-audio-track').value) }; state.exportDirty = true; }
+function rememberGlobalExport() { state.globalExport = { ...state.globalExport, layout: $('#global-layout').value, audio_track: Number($('#global-audio-track').value) }; state.exportDirty = true; renderLayoutPreview(); }
 $('#global-layout').onchange = rememberGlobalExport;
 $('#global-audio-track').onchange = rememberGlobalExport;
-$('#export-defaults-form').onsubmit = async (event) => { event.preventDefault(); try { state.globalExport = await api('/export-defaults', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({layout:$('#global-layout').value, audio_track:Number($('#global-audio-track').value)}) }); state.exportDirty = false; await loadExportSettings(); message('Global export settings saved.'); } catch (error) { message(error.message, true); } };
+$('#export-defaults-form').onsubmit = async (event) => { event.preventDefault(); try { state.globalExport = await api('/export-defaults', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({...state.globalExport, layout:$('#global-layout').value, audio_track:Number($('#global-audio-track').value)}) }); state.exportDirty = false; await loadExportSettings(); message('Global export settings and calibrated areas saved.'); } catch (error) { message(error.message, true); } };
+$('#layout-preset-form').onsubmit = async (event) => { event.preventDefault(); const name = $('#layout-preset-name').value.trim(); if (!name) return; try { await api('/layout-presets', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({...state.globalExport, name})}); event.target.reset(); await loadLayoutPresets(); message(`Layout "${name}" saved.`); } catch (error) { message(error.message, true); } };
+$('#load-layout-preview').onclick = startLayoutPreview;
+$('#calibrate-camera').onclick = () => setCalibrationMode('camera');
+$('#calibrate-game').onclick = () => setCalibrationMode('game');
+layoutCanvas().onpointerdown = (event) => { if (!$('#layout-source-video').videoWidth) return; const point = canvasPoint(event); state.layoutCalibration.start = point; state.layoutCalibration.drawing = {x:point.x, y:point.y, width:0, height:0}; layoutCanvas().setPointerCapture(event.pointerId); drawLayoutOverlay(); };
+layoutCanvas().onpointermove = (event) => { const start = state.layoutCalibration.start; if (!start) return; const point = canvasPoint(event); state.layoutCalibration.drawing = {x:Math.min(start.x, point.x), y:Math.min(start.y, point.y), width:Math.abs(point.x - start.x), height:Math.abs(point.y - start.y)}; drawLayoutOverlay(); };
+layoutCanvas().onpointerup = (event) => { const rect = state.layoutCalibration.drawing; if (!state.layoutCalibration.start || !rect) return; layoutCanvas().releasePointerCapture?.(event.pointerId); state.layoutCalibration.start = null; state.layoutCalibration.drawing = null; if (rect.width < .02 || rect.height < .02) { $('#layout-calibration-status').textContent = 'Area is too small. Drag a larger rectangle.'; drawLayoutOverlay(); return; } storeCalibratedRect(state.layoutCalibration.mode, rect); $('#layout-calibration-status').textContent = `${state.layoutCalibration.mode === 'camera' ? 'Camera' : 'Gameplay'} area updated. Click Save export settings to use it for exports.`; layoutCanvas().classList.remove('drawing'); drawLayoutOverlay(); };
+window.addEventListener('resize', () => { resizeLayoutCanvas(); drawLayoutOverlay(); });
 ['#analysis-audio-mode', '#analysis-single-track', '#analysis-microphone-track', '#analysis-all-sounds-track', '#analysis-game-track', '#analysis-use-all-sounds', '#analysis-use-game'].forEach((selector) => { $(selector).onchange = rememberAnalysisAudio; });
 $('#analysis-audio-form').onsubmit = async (event) => { event.preventDefault(); const body = { mode:$('#analysis-audio-mode').value, single_track:Number($('#analysis-single-track').value), microphone_track:Number($('#analysis-microphone-track').value), all_sounds_track:Number($('#analysis-all-sounds-track').value), game_track:Number($('#analysis-game-track').value), use_all_sounds:$('#analysis-use-all-sounds').checked, use_game:$('#analysis-use-game').checked }; try { state.analysisAudio = await api('/analysis-audio-defaults', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }); state.analysisAudioDirty = false; await loadAnalysisAudioSettings(); message('Analysis audio settings saved. They apply to the next analysis or reanalysis.'); } catch (error) { message(error.message, true); } };
 $('#discovery-defaults-form').onsubmit = async (event) => { event.preventDefault(); try { state.discovery = await api('/discovery-defaults', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({active_profile:$('#discovery-profile').value}) }); await loadDiscoverySettings(); if (state.videoId) await showAllSegments(); message('Discovery profile saved. Candidate ranking was refreshed.'); } catch (error) { message(error.message, true); } };
@@ -564,4 +654,4 @@ $('#clip-editor-toggle').onclick = () => setClipEditorOpen(true);
 setClipEditorOpen(false);
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') setSetupSidebar(false); });
 $('#close-dialog').onclick = () => { $('#full-video').pause(); $('#video-dialog').close(); };
-api('/health').then(refreshDashboard).catch(() => message('Local API unavailable', true)); setInterval(refreshDashboard, 4000);
+api('/health').then(async () => { await Promise.all([refreshDashboard(), loadRuntimeStatus()]); }).catch(() => message('Local API unavailable', true)); setInterval(refreshDashboard, 4000); setInterval(() => loadRuntimeStatus().catch(() => {}), 30000);

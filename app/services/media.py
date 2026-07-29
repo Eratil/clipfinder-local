@@ -205,13 +205,23 @@ def write_caption_ass(
     target.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _portrait_filter(layout: str) -> str:
-    """Transforms the stable OBS scene: a framed camera in the upper-right and gameplay below it."""
-    camera = "crop=trunc(iw*0.11)*2:trunc(ih*0.11)*2:trunc(iw*0.78/2)*2:trunc(ih*0.03/2)*2"
+def _crop_filter(rect: tuple[float, float, float, float]) -> str:
+    """Build an even-pixel crop from a normalized rectangle."""
+    x, y, width, height = (max(0.0, min(1.0, float(value))) for value in rect)
+    width = min(width, 1.0 - x)
+    height = min(height, 1.0 - y)
+    if width < 0.02 or height < 0.02:
+        raise MediaError("Saved camera or gameplay area is too small. Calibrate the layout again.")
+    return f"crop=trunc(iw*{width:.6f})*2:trunc(ih*{height:.6f})*2:trunc(iw*{x:.6f}/2)*2:trunc(ih*{y:.6f}/2)*2"
+
+
+def _portrait_filter(layout: str, camera_rect: tuple[float, float, float, float], game_rect: tuple[float, float, float, float]) -> str:
+    """Transforms user-calibrated camera and gameplay areas into vertical formats."""
+    camera = _crop_filter(camera_rect)
     if layout == "portrait_camera":
         return f"{camera},scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1"
     if layout == "portrait_game":
-        return "crop=trunc(ih*9/32)*2:ih:trunc((iw-trunc(ih*9/32)*2)/4)*2:0,scale=1080:1920,setsar=1"
+        return f"{_crop_filter(game_rect)},scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1"
     raise MediaError("Unknown portrait layout")
 
 
@@ -234,7 +244,7 @@ def _audio_censor_filter(audio_stream: str, ranges: list[tuple[float, float]], d
     return f"[{audio_stream}]asetpts=PTS-STARTPTS,volume=0:enable='{conditions}'[aout]"
 
 
-def export_clip(source: Path, target: Path, start: float, end: float, captions_path: Path | None = None, layout: str = "original", audio_track: int = 1, word_timestamps: list[dict] | None = None, transcript: str = "", censor_profanity: bool = False) -> None:
+def export_clip(source: Path, target: Path, start: float, end: float, captions_path: Path | None = None, layout: str = "original", audio_track: int = 1, word_timestamps: list[dict] | None = None, transcript: str = "", censor_profanity: bool = False, camera_rect: tuple[float, float, float, float] = (0.78, 0.03, 0.11, 0.11), game_rect: tuple[float, float, float, float] = (0.22, 0.0, 0.56, 1.0)) -> None:
     """Export an exact clip in its original format or a 1080x1920 short layout."""
     if audio_track < 1:
         raise MediaError("Invalid audio track")
@@ -246,8 +256,8 @@ def export_clip(source: Path, target: Path, start: float, end: float, captions_p
     censor_ranges = _censored_audio_ranges(words, duration) if censor_profanity else []
     audio_filter = _audio_censor_filter(selected_audio, censor_ranges, duration) if censor_ranges else ""
     if layout == "portrait_split":
-        camera = "crop=trunc(iw*0.11)*2:trunc(ih*0.11)*2:trunc(iw*0.78/2)*2:trunc(ih*0.03/2)*2"
-        game = "crop=trunc(ih*27/64)*2:ih:trunc((iw-trunc(ih*27/64)*2)/4)*2:0,scale=1080:1280"
+        camera = _crop_filter(camera_rect)
+        game = f"{_crop_filter(game_rect)},scale=1080:1280:force_original_aspect_ratio=increase,crop=1080:1280"
         top = f"{camera},scale=1080:640:force_original_aspect_ratio=decrease,pad=1080:640:(ow-iw)/2:(oh-ih)/2:color=0x10141d"
         output = "[base]" + (caption_filter + "," if caption_filter else "") + "format=yuv420p,setsar=1[outv]"
         graph = f"[0:v]split=2[camera][game];[camera]{top}[top];[game]{game}[bottom];[top][bottom]vstack=inputs=2[base];{output}"
@@ -257,7 +267,7 @@ def export_clip(source: Path, target: Path, start: float, end: float, captions_p
     else:
         filters: list[str] = []
         if layout in {"portrait_camera", "portrait_game"}:
-            filters.append(_portrait_filter(layout))
+            filters.append(_portrait_filter(layout, camera_rect, game_rect))
         elif layout != "original":
             raise MediaError("Unknown clip layout")
         if caption_filter:

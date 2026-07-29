@@ -165,7 +165,29 @@ def initialize() -> None:
                 id INTEGER PRIMARY KEY CHECK(id=1),
                 layout TEXT NOT NULL DEFAULT 'original',
                 audio_track INTEGER NOT NULL DEFAULT 1,
+                camera_x REAL NOT NULL DEFAULT 0.78,
+                camera_y REAL NOT NULL DEFAULT 0.03,
+                camera_width REAL NOT NULL DEFAULT 0.11,
+                camera_height REAL NOT NULL DEFAULT 0.11,
+                game_x REAL NOT NULL DEFAULT 0.22,
+                game_y REAL NOT NULL DEFAULT 0.0,
+                game_width REAL NOT NULL DEFAULT 0.56,
+                game_height REAL NOT NULL DEFAULT 1.0,
                 updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS layout_presets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                layout TEXT NOT NULL,
+                camera_x REAL NOT NULL,
+                camera_y REAL NOT NULL,
+                camera_width REAL NOT NULL,
+                camera_height REAL NOT NULL,
+                game_x REAL NOT NULL,
+                game_y REAL NOT NULL,
+                game_width REAL NOT NULL,
+                game_height REAL NOT NULL,
+                created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS analysis_audio_defaults (
                 id INTEGER PRIMARY KEY CHECK(id=1),
@@ -231,6 +253,13 @@ def initialize() -> None:
             con.execute("ALTER TABLE videos ADD COLUMN transcript_audio_track INTEGER NOT NULL DEFAULT 1")
         if "audio_analysis_mode" not in video_columns:
             con.execute("ALTER TABLE videos ADD COLUMN audio_analysis_mode TEXT NOT NULL DEFAULT 'single'")
+        export_columns = {item["name"] for item in con.execute("PRAGMA table_info(export_defaults)").fetchall()}
+        for name, default in {
+            "camera_x": "0.78", "camera_y": "0.03", "camera_width": "0.11", "camera_height": "0.11",
+            "game_x": "0.22", "game_y": "0.0", "game_width": "0.56", "game_height": "1.0",
+        }.items():
+            if name not in export_columns:
+                con.execute(f"ALTER TABLE export_defaults ADD COLUMN {name} REAL NOT NULL DEFAULT {default}")
         con.execute(
             "INSERT OR IGNORE INTO caption_defaults (id, captions_preset, base_color, active_color, updated_at) VALUES (1, 'highlight', '#FFFFFF', '#FFFF00', ?)",
             (now(),),

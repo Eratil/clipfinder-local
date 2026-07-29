@@ -41,6 +41,9 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Source: "..\dist\ClipFinder\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "Configure-ClipFinder.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\TESTER-INSTALLATION.md"; DestDir: "{app}"; Flags: ignoreversion
+; PyTorch's native CPU libraries need the MSVC runtime. Keep the official x64
+; installer in the base setup so a tester does not have to have winget.
+Source: "third_party\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
 Name: "{autoprograms}\ClipFinder"; Filename: "{app}\{#MyAppExeName}"
@@ -52,5 +55,16 @@ Name: "{autodesktop}\ClipFinder"; Filename: "{app}\{#MyAppExeName}"; Tasks: desk
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Run]
+Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; Description: "Install Microsoft Visual C++ Runtime (required by ClipFinder AI libraries)"; Flags: waituntilterminated; Check: VCRedistMissing
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Configure-ClipFinder.ps1"""; Description: "Install missing Windows components and configure ClipFinder"; Flags: postinstall waituntilterminated runascurrentuser
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch ClipFinder"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function VCRedistMissing(): Boolean;
+var
+  Installed: Cardinal;
+begin
+  Result := True;
+  if RegQueryDWordValue(HKLM64, 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64', 'Installed', Installed) then
+    Result := Installed <> 1;
+end;

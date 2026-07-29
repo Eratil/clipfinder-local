@@ -49,6 +49,12 @@ if ($GpuAddon) {
     Write-Host 'Building the separate NVIDIA GPU add-on. It contains only CUDA and cuDNN.' -ForegroundColor Yellow
 }
 else {
+    $vcRedist = Join-Path $projectRoot 'installer\third_party\vc_redist.x64.exe'
+    if (-not (Test-Path -LiteralPath $vcRedist)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $vcRedist) | Out-Null
+        Write-Host 'Downloading the official Microsoft Visual C++ Runtime for the installer...' -ForegroundColor Cyan
+        Invoke-WebRequest -Uri 'https://aka.ms/vc14/vc_redist.x64.exe' -OutFile $vcRedist -UseBasicParsing
+    }
     Write-Host 'Installing build dependencies...' -ForegroundColor Cyan
     & $python -m pip install --upgrade -r requirements-dev.txt
     if ($LASTEXITCODE -ne 0) { throw 'Could not install build dependencies.' }

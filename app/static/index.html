@@ -4,12 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ClipFinder Local</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260728-6" />
+    <link rel="stylesheet" href="/static/style.css?v=20260729-layouts" />
   </head>
   <body class="clip-editor-closed">
     <main>
       <header>
-        <div><p class="eyebrow">LOCAL / NVIDIA GPU</p><h1>ClipFinder</h1></div>
+        <div><p id="runtime-headline" class="eyebrow">LOCAL / CHECKING RUNTIME</p><h1>ClipFinder</h1><p id="runtime-detail" class="hint runtime-detail">Checking GPU and CUDA...</p></div>
         <div class="header-actions"><a href="/docs" target="_blank" class="quiet">API docs</a><p id="status">Connecting...</p></div>
       </header>
 
@@ -80,14 +80,14 @@
           </article>
           <article class="library-card">
             <h3>Export defaults</h3>
-            <p class="hint">Applied to every exported clip. Audio track 1 is the default microphone and game mix.</p>
+            <p class="hint">Applied to every exported clip. Calibrate once on a recording when your camera or gameplay differs from the default OBS scene.</p>
             <form id="export-defaults-form">
               <label>Clip layout
                 <select id="global-layout">
                   <option value="original">Original (default)</option>
-                  <option value="portrait_camera">Vertical - camera center</option>
-                  <option value="portrait_game">Vertical - game center</option>
-                  <option value="portrait_split">Vertical - camera top, game bottom</option>
+                  <option value="portrait_camera">Vertical - calibrated camera center</option>
+                  <option value="portrait_game">Vertical - calibrated gameplay center</option>
+                  <option value="portrait_split">Vertical - camera top, gameplay bottom</option>
                 </select>
               </label>
               <label>Original audio track
@@ -100,6 +100,15 @@
               </label>
               <button>Save export settings</button>
             </form>
+            <div class="layout-calibration">
+              <div class="section-title"><div><h3>Layout calibration and preview</h3><p class="hint">Select a recording, pause on a representative frame, choose an area and drag a rectangle. The preview is shown before export.</p></div></div>
+              <div class="prompt-row"><button id="load-layout-preview" class="quiet" type="button">Use selected recording</button><button id="calibrate-camera" class="quiet" type="button">Draw camera area</button><button id="calibrate-game" class="quiet" type="button">Draw gameplay area</button></div>
+              <p id="layout-calibration-status" class="hint">Choose a recording first.</p>
+              <div id="layout-source-wrap" class="layout-source-wrap" hidden><video id="layout-source-video" controls muted playsinline></video><canvas id="layout-overlay"></canvas></div>
+              <canvas id="layout-output-preview" class="layout-output-preview" width="270" height="480" aria-label="Vertical layout preview"></canvas>
+              <form id="layout-preset-form" class="prompt-row"><input id="layout-preset-name" maxlength="80" placeholder="Layout name, e.g. facecam top right" required /><button class="quiet">Save current layout</button></form>
+              <div id="layout-presets" class="saved-list"></div>
+            </div>
           </article>
           <article class="library-card">
             <h3>Analysis audio sources</h3>
@@ -258,6 +267,6 @@
       <video id="full-video" controls preload="metadata"></video>
       <p id="dialog-transcript" class="hint"></p>
     </dialog>
-    <script src="/static/app.js?v=20260728-6"></script>
+    <script src="/static/app.js?v=20260729-layouts"></script>
   </body>
 </html>

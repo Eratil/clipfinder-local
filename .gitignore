@@ -11,6 +11,7 @@ analysis_frames/
 build/
 dist/
 installer-output/
+installer/third_party/vc_redist.x64.exe
 *.spec
 *.log
 *.sqlite

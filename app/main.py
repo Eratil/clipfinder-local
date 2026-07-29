@@ -33,6 +33,7 @@ from app.models import (
     DescriptionSearch,
     ExampleCreate,
     ExportDefaultsUpdate,
+    LayoutPresetCreate,
     ExportRequest,
     RatingUpdate,
     RejectionReasonCreate,
@@ -58,6 +59,7 @@ from app.services.pipeline import analyse, import_reference_folder, transcribe_c
 from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_logical_sense, build_reference_prompt, infer_tags
 from app.services.updater import automatic_updates_available, install_downloaded_update, job_status as update_download_status, start_download as start_update_download
 from app.services.updates import update_status
+from app.services.runtime_status import runtime_status
 from app.version import __version__
 
 
@@ -341,6 +343,11 @@ def health():
     return {"status": "ok", "data_dir": str(settings.clipfinder_data_dir), "version": __version__}
 
 
+@app.get("/api/runtime-status")
+def get_runtime_status():
+    return runtime_status()
+
+
 @app.get("/api/update-status")
 def app_update_status():
     return {**update_status(), "automatic_install_available": automatic_updates_available()}
@@ -377,8 +384,14 @@ async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = Fil
         raise HTTPException(400, "Add MP4, MKV, MOV or WebM video file.")
     video_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
     destination = settings.incoming_dir / f"{video_id}{Path(file.filename).suffix.lower()}"
-    with destination.open("wb") as output:
-        shutil.copyfileobj(file.file, output)
+    try:
+        with destination.open("wb") as output:
+            shutil.copyfileobj(file.file, output)
+    except OSError as exc:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(507, f"Could not store the upload: {exc}. Check free disk space and write access to the ClipFinder data folder.") from exc
+    finally:
+        await file.close()
     timestamp = db.now()
     with db.connection() as con:
         con.execute(
@@ -685,13 +698,20 @@ def _export_segment(segment_id: str, lead_in_seconds: float, lead_out_seconds: f
     suffix = ("" if captions_preset == "none" else f"_captions-{captions_preset}") + ("" if layout == "original" else f"_{layout}") + ("_censored" if censor_profanity else "")
     fallback = f"{Path(segment['original_name']).stem}_{start:.0f}-{end:.0f}{suffix}"
     destination = _available_export_path(_safe_export_name(filename, fallback))
+    defaults = export_defaults() or {}
+    camera_rect = tuple(float(defaults.get(key, value)) for key, value in (
+        ("camera_x", 0.78), ("camera_y", 0.03), ("camera_width", 0.11), ("camera_height", 0.11),
+    ))
+    game_rect = tuple(float(defaults.get(key, value)) for key, value in (
+        ("game_x", 0.22), ("game_y", 0.0), ("game_width", 0.56), ("game_height", 1.0),
+    ))
     captions_path = None
     try:
         word_timestamps = json.loads(segment.get("word_timestamps") or "[]")
         if captions_preset != "none":
             captions_path = settings.work_dir / f"{segment_id}-{captions_preset}.ass"
             write_caption_ass(captions_path, segment["transcript"], end - start, captions_preset, word_timestamps, start, caption_position, base_color, active_color, censor_profanity)
-        export_clip(Path(segment["path"]), destination, start, end, captions_path, layout, audio_track, word_timestamps, segment["transcript"], censor_profanity)
+        export_clip(Path(segment["path"]), destination, start, end, captions_path, layout, audio_track, word_timestamps, segment["transcript"], censor_profanity, camera_rect, game_rect)
     except MediaError as exc:
         raise HTTPException(500, f"Unable to export clip: {exc}") from exc
     finally:
@@ -767,6 +787,63 @@ def export_defaults():
     return db.row("SELECT * FROM export_defaults WHERE id=1")
 
 
+def _validate_layout_rectangles(body: ExportDefaultsUpdate) -> None:
+    if body.camera_x + body.camera_width > 1 or body.camera_y + body.camera_height > 1:
+        raise HTTPException(400, "Camera area must fit inside the source frame.")
+    if body.game_x + body.game_width > 1 or body.game_y + body.game_height > 1:
+        raise HTTPException(400, "Gameplay area must fit inside the source frame.")
+
+
+def _layout_values(body: ExportDefaultsUpdate) -> tuple:
+    return (body.layout, body.camera_x, body.camera_y, body.camera_width, body.camera_height,
+            body.game_x, body.game_y, body.game_width, body.game_height)
+
+
+@app.get("/api/layout-presets")
+def layout_presets():
+    return db.rows("SELECT * FROM layout_presets ORDER BY name COLLATE NOCASE")
+
+
+@app.post("/api/layout-presets")
+def create_layout_preset(body: LayoutPresetCreate):
+    _validate_layout_rectangles(body)
+    preset_id = str(uuid.uuid4())
+    try:
+        with db.connection() as con:
+            con.execute(
+                """INSERT INTO layout_presets (id, name, layout, camera_x, camera_y, camera_width, camera_height,
+                   game_x, game_y, game_width, game_height, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (preset_id, body.name.strip(), *_layout_values(body), db.now()),
+            )
+    except Exception as exc:
+        if "UNIQUE" in str(exc).upper():
+            raise HTTPException(409, "A layout preset with this name already exists.") from exc
+        raise
+    return db.row("SELECT * FROM layout_presets WHERE id=?", (preset_id,))
+
+
+@app.delete("/api/layout-presets/{preset_id}")
+def delete_layout_preset(preset_id: str):
+    with db.connection() as con:
+        con.execute("DELETE FROM layout_presets WHERE id=?", (preset_id,))
+    return {"ok": True}
+
+
+@app.post("/api/layout-presets/{preset_id}/apply")
+def apply_layout_preset(preset_id: str):
+    preset = db.row("SELECT * FROM layout_presets WHERE id=?", (preset_id,))
+    if not preset:
+        not_found("Layout preset not found")
+    with db.connection() as con:
+        con.execute(
+            """UPDATE export_defaults SET layout=?, camera_x=?, camera_y=?, camera_width=?, camera_height=?,
+               game_x=?, game_y=?, game_width=?, game_height=?, updated_at=? WHERE id=1""",
+            (preset["layout"], preset["camera_x"], preset["camera_y"], preset["camera_width"], preset["camera_height"],
+             preset["game_x"], preset["game_y"], preset["game_width"], preset["game_height"], db.now()),
+        )
+    return export_defaults()
+
+
 @app.get("/api/analysis-audio-defaults")
 def analysis_audio_defaults():
     return db.row("SELECT * FROM analysis_audio_defaults WHERE id=1")
@@ -805,10 +882,13 @@ def update_analysis_audio_defaults(body: AnalysisAudioDefaultsUpdate):
 
 @app.put("/api/export-defaults")
 def update_export_defaults(body: ExportDefaultsUpdate):
+    _validate_layout_rectangles(body)
     with db.connection() as con:
         con.execute(
-            "UPDATE export_defaults SET layout=?, audio_track=?, updated_at=? WHERE id=1",
-            (body.layout, body.audio_track, db.now()),
+            """UPDATE export_defaults SET layout=?, audio_track=?, camera_x=?, camera_y=?, camera_width=?, camera_height=?,
+               game_x=?, game_y=?, game_width=?, game_height=?, updated_at=? WHERE id=1""",
+            (body.layout, body.audio_track, body.camera_x, body.camera_y, body.camera_width, body.camera_height,
+             body.game_x, body.game_y, body.game_width, body.game_height, db.now()),
         )
     return export_defaults()
 
