@@ -76,6 +76,27 @@ else {
         --hidden-import yt_dlp `
         clipfinder_desktop.py
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller could not build the installer.' }
+
+    # PyTorch's Windows wheel carries development archives and an entire CUDA
+    # runtime. Text embeddings safely fall back to CPU; GPU transcription is
+    # supplied by the optional CUDA/cuDNN add-on. Keeping these files here
+    # makes the standard installer over 4 GB and too large for GitHub Releases.
+    $torchLibrary = Join-Path $projectRoot 'dist\ClipFinder\_internal\torch\lib'
+    $unneededTorchFiles = @(
+        '*.lib', '*.exp', '*.pdb',
+        'c10_cuda.dll', 'torch_cuda.dll', 'caffe2_nvrtc.dll',
+        'cublas*.dll', 'cudart*.dll', 'cudnn*.dll', 'cufft*.dll',
+        'cupti*.dll', 'curand*.dll', 'cusolver*.dll', 'cusparse*.dll',
+        'nvrtc*.dll', 'nvJitLink*.dll', 'nvToolsExt*.dll'
+    )
+    $removedBytes = 0
+    foreach ($pattern in $unneededTorchFiles) {
+        Get-ChildItem -Path $torchLibrary -Filter $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $removedBytes += $_.Length
+            Remove-Item -LiteralPath $_.FullName -Force
+        }
+    }
+    Write-Host ("Removed {0:N1} MB of optional Torch CUDA/development files." -f ($removedBytes / 1MB)) -ForegroundColor DarkGray
 }
 
 Write-Host 'Building the setup executable...' -ForegroundColor Cyan
