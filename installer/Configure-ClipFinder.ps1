@@ -77,18 +77,22 @@ function Test-VCRedist {
 function Get-CudaProfile {
     $nvidia = Get-Command nvidia-smi -ErrorAction SilentlyContinue
     $cudaRoot = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA'
+    $cudnnRoot = 'C:\Program Files\NVIDIA\CUDNN'
     $cudaBins = @()
     if (Test-Path $cudaRoot) {
-        $cudaBins = Get-ChildItem -Path $cudaRoot -Directory -Filter 'v12*' -ErrorAction SilentlyContinue |
+        $cudaBins = Get-ChildItem -Path $cudaRoot -Directory -Filter 'v*' -ErrorAction SilentlyContinue |
             ForEach-Object { Join-Path $_.FullName 'bin' } | Where-Object { Test-Path $_ }
     }
-    $readyBin = $cudaBins | Where-Object {
-        (Test-Path (Join-Path $_ 'cublas64_12.dll')) -and (Test-Path (Join-Path $_ 'cudnn64_9.dll'))
-    } | Select-Object -First 1
-    if ($nvidia -and $readyBin) {
-        return [ordered]@{ whisper_device = 'cuda'; whisper_compute_type = 'float16'; whisper_model = 'large-v3'; cuda_bin_dir = $readyBin; profile_message = 'NVIDIA GPU mode enabled (CUDA 12 + cuDNN 9 detected).' }
+    $cudaBin = $cudaBins | Where-Object { Test-Path (Join-Path $_ 'cublas64_12.dll') } | Select-Object -First 1
+    $cudnnBin = $cudaBins | Where-Object { Test-Path (Join-Path $_ 'cudnn64_9.dll') } | Select-Object -First 1
+    if (-not $cudnnBin -and (Test-Path $cudnnRoot)) {
+        $cudnnFile = Get-ChildItem -Path $cudnnRoot -Recurse -Filter 'cudnn64_9.dll' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cudnnFile) { $cudnnBin = $cudnnFile.DirectoryName }
     }
-    return [ordered]@{ whisper_device = 'cpu'; whisper_compute_type = 'int8'; whisper_model = 'small'; cuda_bin_dir = ''; profile_message = 'CPU test mode enabled. Install CUDA 12 and cuDNN 9 later to enable faster NVIDIA transcription.' }
+    if ($nvidia -and $cudaBin -and $cudnnBin) {
+        return [ordered]@{ whisper_device = 'cuda'; whisper_compute_type = 'float16'; whisper_model = 'large-v3'; cuda_bin_dir = $cudaBin; cudnn_bin_dir = $cudnnBin; profile_message = 'NVIDIA GPU mode enabled (CUDA 12 + cuDNN 9 detected).' }
+    }
+    return [ordered]@{ whisper_device = 'cpu'; whisper_compute_type = 'int8'; whisper_model = 'small'; cuda_bin_dir = ''; cudnn_bin_dir = ''; profile_message = 'CPU test mode enabled. Install CUDA 12 and cuDNN 9 later to enable faster NVIDIA transcription.' }
 }
 
 Write-Setup 'ClipFinder post-install setup started.' 'Cyan'

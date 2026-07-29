@@ -68,6 +68,11 @@ def apply_runtime_configuration() -> None:
     if (ffmpeg_directory / "ffmpeg.exe").is_file():
         os.environ["PATH"] = str(ffmpeg_directory) + os.pathsep + os.environ.get("PATH", "")
 
+    for key in ("cuda_bin_dir", "cudnn_bin_dir"):
+        directory = Path(str(config.get(key, "")))
+        if directory.is_dir():
+            os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
+
 
 def show_error(title: str, text: str) -> None:
     """Show a useful message even when launched through pythonw.exe."""

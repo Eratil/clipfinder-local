@@ -18,7 +18,9 @@ DefaultDirName={localappdata}\ClipFinder\GPU-Addon
 DisableProgramGroupPage=yes
 CreateAppDir=no
 Uninstallable=no
-PrivilegesRequired=lowest
+; CUDA and cuDNN write to Program Files. Request elevation once at the start
+; instead of letting either NVIDIA installer fail late with access denied.
+PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\installer-output
@@ -56,13 +58,37 @@ var
 begin
   Result := False;
   ToolkitRoot := ExpandConstant('{autopf}\NVIDIA GPU Computing Toolkit\CUDA');
-  if not FindFirst(AddBackslash(ToolkitRoot) + 'v12*', FindRec) then exit;
+  if not FindFirst(AddBackslash(ToolkitRoot) + 'v*', FindRec) then exit;
   try
     repeat
       if ((FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
          (FindRec.Name <> '.') and (FindRec.Name <> '..') then begin
         Candidate := AddBackslash(ToolkitRoot) + FindRec.Name + '\bin\' + FileName;
         if FileExists(Candidate) then begin
+          Result := True;
+          exit;
+        end;
+      end;
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+end;
+
+function DirectoryContainsFile(Directory, FileName: String): Boolean;
+var
+  FindRec: TFindRec;
+  Candidate: String;
+begin
+  Result := FileExists(AddBackslash(Directory) + FileName);
+  if Result or (not DirExists(Directory)) then exit;
+  if not FindFirst(AddBackslash(Directory) + '*', FindRec) then exit;
+  try
+    repeat
+      if ((FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
+         (FindRec.Name <> '.') and (FindRec.Name <> '..') then begin
+        Candidate := AddBackslash(Directory) + FindRec.Name;
+        if DirectoryContainsFile(Candidate, FileName) then begin
           Result := True;
           exit;
         end;
@@ -80,7 +106,8 @@ end;
 
 function HasCudnn9(): Boolean;
 begin
-  Result := HasCudaRuntimeFile('cudnn64_9.dll');
+  Result := HasCudaRuntimeFile('cudnn64_9.dll') or
+    DirectoryContainsFile(ExpandConstant('{autopf}\NVIDIA\CUDNN'), 'cudnn64_9.dll');
 end;
 
 function CanRunGpuInstaller(FileName: String): Boolean;
