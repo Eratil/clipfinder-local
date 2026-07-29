@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     segment_min_seconds: int = 15
     segment_max_seconds: int = 60
     worker_max_concurrency: int = 1
-    update_repository: str = "SzymonSwiatowski99/clipfinder-local"
+    update_repository: str = "Eratil/clipfinder-local"
 
     @property
     def db_path(self) -> Path:
