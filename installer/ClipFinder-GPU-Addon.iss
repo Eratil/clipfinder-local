@@ -25,7 +25,9 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\installer-output
 OutputBaseFilename={#MyInstallerName}
-Compression=lzma2/ultra64
+; NVIDIA's installers are already compressed; fast compression avoids spending
+; tens of minutes trying to shrink multi-gigabyte binary payloads further.
+Compression=lzma2/fast
 SolidCompression=yes
 DiskSpanning=yes
 DiskSliceSize=2000000000
