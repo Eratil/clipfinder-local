@@ -11,7 +11,7 @@ from app.config import settings
 from app.services.embeddings import embed_texts
 from app.services.cuda_runtime import cuda12_runtime_error
 from app.services.discovery import assign_duplicate_groups
-from app.services.media import duration_seconds, extract_audio, extract_audio_range
+from app.services.media import audio_track_count, duration_seconds, extract_audio, extract_audio_range
 from app.services.scenes import detect_boundaries
 from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_logical_sense, infer_tags
 from app.services.chat import apply_chat_reactions
@@ -267,19 +267,43 @@ def analyse(video_id: str, report: Progress) -> None:
     source = Path(video["path"])
     audio_defaults = db.row("SELECT * FROM analysis_audio_defaults WHERE id=1") or {}
     mode = audio_defaults.get("mode", "single")
-    transcript_track = int(audio_defaults.get("single_track", 1) if mode == "single" else audio_defaults.get("microphone_track", 2))
-    event_tracks: list[tuple[str, int]] = []
-    if mode == "split":
-        if audio_defaults.get("use_all_sounds"):
-            event_tracks.append(("all-sounds event", int(audio_defaults.get("all_sounds_track", 1))))
-        if audio_defaults.get("use_game"):
-            event_tracks.append(("game-audio event", int(audio_defaults.get("game_track", 3))))
     report(5, "Reading video metadata")
     duration = duration_seconds(source)
+    available_audio_tracks = audio_track_count(source)
+    if available_audio_tracks < 1:
+        raise ValueError("The recording does not contain an audio track.")
+
+    requested_transcript_track = int(
+        audio_defaults.get("single_track", 1) if mode == "single" else audio_defaults.get("microphone_track", 2)
+    )
+    transcript_track = requested_transcript_track if requested_transcript_track <= available_audio_tracks else 1
+    skipped_tracks: list[str] = []
+    if transcript_track != requested_transcript_track:
+        skipped_tracks.append(f"transcription track {requested_transcript_track}")
+
+    event_tracks: list[tuple[str, int]] = []
+    if mode == "split":
+        configured_events = []
+        if audio_defaults.get("use_all_sounds"):
+            configured_events.append(("all-sounds event", int(audio_defaults.get("all_sounds_track", 1))))
+        if audio_defaults.get("use_game"):
+            configured_events.append(("game-audio event", int(audio_defaults.get("game_track", 3))))
+        for label, track in configured_events:
+            if track > available_audio_tracks:
+                skipped_tracks.append(f"{label} track {track}")
+            elif track == transcript_track:
+                # This is the transcription source, not a separate game/event source.
+                skipped_tracks.append(f"{label} track {track} (same as transcription)")
+            else:
+                event_tracks.append((label, track))
+
+    dedicated_microphone_track = mode == "split" and requested_transcript_track == transcript_track
     with db.connection() as con:
         con.execute("UPDATE videos SET duration_seconds=?, status='processing', transcript_audio_track=?, audio_analysis_mode=?, updated_at=? WHERE id=?", (duration, transcript_track, mode, db.now(), video_id))
 
     audio_path = settings.work_dir / f"{video_id}.wav"
+    if skipped_tracks:
+        report(8, f"Using available audio track {transcript_track}; skipped unavailable/separate tracks")
     report(10, "Extracting audio")
     extract_audio(source, audio_path, transcript_track)
     transcript = transcribe(audio_path, report, duration)
@@ -290,10 +314,10 @@ def analyse(video_id: str, report: Progress) -> None:
     microphone_energies = audio_energy_windows(audio_path)
     # A single mixed track cannot distinguish a loud game event from the voice.
     # In that legacy mode we keep audio neutral instead of inventing a reaction.
-    microphone_expression_scores = dynamic_audio_scores(microphone_energies, candidates) if mode == "split" else [0] * len(candidates)
+    microphone_expression_scores = dynamic_audio_scores(microphone_energies, candidates) if dedicated_microphone_track else [0] * len(candidates)
     event_energies: list[tuple[str, np.ndarray]] = []
     temporary_audio: list[Path] = []
-    for label, track in dict(event_tracks).items():
+    for label, track in event_tracks:
         event_path = audio_path if track == transcript_track else settings.work_dir / f"{video_id}-track{track}-{uuid.uuid4()}.wav"
         if event_path != audio_path:
             report(74, f"Reading {label}")

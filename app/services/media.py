@@ -49,6 +49,15 @@ def duration_seconds(video_path: Path) -> float:
     return float(json.loads(result.stdout)["format"]["duration"])
 
 
+def audio_track_count(video_path: Path) -> int:
+    """Return the number of selectable audio streams in a recording."""
+    result = run([
+        "ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+        "-of", "json", str(video_path),
+    ])
+    return len(json.loads(result.stdout).get("streams", []))
+
+
 def extract_audio(video_path: Path, output_path: Path, audio_track: int = 1, sample_rate: int = 16000) -> None:
     if audio_track < 1:
         raise MediaError("Invalid audio track")
