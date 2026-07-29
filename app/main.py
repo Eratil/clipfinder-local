@@ -280,7 +280,7 @@ def run_remote_import(video_id: str, job_id: str) -> None:
         title = str(info.get("title") or "Remote video").strip()
         with db.connection() as con:
             con.execute(
-                "UPDATE videos SET original_name=?, path=?, status='queued', error_message=NULL, updated_at=? WHERE id=?",
+                "UPDATE videos SET original_name=?, path=?, status='queued', transcript_audio_track=1, audio_analysis_mode='single', error_message=NULL, updated_at=? WHERE id=?",
                 (f"{title}{source_path.suffix}", str(source_path), db.now(), video_id),
             )
         analyse(video_id, lambda progress, message: update_job(job_id, 20 + int(progress * 0.8), message))

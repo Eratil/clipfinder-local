@@ -266,7 +266,9 @@ def analyse(video_id: str, report: Progress) -> None:
         raise ValueError("Nie znaleziono nagrania")
     source = Path(video["path"])
     audio_defaults = db.row("SELECT * FROM analysis_audio_defaults WHERE id=1") or {}
-    mode = audio_defaults.get("mode", "single")
+    # Downloaded YouTube/Twitch material normally contains one mixed audio
+    # stream.  Keep it independent from the user's multi-track OBS defaults.
+    mode = "single" if video.get("source_url") else audio_defaults.get("mode", "single")
     report(5, "Reading video metadata")
     duration = duration_seconds(source)
     available_audio_tracks = audio_track_count(source)
