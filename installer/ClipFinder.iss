@@ -20,7 +20,9 @@ DisableProgramGroupPage=yes
 UsePreviousAppDir=yes
 UsePreviousGroup=yes
 UsePreviousTasks=yes
-CloseApplications=yes
+; A normal Restart Manager request did not reliably close the embedded local
+; server. Force only applications locking files that this installer replaces.
+CloseApplications=force
 RestartApplications=no
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
