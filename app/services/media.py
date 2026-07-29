@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -27,8 +28,13 @@ def censor_word(word: str) -> str:
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess:
+    # The desktop build has no parent console.  Without this flag Windows briefly
+    # creates a visible CMD window for every ffmpeg/ffprobe operation.
+    process_options: dict = {}
+    if os.name == "nt":
+        process_options["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
-        result = subprocess.run(command, capture_output=True, text=True)
+        result = subprocess.run(command, capture_output=True, text=True, **process_options)
     except FileNotFoundError as exc:
         executable = Path(command[0]).name
         raise MediaError(
