@@ -46,7 +46,7 @@ def apply_runtime_configuration() -> None:
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
-        return
+        config = {}
 
     allowed_values = {
         "whisper_device": {"cuda", "cpu"},
@@ -59,6 +59,12 @@ def apply_runtime_configuration() -> None:
             os.environ[key.upper()] = value
 
     ffmpeg_directory = Path(str(config.get("ffmpeg_bin_dir", "")))
+    if not (ffmpeg_directory / "ffmpeg.exe").is_file():
+        winget_root = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages"
+        if winget_root.is_dir():
+            candidates = list(winget_root.glob("Gyan.FFmpeg.Shared_*/**/ffmpeg.exe"))
+            if candidates:
+                ffmpeg_directory = candidates[0].parent
     if (ffmpeg_directory / "ffmpeg.exe").is_file():
         os.environ["PATH"] = str(ffmpeg_directory) + os.pathsep + os.environ.get("PATH", "")
 

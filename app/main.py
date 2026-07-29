@@ -1,10 +1,21 @@
 import json
+import os
 import re
 import shutil
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
+
+try:
+    # This is an application entry point, so the global injection is safe and
+    # lets yt-dlp use certificates trusted by Windows (including enterprise or
+    # antivirus HTTPS inspection certificates).
+    import truststore
+
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -202,6 +213,30 @@ def _downloaded_video_path(video_id: str) -> Path:
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
+def _configure_remote_download_certificates() -> None:
+    """Use Windows certificates, with certifi as a verified fallback.
+
+    Remote downloads remain certificate-verified; this avoids yt-dlp's insecure
+    no-check option while supporting local antivirus/enterprise HTTPS roots.
+    """
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+        return
+    except ImportError:
+        pass
+    try:
+        import certifi
+
+        certificate_bundle = certifi.where()
+    except (ImportError, OSError):
+        return
+    if Path(certificate_bundle).is_file():
+        os.environ["SSL_CERT_FILE"] = certificate_bundle
+        os.environ["REQUESTS_CA_BUNDLE"] = certificate_bundle
+
+
 def run_remote_import(video_id: str, job_id: str) -> None:
     video = db.row("SELECT source_url FROM videos WHERE id=?", (video_id,))
     if not video or not video.get("source_url"):
@@ -209,6 +244,8 @@ def run_remote_import(video_id: str, job_id: str) -> None:
         return
     try:
         from yt_dlp import YoutubeDL
+
+        _configure_remote_download_certificates()
 
         last_progress = -1
 
@@ -233,6 +270,7 @@ def run_remote_import(video_id: str, job_id: str) -> None:
             "progress_hooks": [report_download],
             "retries": 3,
             "fragment_retries": 3,
+            "extractor_retries": 3,
             "quiet": True,
             "no_warnings": True,
         }
@@ -253,9 +291,15 @@ def run_remote_import(video_id: str, job_id: str) -> None:
             con.execute("UPDATE videos SET status='failed', error_message=?, updated_at=? WHERE id=?", (detail, db.now(), video_id))
         update_job(job_id, 100, detail, "failed")
     except Exception as exc:
+        detail = str(exc)
+        if "CERTIFICATE_VERIFY_FAILED" in detail or "certificate verify failed" in detail.lower():
+            detail = (
+                "HTTPS certificate verification failed while contacting YouTube/Twitch. "
+                "Update/reinstall ClipFinder so its certificate bundle is refreshed, then try again."
+            )
         with db.connection() as con:
-            con.execute("UPDATE videos SET status='failed', error_message=?, updated_at=? WHERE id=?", (str(exc), db.now(), video_id))
-        update_job(job_id, 100, str(exc), "failed")
+            con.execute("UPDATE videos SET status='failed', error_message=?, updated_at=? WHERE id=?", (detail, db.now(), video_id))
+        update_job(job_id, 100, detail, "failed")
 
 
 def update_reference_import(import_id: str, progress: int, message: str, state: str = "running", imported_files: int | None = None) -> None:

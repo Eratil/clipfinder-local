@@ -27,7 +27,14 @@ def censor_word(word: str) -> str:
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess:
-    result = subprocess.run(command, capture_output=True, text=True)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        executable = Path(command[0]).name
+        raise MediaError(
+            f"{executable} was not found. Run 'Configure ClipFinder runtime' from the Start menu, "
+            "or install FFmpeg and reopen ClipFinder."
+        ) from exc
     if result.returncode:
         detail = result.stderr[-1500:] or result.stdout[-1500:]
         raise MediaError(detail)

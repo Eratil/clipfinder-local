@@ -50,7 +50,7 @@ if ($GpuAddon) {
 }
 else {
     Write-Host 'Installing build dependencies...' -ForegroundColor Cyan
-    & $python -m pip install -r requirements-dev.txt
+    & $python -m pip install --upgrade -r requirements-dev.txt
     if ($LASTEXITCODE -ne 0) { throw 'Could not install build dependencies.' }
 
     Write-Host 'Building the ClipFinder application folder...' -ForegroundColor Cyan
@@ -71,6 +71,8 @@ else {
         --collect-all tokenizers `
         --collect-all torch `
         --collect-all cv2 `
+        --collect-all certifi `
+        --collect-all truststore `
         --hidden-import yt_dlp `
         clipfinder_desktop.py
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller could not build the installer.' }
