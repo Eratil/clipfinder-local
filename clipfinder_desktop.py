@@ -45,7 +45,9 @@ def apply_runtime_configuration() -> None:
         return
     config_path = user_configuration_directory() / "runtime.json"
     try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
+        # Windows PowerShell 5 writes UTF-8 files with a BOM by default.
+        # ``utf-8-sig`` accepts both that installer-created form and plain UTF-8.
+        config = json.loads(config_path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError, TypeError):
         config = {}
 
