@@ -60,6 +60,12 @@ else {
     & $python -m pip install --upgrade -r requirements-dev.txt
     if ($LASTEXITCODE -ne 0) { throw 'Could not install build dependencies.' }
 
+    # These packages are not used by ClipFinder.  They can be left behind by
+    # an earlier GPU Python environment and then make Transformers try to load
+    # incompatible CUDA extensions while building the otherwise CPU-only app.
+    & $python -m pip uninstall -y torchaudio torchvision easyocr
+    if ($LASTEXITCODE -ne 0) { throw 'Could not remove optional stale Torch packages.' }
+
     $torchRuntime = (& $python -c "import torch; print(torch.__version__ + '|' + str(torch.version.cuda or ''))" | Select-Object -Last 1).Trim()
     if ($torchRuntime -match '\|.+$') {
         throw "The base installer requires CPU-only PyTorch, but the build environment has $torchRuntime. Run the requirements installation again before building."
