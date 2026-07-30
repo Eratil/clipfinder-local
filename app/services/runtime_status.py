@@ -38,8 +38,12 @@ def runtime_status() -> dict:
         headline = "LOCAL / GPU READY"
         transcription = {"mode": "gpu", "label": "NVIDIA GPU (CUDA)", "detail": "Ready for the next transcription"}
     elif configured_cuda:
-        headline = "LOCAL / GPU UNAVAILABLE"
-        transcription = {"mode": "unavailable", "label": "GPU unavailable", "detail": cuda_error or "NVIDIA driver was not detected"}
+        headline = "LOCAL / CPU FALLBACK"
+        transcription = {
+            "mode": "cpu",
+            "label": "CPU fallback",
+            "detail": (cuda_error or "NVIDIA driver was not detected") + ". Transcription will continue on CPU.",
+        }
     else:
         headline = "LOCAL / CPU MODE"
         transcription = {"mode": "cpu", "label": "CPU", "detail": "CUDA was disabled in configuration"}

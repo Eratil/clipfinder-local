@@ -21,13 +21,18 @@ Progress = Callable[[int, str], None]
 _transcription_model = None
 
 
-def verify_cuda_runtime() -> None:
-    """Fail immediately with a useful diagnosis instead of leaving a job at 0%."""
+def transcription_runtime() -> tuple[str, str, str | None]:
+    """Return a usable Whisper runtime, falling back to CPU when CUDA is absent.
+
+    A machine can have an NVIDIA driver but not the CUDA/cuDNN libraries needed
+    by CTranslate2.  Such a machine must stay usable in the normal installer.
+    """
     if settings.whisper_device.lower() != "cuda":
-        return
+        return "cpu", "int8", None
     error = cuda12_runtime_error()
     if error:
-        raise RuntimeError(error + " Or set WHISPER_DEVICE=cpu and WHISPER_COMPUTE_TYPE=int8 in .env.")
+        return "cpu", "int8", error
+    return "cuda", settings.whisper_compute_type, None
 
 
 def transcribe(
@@ -40,10 +45,20 @@ def transcribe(
     global _transcription_model
     if _transcription_model is None:
         from faster_whisper import WhisperModel
-        progress(progress_start, "Loading transcription model on GPU")
-        verify_cuda_runtime()
-        compute_type = "int8" if settings.whisper_device.lower() == "cpu" else settings.whisper_compute_type
-        _transcription_model = WhisperModel(settings.whisper_model, device=settings.whisper_device, compute_type=compute_type)
+        device, compute_type, fallback_reason = transcription_runtime()
+        if fallback_reason:
+            progress(progress_start, "CUDA unavailable - switching transcription to CPU")
+        else:
+            progress(progress_start, f"Loading transcription model on {device.upper()}")
+        try:
+            _transcription_model = WhisperModel(settings.whisper_model, device=device, compute_type=compute_type)
+        except Exception:
+            if device != "cuda":
+                raise
+            # A driver/runtime can look valid but still fail when CTranslate2
+            # creates the model. Preserve analysis by retrying on CPU.
+            progress(progress_start, "GPU model failed - retrying transcription on CPU")
+            _transcription_model = WhisperModel(settings.whisper_model, device="cpu", compute_type="int8")
     model = _transcription_model
     parts, _info = model.transcribe(str(audio_path), vad_filter=True, word_timestamps=True)
     result: list[dict] = []
