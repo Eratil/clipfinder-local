@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import subprocess
 import time
 from pathlib import Path
@@ -17,6 +18,39 @@ def _write_log(directory: Path, message: str) -> None:
     except OSError:
         # An updater must never fail simply because its diagnostic log is unavailable.
         pass
+
+
+def _show_error(text: str) -> None:
+    """A silent helper still needs to explain an update failure to its user."""
+    try:
+        ctypes.windll.user32.MessageBoxW(0, text, "ClipFinder update", 0x10)
+    except Exception:
+        pass
+
+
+def _powershell_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _run_elevated_installer(installer: Path, arguments: list[str], directory: Path) -> int:
+    """Retry only after an access-denied style failure, with an explicit UAC prompt."""
+    script_path = directory / "run-elevated-update.ps1"
+    argument_list = ", ".join(_powershell_quote(value) for value in arguments)
+    script_path.write_text(
+        "$process = Start-Process -FilePath " + _powershell_quote(str(installer)) +
+        " -ArgumentList @(" + argument_list + ") -Verb RunAs -Wait -PassThru\n" +
+        "if ($null -eq $process) { exit 1 }\n" +
+        "exit $process.ExitCode\n",
+        encoding="utf-8",
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return result.returncode
+    finally:
+        script_path.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -44,10 +78,14 @@ def main() -> int:
     )
     _write_log(log_directory, f"Close request finished with exit code {close_result.returncode}.")
     time.sleep(1)
-    result = subprocess.run([
-        str(installer), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/FORCECLOSEAPPLICATIONS",
-    ], creationflags=subprocess.CREATE_NO_WINDOW)
+    installer_arguments = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/FORCECLOSEAPPLICATIONS"]
+    result = subprocess.run([str(installer), *installer_arguments], creationflags=subprocess.CREATE_NO_WINDOW)
     _write_log(log_directory, f"Installer finished with exit code {result.returncode}.")
+    if result.returncode == 5:
+        _write_log(log_directory, "Retrying installer with administrator permission.")
+        elevated_exit_code = _run_elevated_installer(installer, installer_arguments, log_directory)
+        result = subprocess.CompletedProcess([], elevated_exit_code)
+        _write_log(log_directory, f"Elevated installer finished with exit code {result.returncode}.")
     if result.returncode == 0:
         try:
             subprocess.Popen([str(restart_exe)], close_fds=True, creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS)
@@ -57,6 +95,11 @@ def main() -> int:
             return 3
         return 0
     _write_log(log_directory, "Update failed; ClipFinder was not restarted.")
+    _show_error(
+        "ClipFinder could not install the update.\n\n"
+        f"Installer exit code: {result.returncode}\n"
+        f"You can run it manually:\n{installer}"
+    )
     return result.returncode
 
 

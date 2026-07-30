@@ -57,7 +57,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 [Run]
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; Description: "Install Microsoft Visual C++ Runtime (required by ClipFinder AI libraries)"; Flags: waituntilterminated; Check: VCRedistMissing
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Configure-ClipFinder.ps1"""; Description: "Install missing Windows components and configure ClipFinder"; Flags: postinstall waituntilterminated runascurrentuser
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch ClipFinder"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch ClipFinder"; Flags: nowait; Check: ShouldLaunchClipFinder
 
 [Code]
 function VCRedistMissing(): Boolean;
@@ -67,4 +67,11 @@ begin
   Result := True;
   if RegQueryDWordValue(HKLM64, 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64', 'Installed', Installed) then
     Result := Installed <> 1;
+end;
+
+function ShouldLaunchClipFinder(): Boolean;
+begin
+  { The update helper launches the application itself after a silent update.
+    A normal, interactive installer always opens ClipFinder when it finishes. }
+  Result := not WizardSilent;
 end;
