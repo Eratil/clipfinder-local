@@ -25,6 +25,7 @@ HOST = "127.0.0.1"
 PORT = 8000
 APP_URL = f"http://{HOST}:{PORT}/"
 HEALTH_URL = f"{APP_URL}api/health"
+_bundled_dll_directories: list[object] = []
 
 
 def bundled_asset_path(relative_path: str) -> Path:
@@ -99,6 +100,21 @@ def configure_frozen_data_directory() -> None:
     os.environ["CLIPFINDER_DATA_DIR"] = str(user_configuration_directory() / "data")
 
 
+def configure_bundled_dll_directories() -> None:
+    """Make native libraries in PyInstaller subfolders discoverable on Windows.
+
+    SciPy and NumPy place OpenBLAS DLLs in ``*.libs`` folders.  Windows does
+    not search those sibling directories for a loaded ``.pyd`` automatically,
+    which otherwise causes a misleading WinError 126 in the installed build.
+    """
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return
+    runtime_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent / "_internal"))
+    for directory in (runtime_root, runtime_root / "scipy.libs", runtime_root / "numpy.libs", runtime_root / "torch" / "lib"):
+        if directory.is_dir():
+            _bundled_dll_directories.append(os.add_dll_directory(str(directory)))
+
+
 def port_is_in_use() -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(0.4)
@@ -117,6 +133,7 @@ def start_local_server() -> tuple[uvicorn.Server | None, threading.Thread | None
 
     configure_frozen_data_directory()
     apply_runtime_configuration()
+    configure_bundled_dll_directories()
     # Importing directly makes the package visible to PyInstaller's analysis.
     from app.main import app
 
