@@ -60,6 +60,11 @@ else {
     & $python -m pip install --upgrade -r requirements-dev.txt
     if ($LASTEXITCODE -ne 0) { throw 'Could not install build dependencies.' }
 
+    $torchRuntime = (& $python -c "import torch; print(torch.__version__ + '|' + str(torch.version.cuda or ''))" | Select-Object -Last 1).Trim()
+    if ($torchRuntime -match '\|.+$') {
+        throw "The base installer requires CPU-only PyTorch, but the build environment has $torchRuntime. Run the requirements installation again before building."
+    }
+
     Write-Host 'Building the ClipFinder application folder...' -ForegroundColor Cyan
     & $python -m PyInstaller `
         --noconfirm --clean --onedir --windowed `

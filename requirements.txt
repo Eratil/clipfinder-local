@@ -5,6 +5,11 @@ pywebview[winforms]
 pydantic-settings==2.10.1
 faster-whisper==1.1.1
 sentence-transformers==5.0.0
+# Sentence embeddings do not need CUDA: transcription uses CTranslate2 and
+# the separate CUDA/cuDNN add-on. A CPU Torch wheel keeps the base installer
+# portable and avoids bundling DLLs that require a local CUDA runtime.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.8.0+cpu
 scenedetect[opencv]==0.6.6
 numpy==2.1.3
 yt-dlp
