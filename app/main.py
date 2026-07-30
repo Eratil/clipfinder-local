@@ -430,7 +430,7 @@ def health():
 
 @app.get("/api/runtime-status")
 def get_runtime_status():
-    return runtime_status()
+    return {**runtime_status(), "version": __version__}
 
 
 @app.get("/api/update-status")

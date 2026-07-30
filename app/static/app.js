@@ -48,6 +48,7 @@ function message(text, error = false) { if (error) state.statusErrorUntil = Date
 async function loadRuntimeStatus() {
   const runtime = await api('/runtime-status');
   $('#runtime-headline').textContent = runtime.headline;
+  $('#app-version').textContent = `Version ${runtime.version || '--'}`;
   const gpu = runtime.gpu ? `${runtime.gpu.name} / ${runtime.gpu.memory_mb} MB VRAM` : 'No NVIDIA GPU detected';
   $('#runtime-detail').textContent = `Transcription: ${runtime.transcription.label}. Similarity search: ${runtime.embeddings.label}. ${gpu}.`;
   $('#runtime-headline').classList.toggle('runtime-warning', runtime.transcription.mode === 'unavailable');
