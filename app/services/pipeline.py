@@ -1,4 +1,5 @@
 import json
+import unicodedata
 import uuid
 import wave
 from collections.abc import Callable
@@ -13,7 +14,7 @@ from app.services.cuda_runtime import cuda12_runtime_error
 from app.services.discovery import assign_duplicate_groups
 from app.services.media import audio_track_count, duration_seconds, extract_audio, extract_audio_range
 from app.services.scenes import detect_boundaries
-from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_logical_sense, infer_tags
+from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_context, assess_logical_sense, assess_self_containment, enrich_tags, infer_tags, score_moment_reaction
 from app.services.chat import apply_chat_reactions
 
 Progress = Callable[[int, str], None]
@@ -82,7 +83,16 @@ def build_candidates(parts: list[dict], duration: float, boundaries: list[float]
         candidate = _candidate(current)
         if candidate["end"] - candidate["start"] >= 3:
             candidates.append(candidate)
-    return [_snap_to_scene(_add_context(candidate, duration), boundaries or [], duration) for candidate in candidates]
+    adjusted = []
+    for candidate in candidates:
+        sentence_aligned = _smart_sentence_bounds(candidate, parts, duration)
+        # A scene cut is useful for an already clean candidate, but it must not
+        # move an intelligently aligned edge back into the middle of speech.
+        if sentence_aligned.get("boundary_signals"):
+            adjusted.append(_add_context(sentence_aligned, duration))
+        else:
+            adjusted.append(_snap_to_scene(_add_context(sentence_aligned, duration), boundaries or [], duration))
+    return _attach_speech_context(adjusted, parts)
 
 
 def _add_context(candidate: dict, duration: float) -> dict:
@@ -111,6 +121,95 @@ def _candidate(parts: list[dict]) -> dict:
         "text": " ".join(part["text"] for part in parts).strip(),
         "words": [word for part in parts for word in part.get("words", [])],
     }
+
+
+_SENTENCE_ENDING = (".", "!", "?")
+_PUNCHLINE_START = (
+    "i wtedy", "a wtedy", "i nagle", "a nagle", "okazalo sie", "okazuje sie",
+    "a najlepsze", "ale najlepsze", "a najgorsze", "ale najgorsze", "wiec jednak",
+)
+
+
+def _ends_sentence(part: dict) -> bool:
+    return str(part.get("text") or "").strip().endswith(_SENTENCE_ENDING)
+
+
+def _continuous(previous: dict, following: dict, max_gap: float = 2.5) -> bool:
+    return float(following["start"]) - float(previous["end"]) <= max_gap
+
+
+def _starts_punchline(part: dict) -> bool:
+    text = unicodedata.normalize("NFKD", str(part.get("text") or "").strip().lower()).encode("ascii", "ignore").decode("ascii")
+    return any(text.startswith(prefix) for prefix in _PUNCHLINE_START)
+
+
+def _smart_sentence_bounds(candidate: dict, parts: list[dict], duration: float) -> dict:
+    """Extend a candidate only across one unfinished thought or a clear punchline.
+
+    Whisper parts often end mid-sentence.  We retain the reviewable candidate
+    length but allow up to 15 extra seconds when that prevents a clipped start
+    or missing ending.
+    """
+    if not parts:
+        return candidate
+    maximum = min(duration, settings.segment_max_seconds + 15)
+    first = next((index for index, part in enumerate(parts) if float(part["end"]) >= float(candidate["start"])), 0)
+    last = max(index for index, part in enumerate(parts) if float(part["start"]) <= float(candidate["end"]))
+    original_first, original_last = first, last
+    notes: list[str] = []
+
+    while first > 0:
+        previous, current = parts[first - 1], parts[first]
+        if _ends_sentence(previous) or not _continuous(previous, current):
+            break
+        if float(parts[last]["end"]) - float(previous["start"]) > maximum:
+            break
+        first -= 1
+    if first != original_first:
+        notes.append("start aligned to sentence")
+
+    # First finish an unfinished sentence, then optionally include one nearby
+    # punchline that begins immediately after it.
+    while last < len(parts) - 1 and not _ends_sentence(parts[last]):
+        following = parts[last + 1]
+        if not _continuous(parts[last], following) or float(following["end"]) - float(parts[first]["start"]) > maximum:
+            break
+        last += 1
+    if last != original_last:
+        notes.append("end aligned to sentence")
+
+    if last < len(parts) - 1 and _ends_sentence(parts[last]):
+        following = parts[last + 1]
+        if _starts_punchline(following) and _continuous(parts[last], following) and float(following["end"]) - float(parts[first]["start"]) <= maximum:
+            last += 1
+            while last < len(parts) - 1 and not _ends_sentence(parts[last]):
+                next_part = parts[last + 1]
+                if not _continuous(parts[last], next_part) or float(next_part["end"]) - float(parts[first]["start"]) > maximum:
+                    break
+                last += 1
+            notes.append("extended to punchline")
+
+    adjusted = _candidate(parts[first:last + 1])
+    adjusted["boundary_signals"] = notes
+    return adjusted
+
+
+def _attach_speech_context(candidates: list[dict], parts: list[dict], window_seconds: float = 12.0) -> list[dict]:
+    """Store a compact setup and follow-up transcript around each candidate."""
+    for candidate in candidates:
+        start, end = float(candidate["start"]), float(candidate["end"])
+        before_parts = [part["text"].strip() for part in parts if start - window_seconds <= float(part["end"]) <= start and part.get("text")]
+        after_parts = [part["text"].strip() for part in parts if end <= float(part["start"]) <= end + window_seconds and part.get("text")]
+        before = " ".join(before_parts)[-700:]
+        after = " ".join(after_parts)[:700]
+        context_score, context_signals = assess_context(candidate.get("text", ""), before, after)
+        self_contained_score = assess_self_containment(candidate.get("text", ""), before, after)
+        candidate["context_before"] = before
+        candidate["context_after"] = after
+        candidate["context_score"] = context_score
+        candidate["self_contained_score"] = self_contained_score
+        candidate["context_signals"] = context_signals
+    return candidates
 
 
 def transcribe_clip_range(source: Path, start: float, end: float, audio_track: int = 1) -> tuple[str, list[dict]]:
@@ -165,7 +264,7 @@ def dynamic_audio_scores(energies: np.ndarray, candidates: list[dict], window_se
     return scores
 
 
-def game_reaction_scores(game_energies: np.ndarray, microphone_energies: np.ndarray, candidates: list[dict], window_seconds: float = 0.25) -> list[int]:
+def game_reaction_scores(game_energies: np.ndarray, microphone_energies: np.ndarray, candidates: list[dict], window_seconds: float = 0.25, lead_seconds: float = 0.0) -> list[int]:
     """Reward a game/stream event only when a stronger microphone response follows it.
 
     A roar, alert or jumpscare by itself gets no boost. A dynamic game sound must
@@ -183,7 +282,8 @@ def game_reaction_scores(game_energies: np.ndarray, microphone_energies: np.ndar
     scores: list[int] = []
     response_limit = max(1, round(3.0 / window_seconds))
     for candidate in candidates:
-        left = max(0, int(candidate["start"] / window_seconds))
+        response_left = max(0, int(candidate["start"] / window_seconds))
+        left = max(0, response_left - round(lead_seconds / window_seconds))
         right = min(length, max(left + 1, int(np.ceil(candidate["end"] / window_seconds))))
         game_section = game_energies[left:right]
         if not len(game_section) or float(game_section.max()) < game_high:
@@ -199,7 +299,7 @@ def game_reaction_scores(game_energies: np.ndarray, microphone_energies: np.ndar
                 continue
             response_start = event_index + 1
             response_end = min(right, response_start + response_limit)
-            if response_end <= response_start:
+            if response_end <= response_start or response_end <= response_left:
                 continue
             response_peak = float(microphone_energies[response_start:response_end].max())
             before_start = max(left, event_index - 4)
@@ -331,16 +431,21 @@ def analyse(video_id: str, report: Progress) -> None:
     reaction_sources = [item for item in event_energies if item[0] == "game-audio event"] or event_energies
     reaction_scores = [0] * len(candidates)
     for _label, energies in reaction_sources:
-        reaction_scores = [max(current, incoming) for current, incoming in zip(reaction_scores, game_reaction_scores(energies, microphone_energies, candidates))]
+        reaction_scores = [max(current, incoming) for current, incoming in zip(reaction_scores, game_reaction_scores(energies, microphone_energies, candidates, lead_seconds=12.0))]
     vectors = embed_texts([item["text"] or "bez wypowiedzi" for item in candidates])
     records: list[dict] = []
     for index, (candidate, vector) in enumerate(zip(candidates, vectors)):
         keywords = [word.strip(".,!?;:").lower() for word in candidate["text"].split() if len(word.strip(".,!?;:")) >= 6][:12]
         tags = infer_tags(candidate["text"], vector)
         quality_score, quality_signals, reading_likelihood = assess_clip_quality(candidate["text"], candidate.get("words", []), candidate["start"], candidate["end"], tags)
+        quality_signals.extend(candidate.get("boundary_signals") or [])
         logical_sense_score = assess_logical_sense(candidate["text"])
+        context_score = int(candidate.get("context_score") or 50)
+        self_contained_score = int(candidate.get("self_contained_score") or 50)
+        context_signals = candidate.get("context_signals") or []
         game_reaction_score = reaction_scores[index]
         voice_expression_score = microphone_expression_scores[index]
+        moment_reaction_score, moment_reaction_stage = score_moment_reaction(game_reaction_score)
         event_score = 0
         if game_reaction_score >= 7:
             tags = list(dict.fromkeys(tags + [GAME_REACTION_TAG]))
@@ -351,9 +456,26 @@ def analyse(video_id: str, report: Progress) -> None:
             event_score = voice_expression_score
             quality_score = min(99, quality_score + min(8, voice_expression_score))
             quality_signals.append("expressive microphone delivery")
+        if context_score >= 72:
+            quality_score = min(99, quality_score + 3)
+            quality_signals.extend(context_signals)
+        elif context_score <= 38:
+            quality_score = max(1, quality_score - 6)
+            quality_signals.extend(context_signals)
         if reading_likelihood >= 0.55:
             tags = list(dict.fromkeys(tags + ["reading"]))
-        records.append({"id": str(uuid.uuid4()), "start": candidate["start"], "end": candidate["end"], "text": candidate["text"], "words": candidate.get("words", []), "vector": vector, "keywords": keywords, "tags": tags, "quality_score": quality_score, "quality_signals": quality_signals, "logical_sense_score": logical_sense_score, "reading_likelihood": reading_likelihood, "audio_event_score": event_score, "game_reaction_score": game_reaction_score, "voice_expression_score": voice_expression_score, "duplicate_group": ""})
+        tags = enrich_tags(
+            tags,
+            logical_sense_score=logical_sense_score,
+            reading_likelihood=reading_likelihood,
+            game_reaction_score=game_reaction_score,
+            voice_expression_score=voice_expression_score,
+            context_score=context_score,
+            self_contained_score=self_contained_score,
+            moment_reaction_score=moment_reaction_score,
+            moment_reaction_stage=moment_reaction_stage,
+        )
+        records.append({"id": str(uuid.uuid4()), "start": candidate["start"], "end": candidate["end"], "text": candidate["text"], "words": candidate.get("words", []), "vector": vector, "keywords": keywords, "tags": tags, "quality_score": quality_score, "quality_signals": quality_signals, "logical_sense_score": logical_sense_score, "context_score": context_score, "self_contained_score": self_contained_score, "context_before": candidate.get("context_before", ""), "context_after": candidate.get("context_after", ""), "reading_likelihood": reading_likelihood, "audio_event_score": event_score, "game_reaction_score": game_reaction_score, "voice_expression_score": voice_expression_score, "moment_reaction_score": moment_reaction_score, "moment_reaction_stage": moment_reaction_stage, "duplicate_group": ""})
     assign_duplicate_groups(records)
     report(82, "Checking visual action in the strongest candidates")
     visual_scores = visual_interest_scores(source, records)
@@ -361,12 +483,24 @@ def analyse(video_id: str, report: Progress) -> None:
         record["vision_score"] = visual_scores.get(record["id"], 0)
         if record["vision_score"] >= 7:
             record["quality_signals"].append("visual action")
+        record["tags"] = enrich_tags(
+            record["tags"],
+            logical_sense_score=record["logical_sense_score"],
+            reading_likelihood=record["reading_likelihood"],
+            game_reaction_score=record["game_reaction_score"],
+            voice_expression_score=record["voice_expression_score"],
+            vision_score=record["vision_score"],
+            context_score=record["context_score"],
+            self_contained_score=record["self_contained_score"],
+            moment_reaction_score=record["moment_reaction_score"],
+            moment_reaction_stage=record["moment_reaction_stage"],
+        )
     with db.connection() as con:
         con.execute("DELETE FROM segments WHERE video_id = ?", (video_id,))
         for record in records:
             con.execute(
-                "INSERT INTO segments (id, video_id, start_seconds, end_seconds, transcript, keywords, tags, word_timestamps, embedding, quality_score, quality_signals, logical_sense_score, reading_likelihood, audio_event_score, game_reaction_score, voice_expression_score, vision_score, duplicate_group, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record["id"], video_id, record["start"], record["end"], record["text"], json.dumps(record["keywords"], ensure_ascii=False), json.dumps(record["tags"], ensure_ascii=False), json.dumps(record["words"], ensure_ascii=False), json.dumps(record["vector"]), record["quality_score"], json.dumps(record["quality_signals"]), record["logical_sense_score"], record["reading_likelihood"], record["audio_event_score"], record["game_reaction_score"], record["voice_expression_score"], record["vision_score"], record["duplicate_group"], db.now()),
+                "INSERT INTO segments (id, video_id, start_seconds, end_seconds, transcript, keywords, tags, word_timestamps, embedding, quality_score, quality_signals, logical_sense_score, context_score, self_contained_score, context_before, context_after, reading_likelihood, audio_event_score, game_reaction_score, voice_expression_score, moment_reaction_score, moment_reaction_stage, vision_score, duplicate_group, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (record["id"], video_id, record["start"], record["end"], record["text"], json.dumps(record["keywords"], ensure_ascii=False), json.dumps(record["tags"], ensure_ascii=False), json.dumps(record["words"], ensure_ascii=False), json.dumps(record["vector"]), record["quality_score"], json.dumps(record["quality_signals"]), record["logical_sense_score"], record["context_score"], record["self_contained_score"], record["context_before"], record["context_after"], record["reading_likelihood"], record["audio_event_score"], record["game_reaction_score"], record["voice_expression_score"], record["moment_reaction_score"], record["moment_reaction_stage"], record["vision_score"], record["duplicate_group"], db.now()),
             )
         con.execute("UPDATE videos SET status='ready', updated_at=? WHERE id=?", (db.now(), video_id))
     # A chat transcript may have been imported before a reanalysis. Reapply it

@@ -67,6 +67,8 @@ def initialize() -> None:
                 audio_event_score INTEGER NOT NULL DEFAULT 0,
                 game_reaction_score INTEGER NOT NULL DEFAULT 0,
                 voice_expression_score INTEGER NOT NULL DEFAULT 0,
+                moment_reaction_score INTEGER NOT NULL DEFAULT 0,
+                moment_reaction_stage TEXT NOT NULL DEFAULT '',
                 vision_score INTEGER NOT NULL DEFAULT 0,
                 chat_reaction_score INTEGER NOT NULL DEFAULT 0,
                 chat_joy_score INTEGER NOT NULL DEFAULT 0,
@@ -76,6 +78,10 @@ def initialize() -> None:
                 chat_messages TEXT NOT NULL DEFAULT '[]',
                 duplicate_group TEXT NOT NULL DEFAULT '',
                 logical_sense_score INTEGER NOT NULL DEFAULT -1,
+                context_score INTEGER NOT NULL DEFAULT -1,
+                self_contained_score INTEGER NOT NULL DEFAULT -1,
+                context_before TEXT NOT NULL DEFAULT '',
+                context_after TEXT NOT NULL DEFAULT '',
                 censor_profanity INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
@@ -205,6 +211,19 @@ def initialize() -> None:
                 active_profile TEXT NOT NULL DEFAULT 'general',
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS preference_feedback (
+                id TEXT PRIMARY KEY,
+                segment_id TEXT NOT NULL,
+                profile TEXT NOT NULL,
+                decision TEXT NOT NULL CHECK(decision IN ('accepted', 'rejected')),
+                review_reason TEXT NOT NULL DEFAULT '',
+                embedding TEXT NOT NULL,
+                features TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(segment_id, profile)
+            );
+            CREATE INDEX IF NOT EXISTS idx_preference_feedback_profile ON preference_feedback(profile, decision, updated_at DESC);
             """
         )
         columns = {item["name"] for item in con.execute("PRAGMA table_info(segments)").fetchall()}
@@ -228,6 +247,10 @@ def initialize() -> None:
             con.execute("ALTER TABLE segments ADD COLUMN game_reaction_score INTEGER NOT NULL DEFAULT 0")
         if "voice_expression_score" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN voice_expression_score INTEGER NOT NULL DEFAULT 0")
+        if "moment_reaction_score" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN moment_reaction_score INTEGER NOT NULL DEFAULT 0")
+        if "moment_reaction_stage" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN moment_reaction_stage TEXT NOT NULL DEFAULT ''")
         if "vision_score" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN vision_score INTEGER NOT NULL DEFAULT 0")
         if "chat_reaction_score" not in columns:
@@ -246,6 +269,14 @@ def initialize() -> None:
             con.execute("ALTER TABLE segments ADD COLUMN duplicate_group TEXT NOT NULL DEFAULT ''")
         if "logical_sense_score" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN logical_sense_score INTEGER NOT NULL DEFAULT -1")
+        if "context_score" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN context_score INTEGER NOT NULL DEFAULT -1")
+        if "self_contained_score" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN self_contained_score INTEGER NOT NULL DEFAULT -1")
+        if "context_before" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN context_before TEXT NOT NULL DEFAULT ''")
+        if "context_after" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN context_after TEXT NOT NULL DEFAULT ''")
         video_columns = {item["name"] for item in con.execute("PRAGMA table_info(videos)").fetchall()}
         if "source_url" not in video_columns:
             con.execute("ALTER TABLE videos ADD COLUMN source_url TEXT")

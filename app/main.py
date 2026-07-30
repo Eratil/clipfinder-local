@@ -51,12 +51,13 @@ from app.services.discovery import (
     active_profile,
     assign_duplicate_groups,
     profile_payload,
+    preference_features,
     score_candidates,
     suppress_duplicate_groups,
 )
-from app.services.media import MediaError, export_audio_preview, export_clip, write_caption_ass
+from app.services.media import MediaError, audio_track_count, export_audio_preview, export_clip, write_caption_ass
 from app.services.pipeline import analyse, import_reference_folder, transcribe_clip_range
-from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_logical_sense, build_reference_prompt, infer_tags
+from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_context, assess_logical_sense, assess_self_containment, build_reference_prompt, detailed_lexical_tags, enrich_tags, infer_tags, score_moment_reaction
 from app.services.updater import automatic_updates_available, install_downloaded_update, job_status as update_download_status, start_download as start_update_download
 from app.services.updates import update_status
 from app.services.runtime_status import runtime_status
@@ -101,6 +102,70 @@ def backfill_context_signals() -> None:
             )
 
 
+def backfill_segment_context() -> None:
+    """Build lightweight context from adjacent existing candidates once."""
+    updates = []
+    for video in db.rows("SELECT DISTINCT video_id FROM segments WHERE context_score < 0 OR self_contained_score < 0"):
+        segments = db.rows(
+            "SELECT id, start_seconds, end_seconds, transcript, context_score, self_contained_score FROM segments WHERE video_id=? ORDER BY start_seconds",
+            (video["video_id"],),
+        )
+        for segment in segments:
+            if int(segment.get("context_score") or -1) >= 0 and int(segment.get("self_contained_score") or -1) >= 0:
+                continue
+            start, end = float(segment["start_seconds"]), float(segment["end_seconds"])
+            before = " ".join(item["transcript"] for item in segments if start - 12 <= float(item["end_seconds"]) <= start and item["id"] != segment["id"])[-700:]
+            after = " ".join(item["transcript"] for item in segments if end <= float(item["start_seconds"]) <= end + 12 and item["id"] != segment["id"])[:700]
+            score, _signals = assess_context(segment["transcript"], before, after)
+            self_contained = assess_self_containment(segment["transcript"], before, after)
+            updates.append((score, self_contained, before, after, segment["id"]))
+    if updates:
+        with db.connection() as con:
+            con.executemany("UPDATE segments SET context_score=?, self_contained_score=?, context_before=?, context_after=? WHERE id=?", updates)
+
+
+def backfill_moment_reactions() -> None:
+    """Seed the game-to-voice stage for clips analysed before the combined score."""
+    items = db.rows("SELECT id, game_reaction_score FROM segments WHERE moment_reaction_score=0 AND game_reaction_score>=7")
+    if not items:
+        return
+    updates = [(*score_moment_reaction(int(item["game_reaction_score"])), item["id"]) for item in items]
+    with db.connection() as con:
+        con.executemany("UPDATE segments SET moment_reaction_score=?, moment_reaction_stage=? WHERE id=?", updates)
+
+
+def backfill_detailed_tags() -> None:
+    """Add precise text/context labels to existing clips without retranscribing."""
+    items = db.rows(
+        """SELECT id, transcript, tags, logical_sense_score, reading_likelihood,
+                  game_reaction_score, voice_expression_score, moment_reaction_score, moment_reaction_stage, chat_reaction_score, context_score, self_contained_score,
+                  chat_joy_score, vision_score
+           FROM segments"""
+    )
+    updates = []
+    for item in items:
+        tags = list(dict.fromkeys(json.loads(item.get("tags") or "[]") + detailed_lexical_tags(item["transcript"])))
+        tags = enrich_tags(
+            tags,
+            logical_sense_score=int(item.get("logical_sense_score") or -1),
+            reading_likelihood=float(item.get("reading_likelihood") or 0),
+            game_reaction_score=int(item.get("game_reaction_score") or 0),
+            voice_expression_score=int(item.get("voice_expression_score") or 0),
+            chat_reaction_score=int(item.get("chat_reaction_score") or 0),
+            chat_joy_score=int(item.get("chat_joy_score") or 0),
+            vision_score=int(item.get("vision_score") or 0),
+            context_score=int(item.get("context_score") or -1),
+            self_contained_score=int(item.get("self_contained_score") or -1),
+            moment_reaction_score=int(item.get("moment_reaction_score") or 0),
+            moment_reaction_stage=item.get("moment_reaction_stage") or "",
+        )
+        if tags != json.loads(item.get("tags") or "[]"):
+            updates.append((json.dumps(tags, ensure_ascii=False), item["id"]))
+    if updates:
+        with db.connection() as con:
+            con.executemany("UPDATE segments SET tags=? WHERE id=?", updates)
+
+
 def remove_legacy_game_audio_bonus() -> None:
     """Do not keep old scores where a loud game sound was treated as a reaction."""
     items = db.rows(
@@ -134,13 +199,33 @@ def backfill_duplicate_groups() -> None:
                 con.execute("UPDATE segments SET duplicate_group=? WHERE id=?", (record["duplicate_group"], record["id"]))
 
 
+def backfill_preference_feedback() -> None:
+    """Seed the general profile with prior review decisions from older versions."""
+    items = db.rows("SELECT * FROM segments WHERE rating IN ('accepted', 'rejected') AND embedding IS NOT NULL")
+    if not items:
+        return
+    timestamp = db.now()
+    with db.connection() as con:
+        for item in items:
+            con.execute(
+                """INSERT OR IGNORE INTO preference_feedback (id, segment_id, profile, decision, review_reason, embedding, features, created_at, updated_at)
+                   VALUES (?, ?, 'general', ?, ?, ?, ?, ?, ?)""",
+                (str(uuid.uuid4()), item["id"], item["rating"], item.get("review_reason") or "", item["embedding"],
+                 json.dumps(preference_features(item), ensure_ascii=False), timestamp, timestamp),
+            )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.initialize()
     backfill_segment_quality()
     backfill_context_signals()
+    backfill_segment_context()
     remove_legacy_game_audio_bonus()
+    backfill_moment_reactions()
     backfill_duplicate_groups()
+    backfill_detailed_tags()
+    backfill_preference_feedback()
     for item in db.rows("SELECT video_id FROM chat_settings"):
         apply_chat_reactions(item["video_id"])
     yield
@@ -517,7 +602,7 @@ def job(job_id: str):
 
 
 @app.get("/api/videos/{video_id}/segments")
-def video_segments(video_id: str, q: str = "", rating: str = "", tag: str = "", hide_reading: bool = False, show_duplicates: bool = False):
+def video_segments(video_id: str, q: str = "", rating: str = "", tag: str = "", hide_reading: bool = False, show_duplicates: bool = False, sort: str = "suggested_desc"):
     if not db.row("SELECT id FROM videos WHERE id=?", (video_id,)):
         not_found("Video not found")
     clauses, parameters = ["video_id=?"], [video_id]
@@ -537,6 +622,13 @@ def video_segments(video_id: str, q: str = "", rating: str = "", tag: str = "", 
         parameters.append('%"reading"%')
     items = db.rows(f"SELECT * FROM segments WHERE {' AND '.join(clauses)} AND embedding IS NOT NULL", tuple(parameters))
     ranked = suppress_duplicate_groups(score_candidates(items, profile=active_profile()), keep_alternatives=show_duplicates)
+    sort_fields = {
+        "suggested_desc": ("ranking_score", True), "suggested_asc": ("ranking_score", False),
+        "quality_desc": ("quality_score", True), "quality_asc": ("quality_score", False),
+        "self_contained_desc": ("self_contained_score", True), "self_contained_asc": ("self_contained_score", False),
+    }
+    field, descending = sort_fields.get(sort, sort_fields["suggested_desc"])
+    ranked.sort(key=lambda item: float(item.get(field) or 0), reverse=descending)
     return [db.serialize_segment(item) for item in ranked]
 
 
@@ -576,14 +668,31 @@ def update_video_chat_delay(video_id: str, body: ChatDelayUpdate):
 
 @app.patch("/api/segments/{segment_id}")
 def rate_segment(segment_id: str, body: RatingUpdate):
+    profile = active_profile()
     with db.connection() as con:
-        if not con.execute("SELECT id FROM segments WHERE id=?", (segment_id,)).fetchone():
+        segment = con.execute("SELECT * FROM segments WHERE id=?", (segment_id,)).fetchone()
+        if not segment:
             not_found("Segment not found")
         reason = " ".join(body.review_reason.split()) if body.rating == "rejected" else ""
         con.execute("UPDATE segments SET rating=?, review_reason=? WHERE id=?", (body.rating, reason, segment_id))
         if reason:
             con.execute("INSERT OR IGNORE INTO rejection_reasons (reason, created_at) VALUES (?, ?)", (reason, db.now()))
-    return {"ok": True, "review_reason": reason}
+        if body.rating in {"accepted", "rejected"} and segment["embedding"]:
+            updated_segment = dict(segment)
+            updated_segment["rating"] = body.rating
+            updated_segment["review_reason"] = reason
+            timestamp = db.now()
+            con.execute(
+                """INSERT INTO preference_feedback (id, segment_id, profile, decision, review_reason, embedding, features, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(segment_id, profile) DO UPDATE SET decision=excluded.decision, review_reason=excluded.review_reason,
+                   embedding=excluded.embedding, features=excluded.features, updated_at=excluded.updated_at""",
+                (str(uuid.uuid4()), segment_id, profile, body.rating, reason, segment["embedding"],
+                 json.dumps(preference_features(updated_segment), ensure_ascii=False), timestamp, timestamp),
+            )
+        elif body.rating == "unrated":
+            con.execute("DELETE FROM preference_feedback WHERE segment_id=? AND profile=?", (segment_id, profile))
+    return {"ok": True, "review_reason": reason, "profile": profile}
 
 
 @app.patch("/api/segments/{segment_id}/timing")
@@ -607,11 +716,12 @@ def update_segment_timing(segment_id: str, body: SegmentTimingUpdate):
         logical_sense_score = assess_logical_sense(transcript)
         if reading_likelihood >= 0.55:
             tags = list(dict.fromkeys(tags + ["reading"]))
+        tags = enrich_tags(tags, logical_sense_score=logical_sense_score, reading_likelihood=reading_likelihood)
     except Exception as exc:
         raise HTTPException(500, f"Unable to update captions for the new range: {exc}") from exc
     with db.connection() as con:
         con.execute(
-            "UPDATE segments SET start_seconds=?, end_seconds=?, transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, logical_sense_score=?, reading_likelihood=?, audio_event_score=0, game_reaction_score=0, voice_expression_score=0 WHERE id=?",
+            "UPDATE segments SET start_seconds=?, end_seconds=?, transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, logical_sense_score=?, context_score=-1, self_contained_score=-1, context_before='', context_after='', reading_likelihood=?, audio_event_score=0, game_reaction_score=0, voice_expression_score=0, moment_reaction_score=0, moment_reaction_stage='' WHERE id=?",
             (body.start_seconds, body.end_seconds, transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), logical_sense_score, reading_likelihood, segment_id),
         )
     apply_chat_reactions(segment["video_id"])
@@ -632,12 +742,27 @@ def update_segment_transcript(segment_id: str, body: SegmentTranscriptUpdate):
     words = approximate_word_timestamps(transcript, segment["start_seconds"], segment["end_seconds"])
     quality_score, quality_signals, reading_likelihood = assess_clip_quality(transcript, words, segment["start_seconds"], segment["end_seconds"], tags)
     logical_sense_score = assess_logical_sense(transcript)
+    self_contained_score = assess_self_containment(transcript, segment.get("context_before") or "", segment.get("context_after") or "")
     if reading_likelihood >= 0.55:
         tags = list(dict.fromkeys(tags + ["reading"]))
+    tags = enrich_tags(
+        tags,
+        logical_sense_score=logical_sense_score,
+        reading_likelihood=reading_likelihood,
+        game_reaction_score=int(segment.get("game_reaction_score") or 0),
+        voice_expression_score=int(segment.get("voice_expression_score") or 0),
+        chat_reaction_score=int(segment.get("chat_reaction_score") or 0),
+        chat_joy_score=int(segment.get("chat_joy_score") or 0),
+        vision_score=int(segment.get("vision_score") or 0),
+        context_score=int(segment.get("context_score") or -1),
+        self_contained_score=self_contained_score,
+        moment_reaction_score=int(segment.get("moment_reaction_score") or 0),
+        moment_reaction_stage=segment.get("moment_reaction_stage") or "",
+    )
     with db.connection() as con:
         con.execute(
-            "UPDATE segments SET transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, logical_sense_score=?, reading_likelihood=? WHERE id=?",
-            (transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), logical_sense_score, reading_likelihood, segment_id),
+            "UPDATE segments SET transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, logical_sense_score=?, self_contained_score=?, reading_likelihood=? WHERE id=?",
+            (transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), logical_sense_score, self_contained_score, reading_likelihood, segment_id),
         )
     updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
     return db.serialize_segment(updated)
@@ -727,10 +852,19 @@ def audio_preview(segment_id: str, audio_track: int = 1):
         not_found("Segment not found")
     if audio_track not in {1, 2, 3, 4}:
         raise HTTPException(400, "Audio track must be between 1 and 4.")
+    source = Path(segment["path"])
+    if not source.is_file():
+        raise HTTPException(404, "The original recording is no longer available.")
+    try:
+        available_tracks = audio_track_count(source)
+    except MediaError as exc:
+        raise HTTPException(500, f"Unable to inspect audio tracks: {exc}") from exc
+    if audio_track > available_tracks:
+        raise HTTPException(400, f"Track {audio_track} does not exist in this recording. Available audio tracks: {available_tracks}.")
     destination = settings.previews_dir / f"{segment_id}-track{audio_track}.mp3"
     if not destination.is_file():
         try:
-            export_audio_preview(Path(segment["path"]), destination, segment["start_seconds"], segment["end_seconds"], audio_track)
+            export_audio_preview(source, destination, segment["start_seconds"], segment["end_seconds"], audio_track)
         except MediaError as exc:
             raise HTTPException(500, f"Unable to prepare audio preview: {exc}") from exc
     return FileResponse(destination, media_type="audio/mpeg", filename=destination.name)
@@ -862,10 +996,13 @@ def update_discovery_defaults(body: DiscoveryDefaultsUpdate):
 
 
 @app.get("/api/videos/{video_id}/top-clips")
-def top_clips(video_id: str, limit: int = 10):
+def top_clips(video_id: str, limit: int = 10, unrated_only: bool = False):
     if not db.row("SELECT id FROM videos WHERE id=?", (video_id,)):
         not_found("Video not found")
-    candidates = db.rows("SELECT * FROM segments WHERE video_id=? AND embedding IS NOT NULL AND rating != 'rejected'", (video_id,))
+    query = "SELECT * FROM segments WHERE video_id=? AND embedding IS NOT NULL AND rating != 'rejected'"
+    if unrated_only:
+        query += " AND rating='unrated'"
+    candidates = db.rows(query, (video_id,))
     ranked = suppress_duplicate_groups(score_candidates(candidates, profile=active_profile()))
     return [db.serialize_segment(item) for item in ranked[:max(1, min(30, limit))]]
 

@@ -28,6 +28,7 @@
               <label>Content type<select id="discovery-profile"></select></label>
               <button>Save discovery profile</button>
             </form>
+            <p id="discovery-feedback" class="hint"></p>
           </article>
           <article class="library-card">
             <h3>Saved prompts</h3>
@@ -195,6 +196,38 @@
               <option value="rekomendacja">Rekomendacja</option>
               <option value="reakcja na grę">Reakcja na grę</option>
               <option value="reading">Possible reading</option>
+              <optgroup label="Forma wypowiedzi">
+                <option value="forma: opinia">Opinia</option>
+                <option value="forma: pytanie">Konkretne pytanie</option>
+                <option value="forma: rada">Rada / rekomendacja</option>
+                <option value="forma: krytyka">Krytyka</option>
+                <option value="forma: porównanie">Porównanie</option>
+                <option value="forma: decyzja">Decyzja</option>
+                <option value="forma: przewidywanie">Przewidywanie</option>
+                <option value="forma: historia">Historia</option>
+                <option value="forma: puenta">Puenta</option>
+              </optgroup>
+              <optgroup label="Dokładna emocja">
+                <option value="emocja: śmiech">Śmiech</option>
+                <option value="emocja: frustracja">Frustracja</option>
+                <option value="emocja: zachwyt">Zachwyt</option>
+                <option value="emocja: rozczarowanie">Rozczarowanie</option>
+                <option value="emocja: szok">Szok</option>
+              </optgroup>
+              <optgroup label="Kontekst i reakcje">
+                <option value="reakcja: gra">Reakcja na zdarzenie w grze</option>
+                <option value="reakcja: mocny głos">Mocna reakcja głosem</option>
+                <option value="reakcja: czat">Reakcja czatu</option>
+                <option value="reakcja: radość czatu">Radość czatu</option>
+                <option value="moment: gra -> glos">Moment: gra → głos</option>
+                <option value="moment: gra -> glos -> czat">Moment: gra → głos → czat</option>
+                <option value="kontekst: akcja wizualna">Akcja wizualna</option>
+                <option value="kontekst: pełna myśl">Pełna myśl w kontekście</option>
+                <option value="struktura: samodzielna myśl">Samodzielna myśl</option>
+                <option value="struktura: urwana wypowiedź">Urwana wypowiedź</option>
+                <option value="struktura: wymaga kontekstu">Wymaga kontekstu</option>
+                <option value="format: czytanie">Czytanie</option>
+              </optgroup>
             </select>
           </label>
           <label class="check"><input id="hide-reading" type="checkbox" checked /> Hide possible reading</label>
@@ -209,7 +242,18 @@
             </select>
           </label>
           <button class="quiet" id="rating-search-button">Filter status</button>
+          <label>Sort results
+            <select id="score-sort">
+              <option value="suggested_desc">Suggested score: high to low</option>
+              <option value="suggested_asc">Suggested score: low to high</option>
+              <option value="quality_desc">Quality: high to low</option>
+              <option value="quality_asc">Quality: low to high</option>
+              <option value="self_contained_desc">Self-contained: high to low</option>
+              <option value="self_contained_asc">Self-contained: low to high</option>
+            </select>
+          </label>
           <button id="top-clips-button">Show Top 10</button>
+          <button class="quiet" id="quick-review-button">Quick selection</button>
         </div>
         <p id="selection-summary" class="hint"></p>
         <div id="segments" class="segments"></div>
@@ -218,7 +262,7 @@
 
     <template id="segment-template">
       <article class="segment">
-        <div class="time"></div><div class="ranking hint"></div><div class="tags"></div><p class="transcript"></p><div class="chat-reaction hint" hidden></div><p class="chat-messages hint" hidden></p>
+        <div class="time"></div><div class="ranking hint"></div><div class="tags"></div><p class="transcript"></p><div class="context-reaction hint" hidden></div><details class="clip-context" hidden><summary>Context before and after</summary><p class="context-before"></p><p class="context-after"></p></details><div class="chat-reaction hint" hidden></div><p class="chat-messages hint" hidden></p>
         <p class="hint clip-select-hint">Click this clip to edit it in the right panel.</p>
         <div class="actions"><button data-open>Open in full recording</button><button data-rating="accepted">Approve clip</button><button class="quiet" data-rating="rejected">Reject</button><button class="quiet" data-preview>Listen</button><button class="quiet" data-example>Add as reference</button></div>
       </article>
@@ -259,6 +303,7 @@
     </aside>
     <section id="audio-now-playing" class="audio-now-playing" aria-live="polite" hidden>
       <div><strong id="audio-now-playing-title">Listening</strong><p id="audio-now-playing-detail" class="hint"></p></div>
+      <label class="listen-track">Audio track<select id="listen-audio-track"><option value="1">Track 1 (default)</option><option value="2">Track 2</option><option value="3">Track 3</option><option value="4">Track 4</option></select></label>
       <audio id="global-audio-player" controls preload="none"></audio>
       <button id="stop-listening" class="quiet">Stop</button>
     </section>
@@ -266,6 +311,18 @@
       <div class="dialog-head"><strong id="dialog-title">Full recording</strong><button id="close-dialog" class="quiet">Close</button></div>
       <video id="full-video" controls preload="metadata"></video>
       <p id="dialog-transcript" class="hint"></p>
+    </dialog>
+    <dialog id="quick-review-dialog" class="quick-review-dialog">
+      <div class="dialog-head"><div><strong>Quick selection</strong><p id="quick-review-progress" class="hint"></p></div><button id="quick-review-close" class="quiet">Close</button></div>
+      <div class="quick-review-card">
+        <div id="quick-review-time" class="time"></div>
+        <div id="quick-review-ranking" class="hint"></div>
+        <div id="quick-review-tags" class="tags"></div>
+        <p id="quick-review-transcript" class="quick-review-transcript"></p>
+        <p id="quick-review-context" class="hint"></p>
+      </div>
+      <p class="hint quick-review-shortcuts"><kbd>A</kbd> approve &nbsp; <kbd>R</kbd> reject &nbsp; <kbd>S</kbd> listen / pause &nbsp; <kbd>←</kbd><kbd>→</kbd> previous / next</p>
+      <div class="actions quick-review-actions"><button id="quick-review-approve">Approve</button><button id="quick-review-reject" class="quiet">Reject</button><button id="quick-review-listen" class="quiet">Listen</button><button id="quick-review-previous" class="quiet">Previous</button><button id="quick-review-next" class="quiet">Next</button></div>
     </dialog>
     <script src="/static/app.js?v=20260729-layouts"></script>
   </body>

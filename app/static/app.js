@@ -1,4 +1,4 @@
-const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, editingSegment: null, clipEditorOpen: false, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1, camera_x:.78, camera_y:.03, camera_width:.11, camera_height:.11, game_x:.22, game_y:0, game_width:.56, game_height:1 }, layoutCalibration: { mode:'camera', drawing:null }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0, updateDownloadId: null };
+const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, listeningSegment: null, listenAudioTrack: 1, quickReview: { clips: [], index: 0, saving: false }, editingSegment: null, clipEditorOpen: false, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1, camera_x:.78, camera_y:.03, camera_width:.11, camera_height:.11, game_x:.22, game_y:0, game_width:.56, game_height:1 }, layoutCalibration: { mode:'camera', drawing:null }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0, updateDownloadId: null };
 const $ = (selector) => document.querySelector(selector);
 const fmt = (seconds) => new Date(seconds * 1000).toISOString().slice(11, 19);
 const clamp = (number) => Math.max(0, Math.min(100, Number(number || 0)));
@@ -120,6 +120,7 @@ async function legacyLoadSegments(custom = null) {
     const tags = node.querySelector('.tags');
     for (const tag of segment.tags || []) tags.append(make('span', 'tag', tag));
     node.querySelector('.transcript').textContent = segment.transcript || 'No recognized speech';
+    renderClipContext(node, segment);
     renderChatReaction(node, segment);
     const startInput = node.querySelector('[data-start]'); const endInput = node.querySelector('[data-end]'); const captionPosition = node.querySelector('[data-caption-position]'); const ratingSelect = node.querySelector('[data-rating-select]'); const reviewReason = node.querySelector('[data-review-reason]'); const transcriptInput = node.querySelector('[data-transcript]'); const censorToggle = node.querySelector('[data-censor-profanity]'); const exportName = node.querySelector('[data-export-name]');
     startInput.value = Number(segment.start_seconds).toFixed(1); endInput.value = Number(segment.end_seconds).toFixed(1);
@@ -164,7 +165,7 @@ async function legacyLoadSegments(custom = null) {
     player.onpause = () => { if (state.previewAudio === player) state.previewAudio = null; };
     player.onended = () => { if (state.previewAudio === player) state.previewAudio = null; };
     player.onerror = () => message('Audio preview could not be played.', true);
-    preview.onclick = async () => { player.src = `/api/segments/${segment.id}/audio-preview?audio_track=${encodeURIComponent(state.globalExport.audio_track)}`; player.hidden = false; try { await player.play(); } catch { message('Audio preview could not be started.', true); } };
+    preview.onclick = async () => { player.src = `/api/segments/${segment.id}/audio-preview?audio_track=${encodeURIComponent(state.listenAudioTrack)}`; player.hidden = false; try { await player.play(); } catch { message('Audio preview could not be started.', true); } };
     const exportButton = node.querySelector('[data-export]'); exportButton.disabled = segment.rating !== 'accepted'; exportButton.textContent = segment.rating === 'accepted' ? 'Export MP4' : 'Approve before export'; exportButton.onclick = () => { const position = state.captionPositions[segment.id] || captionPosition.value; const settings = state.globalCaption; const output = state.globalExport; const filename = state.exportNames[segment.id] || exportName.value; window.location.href = `/api/segments/${segment.id}/export?captions_preset=${encodeURIComponent(settings.captions_preset)}&caption_position=${encodeURIComponent(position)}&base_color=${encodeURIComponent(settings.base_color)}&active_color=${encodeURIComponent(settings.active_color)}&layout=${encodeURIComponent(output.layout)}&audio_track=${encodeURIComponent(output.audio_track)}&filename=${encodeURIComponent(filename)}`; }; box.append(node);
   }
 }
@@ -213,19 +214,108 @@ async function saveSegmentRating(segment, rating) {
 
 async function playClipAudio(segment) {
   const player = $('#global-audio-player');
+  state.listeningSegment = segment;
   $('#audio-now-playing-title').textContent = 'Listening to clip';
   $('#audio-now-playing-detail').textContent = `${fmt(segment.start_seconds)} - ${fmt(segment.end_seconds)} / ${segment.transcript || 'No recognized speech'}`;
   $('#audio-now-playing').hidden = false;
-  player.src = `/api/segments/${segment.id}/audio-preview?audio_track=${encodeURIComponent(state.globalExport.audio_track)}`;
-  try { await player.play(); } catch { message('Audio preview could not be started.', true); }
+  $('#listen-audio-track').value = String(state.listenAudioTrack || 1);
+  await loadListeningAudio();
+}
+
+async function loadListeningAudio() {
+  const segment = state.listeningSegment; if (!segment) return;
+  const player = $('#global-audio-player'); const track = Number($('#listen-audio-track').value || 1);
+  state.listenAudioTrack = track;
+  const source = `/api/segments/${segment.id}/audio-preview?audio_track=${encodeURIComponent(track)}`;
+  try {
+    await api(`/segments/${segment.id}/audio-preview?audio_track=${encodeURIComponent(track)}`);
+    player.src = source; player.load(); await player.play();
+  } catch (error) {
+    player.pause(); player.removeAttribute('src'); player.load(); message(error.message, true);
+  }
+}
+
+function currentQuickClip() {
+  return state.quickReview.clips[state.quickReview.index] || null;
+}
+
+function renderQuickReview(autoListen = true) {
+  const clip = currentQuickClip();
+  const total = state.quickReview.clips.length;
+  if (!clip || !total) return;
+  const reviewed = state.quickReview.clips.filter((item) => item.rating !== 'unrated').length;
+  $('#quick-review-progress').textContent = `${state.quickReview.index + 1} / ${total}  |  reviewed: ${reviewed}`;
+  $('#quick-review-time').textContent = `${fmt(clip.start_seconds)} - ${fmt(clip.end_seconds)}`;
+  $('#quick-review-ranking').textContent = clip.ranking_score ? `Suggested score ${clip.ranking_score}/99 - ${clip.ranking_reason}` : `Clip quality ${clip.quality_score || 0}/99`;
+  const tags = $('#quick-review-tags'); tags.replaceChildren(); for (const tag of clip.tags || []) tags.append(make('span', 'tag', tag));
+  $('#quick-review-transcript').textContent = clip.transcript || 'No recognized speech';
+  const context = Number(clip.context_score || 0); const selfContained = Number(clip.self_contained_score || 0); const moment = Number(clip.moment_reaction_score || 0);
+  $('#quick-review-context').textContent = `${context ? `Context ${context}/99` : ''}${context && selfContained ? ' / ' : ''}${selfContained ? `Self-contained ${selfContained}/99` : ''}${moment ? ` / Moment -> reaction ${moment}/30` : ''}${selfContained && selfContained <= 35 ? ' - may need surrounding speech.' : selfContained >= 75 ? ' - complete thought.' : ''}`;
+  $('#quick-review-approve').disabled = state.quickReview.saving;
+  $('#quick-review-reject').disabled = state.quickReview.saving;
+  $('#quick-review-previous').disabled = state.quickReview.saving || state.quickReview.index === 0;
+  $('#quick-review-next').disabled = state.quickReview.saving || state.quickReview.index === total - 1;
+  $('#quick-review-listen').disabled = state.quickReview.saving;
+  if (autoListen) playClipAudio(clip).catch((error) => message(error.message, true));
+}
+
+async function openQuickReview() {
+  if (!state.videoId) return message('Choose a recording first.', true);
+  try {
+    const clips = await api(`/videos/${state.videoId}/top-clips?limit=20&unrated_only=true`);
+    if (!clips.length) return message('There are no unreviewed candidates left for quick selection.');
+    state.quickReview = { clips, index: 0, saving: false };
+    const dialog = $('#quick-review-dialog');
+    if (!dialog.open) dialog.showModal();
+    renderQuickReview(true);
+  } catch (error) { message(error.message, true); }
+}
+
+async function rateQuickClip(rating) {
+  const clip = currentQuickClip();
+  if (!clip || state.quickReview.saving) return;
+  state.quickReview.saving = true;
+  renderQuickReview(false);
+  try {
+    await api(`/segments/${clip.id}`, { method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({rating, review_reason:''}) });
+    clip.rating = rating; clip.review_reason = '';
+    const original = state.activeResults?.find((item) => item.id === clip.id);
+    if (original) { original.rating = rating; original.review_reason = ''; }
+    if (state.quickReview.index < state.quickReview.clips.length - 1) state.quickReview.index += 1;
+    await reloadActiveSegments();
+    renderQuickReview(true);
+  } catch (error) { message(error.message, true); renderQuickReview(false); }
+  finally { state.quickReview.saving = false; renderQuickReview(false); }
+}
+
+function moveQuickReview(offset) {
+  const next = Math.max(0, Math.min(state.quickReview.clips.length - 1, state.quickReview.index + offset));
+  if (next === state.quickReview.index || state.quickReview.saving) return;
+  state.quickReview.index = next;
+  renderQuickReview(true);
+}
+
+function toggleQuickListening() {
+  const clip = currentQuickClip();
+  if (!clip) return;
+  if (state.listeningSegment?.id === clip.id && !globalAudioPlayer.paused) { globalAudioPlayer.pause(); return; }
+  playClipAudio(clip).catch((error) => message(error.message, true));
+}
+
+function closeQuickReview() {
+  const dialog = $('#quick-review-dialog');
+  if (dialog.open) dialog.close();
+  globalAudioPlayer.pause(); globalAudioPlayer.removeAttribute('src'); globalAudioPlayer.load();
+  $('#audio-now-playing').hidden = true;
 }
 
 async function loadSegments(custom = null) {
   if (!state.videoId) return;
   const selectedTag = $('#tag-search').value; const selectedRating = $('#rating-search').value; const hideReading = $('#hide-reading').checked && selectedTag !== 'reading';
-  const values = custom
+  const source = custom
     ? custom.filter((segment) => (!selectedTag || (segment.tags || []).includes(selectedTag)) && (!selectedRating || segment.rating === selectedRating) && (!hideReading || !(segment.tags || []).includes('reading')))
-    : await api(`/videos/${state.videoId}/segments?q=${encodeURIComponent($('#search').value)}&tag=${encodeURIComponent(selectedTag)}&rating=${encodeURIComponent(selectedRating)}&hide_reading=${hideReading}`);
+    : await api(`/videos/${state.videoId}/segments?q=${encodeURIComponent($('#search').value)}&tag=${encodeURIComponent(selectedTag)}&rating=${encodeURIComponent(selectedRating)}&hide_reading=${hideReading}&sort=${encodeURIComponent($('#score-sort').value)}`);
+  const values = sortSegments(source);
   const box = $('#segments'); const editingId = state.editingSegment?.id; let refreshedEditingSegment = null; box.replaceChildren();
   if (!values.length) { clearClipEditor(); box.append(make('p', 'hint', 'No candidates yet. Analysis may still be running.')); return; }
   const template = $('#segment-template');
@@ -237,12 +327,13 @@ async function loadSegments(custom = null) {
     const tags = node.querySelector('.tags');
     for (const tag of segment.tags || []) tags.append(make('span', 'tag', tag));
     node.querySelector('.transcript').textContent = segment.transcript || 'No recognized speech';
+    renderClipContext(node, segment);
     renderChatReaction(node, segment);
     node.querySelector('[data-open]').onclick = () => openSegmentInRecording(segment);
     node.querySelectorAll('[data-rating]').forEach((button) => button.onclick = () => { selectClipForEditor(segment); saveSegmentRating(segment, button.dataset.rating).catch((error) => message(error.message, true)); });
     node.querySelector('[data-example]').onclick = async () => { if (!state.collectionId) return message('Choose a reference collection first.', true); await api(`/collections/${state.collectionId}/examples`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({segment_id:segment.id}) }); message('Reference added.'); await refreshLibrary(); };
     node.querySelector('[data-preview]').onclick = () => { playClipAudio(segment); };
-    article.onclick = (event) => { if (!event.target.closest('button, a, audio, input, textarea, select, label')) selectClipForEditor(segment); };
+    article.onclick = (event) => { if (!event.target.closest('button, a, audio, input, textarea, select, label, details')) selectClipForEditor(segment); };
     if (segment.id === editingId) refreshedEditingSegment = segment;
     box.append(node);
   }
@@ -250,8 +341,33 @@ async function loadSegments(custom = null) {
   else if (editingId) clearClipEditor();
 }
 
+function sortSegments(segments) {
+  const mode = $('#score-sort').value;
+  const fields = {
+    suggested_desc: ['ranking_score', -1], suggested_asc: ['ranking_score', 1],
+    quality_desc: ['quality_score', -1], quality_asc: ['quality_score', 1],
+    self_contained_desc: ['self_contained_score', -1], self_contained_asc: ['self_contained_score', 1],
+  };
+  const [field, direction] = fields[mode] || fields.suggested_desc;
+  return [...segments].sort((left, right) => (Number(left[field] || 0) - Number(right[field] || 0)) * direction);
+}
+
 async function reloadActiveSegments() {
   await loadSegments(state.resultMode === 'all' ? null : (state.activeResults || []));
+}
+
+function renderClipContext(node, segment) {
+  const summary = node.querySelector('.context-reaction'); const details = node.querySelector('.clip-context');
+  const score = Number(segment.context_score || 0); const selfContained = Number(segment.self_contained_score || 0); const moment = Number(segment.moment_reaction_score || 0);
+  if (!score && !selfContained && !moment) { summary.hidden = true; details.hidden = true; return; }
+  const description = selfContained >= 75 ? 'works without surrounding conversation' : selfContained && selfContained <= 35 ? 'may need the surrounding conversation to make sense' : 'nearby speech was checked';
+  summary.textContent = `${score ? `Context ${score}/99` : ''}${score && selfContained ? ' / ' : ''}${selfContained ? `Self-contained ${selfContained}/99` : ''}${moment ? ` / Moment -> reaction ${moment}/30` : ''} - ${description}`;
+  summary.hidden = false;
+  const before = String(segment.context_before || '').trim(); const after = String(segment.context_after || '').trim();
+  if (!before && !after) { details.hidden = true; return; }
+  node.querySelector('.context-before').textContent = before ? `Before: ${before}` : 'Before: no recognised speech in the preceding 12 seconds.';
+  node.querySelector('.context-after').textContent = after ? `After: ${after}` : 'After: no recognised speech in the following 12 seconds.';
+  details.hidden = false;
 }
 
 function renderChatReaction(node, segment) {
@@ -487,8 +603,10 @@ async function loadDiscoverySettings() {
   const defaults = await api('/discovery-defaults');
   state.discovery = defaults;
   const select = $('#discovery-profile'); const previous = select.value; select.replaceChildren();
-  for (const profile of defaults.profiles) { const option = document.createElement('option'); option.value = profile.id; option.textContent = profile.name; select.append(option); }
+  for (const profile of defaults.profiles) { const option = document.createElement('option'); option.value = profile.id; option.textContent = `${profile.name} (${profile.accepted || 0} approved / ${profile.rejected || 0} rejected)`; select.append(option); }
   select.value = defaults.active_profile || previous || 'general';
+  const active = defaults.profiles.find((profile) => profile.id === select.value) || {accepted:0, rejected:0};
+  $('#discovery-feedback').textContent = `Learning data for this profile: ${active.accepted || 0} approved, ${active.rejected || 0} rejected. Profile-specific learning becomes stronger after several decisions in both groups.`;
 }
 
 function rememberAnalysisAudio() {
@@ -566,6 +684,7 @@ globalAudioPlayer.onpause = () => { if (state.previewAudio === globalAudioPlayer
 globalAudioPlayer.onended = () => { if (state.previewAudio === globalAudioPlayer) state.previewAudio = null; $('#audio-now-playing').hidden = true; };
 globalAudioPlayer.onerror = () => { $('#audio-now-playing').hidden = true; message('Audio preview could not be played.', true); };
 $('#stop-listening').onclick = () => { globalAudioPlayer.pause(); globalAudioPlayer.removeAttribute('src'); globalAudioPlayer.load(); $('#audio-now-playing').hidden = true; };
+$('#listen-audio-track').onchange = () => { if (state.listeningSegment) loadListeningAudio(); };
 
 async function uploadChatTranscript(file, delay) {
   const data = new FormData(); data.append('chat_file', file); data.append('delay_seconds', String(delay));
@@ -634,7 +753,16 @@ $('#tag-search').onchange = showAllSegments;
 $('#rating-search').onchange = showAllSegments;
 $('#hide-reading').onchange = showAllSegments;
 $('#show-duplicates').onchange = showAllSegments;
+$('#score-sort').onchange = () => reloadActiveSegments();
 $('#top-clips-button').onclick = async () => { if (!state.videoId) return message('Choose a recording first.', true); try { const results = await api(`/videos/${state.videoId}/top-clips?limit=10`); state.resultMode = 'top'; state.activeResults = results; await loadSegments(results); message('Showing the 10 strongest different candidates.'); } catch (error) { message(error.message, true); } };
+$('#quick-review-button').onclick = openQuickReview;
+$('#quick-review-close').onclick = closeQuickReview;
+$('#quick-review-approve').onclick = () => rateQuickClip('accepted');
+$('#quick-review-reject').onclick = () => rateQuickClip('rejected');
+$('#quick-review-listen').onclick = toggleQuickListening;
+$('#quick-review-previous').onclick = () => moveQuickReview(-1);
+$('#quick-review-next').onclick = () => moveQuickReview(1);
+$('#quick-review-dialog').addEventListener('close', () => { globalAudioPlayer.pause(); globalAudioPlayer.removeAttribute('src'); globalAudioPlayer.load(); $('#audio-now-playing').hidden = true; });
 $('#description-button').onclick = async () => { const description = $('#active-prompt').value.trim(); if (!state.videoId || description.length < 3) return message('Choose a recording and enter a prompt first.', true); try { const results = await api('/search/description', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({video_id:state.videoId, description}) }); state.resultMode = 'description'; state.activeResults = results; await loadSegments(results); } catch (error) { message(error.message, true); } };
 $('#similar-button').onclick = async () => { if (!state.videoId || !state.collectionId) return message('Choose a recording and a collection first.', true); try { const results = await api(`/collections/${state.collectionId}/search`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({video_id:state.videoId})}); state.resultMode = 'similar'; state.activeResults = results; await loadSegments(results); } catch (error) { message(error.message, true); } };
 $('#active-prompt').oninput = updateSelectionSummary; $('#refresh').onclick = refreshDashboard;
@@ -652,6 +780,20 @@ $('#setup-close').onclick = () => setSetupSidebar(false);
 $('#clip-editor-close').onclick = () => setClipEditorOpen(false);
 $('#clip-editor-toggle').onclick = () => setClipEditorOpen(true);
 setClipEditorOpen(false);
-document.addEventListener('keydown', (event) => { if (event.key === 'Escape') setSetupSidebar(false); });
+document.addEventListener('keydown', (event) => {
+  const quickOpen = $('#quick-review-dialog').open;
+  if (quickOpen) {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.target.matches('input, textarea, select')) return;
+    const key = event.key.toLowerCase();
+    if (key === 'a') { event.preventDefault(); rateQuickClip('accepted'); }
+    else if (key === 'r') { event.preventDefault(); rateQuickClip('rejected'); }
+    else if (key === 's') { event.preventDefault(); toggleQuickListening(); }
+    else if (event.key === 'ArrowLeft') { event.preventDefault(); moveQuickReview(-1); }
+    else if (event.key === 'ArrowRight') { event.preventDefault(); moveQuickReview(1); }
+    else if (event.key === 'Escape') { event.preventDefault(); closeQuickReview(); }
+    return;
+  }
+  if (event.key === 'Escape') setSetupSidebar(false);
+});
 $('#close-dialog').onclick = () => { $('#full-video').pause(); $('#video-dialog').close(); };
 api('/health').then(async () => { await Promise.all([refreshDashboard(), loadRuntimeStatus()]); }).catch(() => message('Local API unavailable', true)); setInterval(refreshDashboard, 4000); setInterval(() => loadRuntimeStatus().catch(() => {}), 30000);

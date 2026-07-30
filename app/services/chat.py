@@ -11,6 +11,7 @@ from collections import Counter
 from typing import Any
 
 from app import database as db
+from app.services.tagging import enrich_tags, score_moment_reaction
 
 
 TIME_PATTERN = re.compile(r"^\s*\[?(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?\]?\s*$")
@@ -164,7 +165,12 @@ def apply_chat_reactions(video_id: str) -> int:
     if not settings or not messages:
         return 0
     delay = float(settings["delay_seconds"])
-    segments = db.rows("SELECT id, end_seconds FROM segments WHERE video_id=?", (video_id,))
+    segments = db.rows(
+        """SELECT id, end_seconds, tags, logical_sense_score, context_score, self_contained_score, reading_likelihood,
+                  game_reaction_score, voice_expression_score, vision_score
+           FROM segments WHERE video_id=?""",
+        (video_id,),
+    )
     message_times = [float(message["seconds"]) for message in messages]
     updates = []
     for segment in segments:
@@ -199,11 +205,26 @@ def apply_chat_reactions(video_id: str) -> int:
         if joy and count >= max(3, expected * 1.5):
             joy_score += min(4, round(max(0.0, surge - 1) * 2.5))
         joy_score = max(0, min(14, joy_score))
+        moment_score, moment_stage = score_moment_reaction(int(segment.get("game_reaction_score") or 0), score, joy_score)
         previews = [{"author": message["author"], "message": message["message"], "seconds": message["seconds"]} for message in reaction[:4]]
-        updates.append((score, joy_score, count, unique, round(surge, 2), json.dumps(previews, ensure_ascii=False), segment["id"]))
+        tags = enrich_tags(
+            json.loads(segment.get("tags") or "[]"),
+            logical_sense_score=int(segment.get("logical_sense_score") or -1),
+            reading_likelihood=float(segment.get("reading_likelihood") or 0),
+            game_reaction_score=int(segment.get("game_reaction_score") or 0),
+            voice_expression_score=int(segment.get("voice_expression_score") or 0),
+            chat_reaction_score=score,
+            chat_joy_score=joy_score,
+            vision_score=int(segment.get("vision_score") or 0),
+            context_score=int(segment.get("context_score") or -1),
+            self_contained_score=int(segment.get("self_contained_score") or -1),
+            moment_reaction_score=moment_score,
+            moment_reaction_stage=moment_stage,
+        )
+        updates.append((json.dumps(tags, ensure_ascii=False), score, joy_score, count, unique, round(surge, 2), json.dumps(previews, ensure_ascii=False), moment_score, moment_stage, segment["id"]))
     with db.connection() as con:
         con.executemany(
-            "UPDATE segments SET chat_reaction_score=?, chat_joy_score=?, chat_message_count=?, chat_unique_authors=?, chat_surge=?, chat_messages=? WHERE id=?",
+            "UPDATE segments SET tags=?, chat_reaction_score=?, chat_joy_score=?, chat_message_count=?, chat_unique_authors=?, chat_surge=?, chat_messages=?, moment_reaction_score=?, moment_reaction_stage=? WHERE id=?",
             updates,
         )
     return len(updates)
