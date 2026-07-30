@@ -8,13 +8,14 @@ NVIDIA hardware never need to download or extract those large installers.
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$Version = '0.1.0',
+    [string]$PythonPath = '',
     [Alias('IncludeGpuDependencies')]
     [switch]$GpuAddon
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
-$python = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$python = if ($PythonPath) { $PythonPath } else { Join-Path $projectRoot '.venv\Scripts\python.exe' }
 $innoCandidates = @(
     'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
     'C:\Program Files\Inno Setup 6\ISCC.exe'
@@ -22,7 +23,7 @@ $innoCandidates = @(
 $iscc = $innoCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 
 if (-not $GpuAddon -and -not (Test-Path -LiteralPath $python)) {
-    throw 'Missing .venv. Run Install-ClipFinder.cmd first.'
+    throw 'Missing Python build environment. Run Install-ClipFinder.cmd first or provide -PythonPath.'
 }
 if (-not $iscc) {
     throw 'Inno Setup 6 was not found. Install it from https://jrsoftware.org/isdl.php, then run this script again.'
@@ -94,7 +95,13 @@ else {
     # runtime. Text embeddings safely fall back to CPU; GPU transcription is
     # supplied by the optional CUDA/cuDNN add-on. Keeping these files here
     # makes the standard installer over 4 GB and too large for GitHub Releases.
-    $torchLibrary = Join-Path $projectRoot 'dist\ClipFinder\_internal\torch\lib'
+    # Depending on PyInstaller's collection layout, Torch DLLs can end up
+    # directly in _internal or in torch\lib. Remove CUDA binaries from both
+    # places; the separate GPU add-on provides those at runtime when needed.
+    $torchLibraryDirectories = @(
+        (Join-Path $projectRoot 'dist\ClipFinder\_internal\torch\lib'),
+        (Join-Path $projectRoot 'dist\ClipFinder\_internal')
+    ) | Where-Object { Test-Path -LiteralPath $_ }
     $unneededTorchFiles = @(
         '*.lib', '*.exp', '*.pdb',
         'c10_cuda.dll', 'torch_cuda.dll', 'caffe2_nvrtc.dll',
@@ -103,10 +110,12 @@ else {
         'nvrtc*.dll', 'nvJitLink*.dll', 'nvToolsExt*.dll'
     )
     $removedBytes = 0
-    foreach ($pattern in $unneededTorchFiles) {
-        Get-ChildItem -Path $torchLibrary -Filter $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
-            $removedBytes += $_.Length
-            Remove-Item -LiteralPath $_.FullName -Force
+    foreach ($directory in $torchLibraryDirectories) {
+        foreach ($pattern in $unneededTorchFiles) {
+            Get-ChildItem -Path $directory -Filter $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
+                $removedBytes += $_.Length
+                Remove-Item -LiteralPath $_.FullName -Force
+            }
         }
     }
     Write-Host ("Removed {0:N1} MB of optional Torch CUDA/development files." -f ($removedBytes / 1MB)) -ForegroundColor DarkGray
