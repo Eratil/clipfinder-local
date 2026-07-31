@@ -243,8 +243,10 @@ def assess_clip_quality(text: str, words: list[dict], start: float, end: float, 
     sparse_punctuation = len(tokens) >= 28 and duration >= 22 and not re.search(r"[.!?]", text)
     matched_tags = [tag for tag in tags if tag in EMOTION_OR_OPINION_TAGS]
     reading = 0.0
-    if len(tokens) >= 10 and word_rate < 1.55:
-        reading += 0.30
+    if len(tokens) >= 10 and word_rate < 1.25:
+        reading += 0.22
+    elif len(tokens) >= 10 and word_rate < 1.55:
+        reading += 0.08
     if len(tokens) >= 10 and long_pauses >= max(2, len(tokens) // 9):
         reading += 0.25
     if fillers >= 2:
@@ -256,7 +258,10 @@ def assess_clip_quality(text: str, words: list[dict], start: float, end: float, 
     if ui_cues >= 2:
         reading += min(0.42, ui_cues * 0.11)
     if document_cues >= 2:
-        reading += min(0.55, 0.20 + document_cues * 0.11)
+        # Formal vocabulary is common in genuine commentary too.  It is only
+        # supporting evidence; the decisive confirmation comes from a visible
+        # text-heavy game screen or another independent reading signal.
+        reading += min(0.22, 0.06 + document_cues * 0.04)
     if sparse_punctuation and word_rate <= 4.2:
         reading += 0.18
     if len(tokens) >= 55 and duration >= 30 and not matched_tags:
