@@ -314,12 +314,18 @@
     </dialog>
     <dialog id="quick-review-dialog" class="quick-review-dialog">
       <div class="dialog-head"><div><strong>Quick selection</strong><p id="quick-review-progress" class="hint"></p></div><button id="quick-review-close" class="quiet">Close</button></div>
-      <div class="quick-review-card">
-        <div id="quick-review-time" class="time"></div>
-        <div id="quick-review-ranking" class="hint"></div>
-        <div id="quick-review-tags" class="tags"></div>
-        <p id="quick-review-transcript" class="quick-review-transcript"></p>
-        <p id="quick-review-context" class="hint"></p>
+      <div class="quick-review-content">
+        <div class="quick-review-card">
+          <div id="quick-review-time" class="time"></div>
+          <div id="quick-review-ranking" class="hint"></div>
+          <div id="quick-review-tags" class="tags"></div>
+          <p id="quick-review-transcript" class="quick-review-transcript"></p>
+          <p id="quick-review-context" class="hint"></p>
+        </div>
+        <div class="quick-review-preview">
+          <p class="hint">Original recording</p>
+          <video id="quick-review-video" controls preload="metadata" playsinline></video>
+        </div>
       </div>
       <p class="hint quick-review-shortcuts"><kbd>A</kbd> approve &nbsp; <kbd>R</kbd> reject &nbsp; <kbd>S</kbd> listen / pause &nbsp; <kbd>←</kbd><kbd>→</kbd> previous / next</p>
       <div class="actions quick-review-actions"><button id="quick-review-approve">Approve</button><button id="quick-review-reject" class="quiet">Reject</button><button id="quick-review-listen" class="quiet">Listen</button><button id="quick-review-previous" class="quiet">Previous</button><button id="quick-review-next" class="quiet">Next</button></div>

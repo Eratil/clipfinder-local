@@ -247,6 +247,25 @@ function currentQuickClip() {
   return state.quickReview.clips[state.quickReview.index] || null;
 }
 
+function loadQuickReviewPreview(clip) {
+  const player = $('#quick-review-video');
+  player.pause();
+  player.removeAttribute('src');
+  player.load();
+  const start = Number(clip.start_seconds || 0);
+  const end = Number(clip.end_seconds || start + 1);
+  player.src = `/api/videos/${clip.video_id}/stream#t=${start.toFixed(2)},${end.toFixed(2)}`;
+  player.onloadedmetadata = () => { player.currentTime = start; };
+  player.load();
+}
+
+function clearQuickReviewPreview() {
+  const player = $('#quick-review-video');
+  player.pause();
+  player.removeAttribute('src');
+  player.load();
+}
+
 function renderQuickReview(autoListen = true) {
   const clip = currentQuickClip();
   const total = state.quickReview.clips.length;
@@ -264,6 +283,7 @@ function renderQuickReview(autoListen = true) {
   $('#quick-review-previous').disabled = state.quickReview.saving || state.quickReview.index === 0;
   $('#quick-review-next').disabled = state.quickReview.saving || state.quickReview.index === total - 1;
   $('#quick-review-listen').disabled = state.quickReview.saving;
+  loadQuickReviewPreview(clip);
   if (autoListen) playClipAudio(clip).catch((error) => message(error.message, true));
 }
 
@@ -313,6 +333,7 @@ function toggleQuickListening() {
 function closeQuickReview() {
   const dialog = $('#quick-review-dialog');
   if (dialog.open) dialog.close();
+  clearQuickReviewPreview();
   globalAudioPlayer.pause(); globalAudioPlayer.removeAttribute('src'); globalAudioPlayer.load();
   $('#audio-now-playing').hidden = true;
 }
@@ -770,7 +791,7 @@ $('#quick-review-reject').onclick = () => rateQuickClip('rejected');
 $('#quick-review-listen').onclick = toggleQuickListening;
 $('#quick-review-previous').onclick = () => moveQuickReview(-1);
 $('#quick-review-next').onclick = () => moveQuickReview(1);
-$('#quick-review-dialog').addEventListener('close', () => { globalAudioPlayer.pause(); globalAudioPlayer.removeAttribute('src'); globalAudioPlayer.load(); $('#audio-now-playing').hidden = true; });
+$('#quick-review-dialog').addEventListener('close', () => { clearQuickReviewPreview(); globalAudioPlayer.pause(); globalAudioPlayer.removeAttribute('src'); globalAudioPlayer.load(); $('#audio-now-playing').hidden = true; });
 $('#description-button').onclick = async () => { const description = $('#active-prompt').value.trim(); if (!state.videoId || description.length < 3) return message('Choose a recording and enter a prompt first.', true); try { const results = await api('/search/description', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({video_id:state.videoId, description}) }); state.resultMode = 'description'; state.activeResults = results; await loadSegments(results); } catch (error) { message(error.message, true); } };
 $('#similar-button').onclick = async () => { if (!state.videoId || !state.collectionId) return message('Choose a recording and a collection first.', true); try { const results = await api(`/collections/${state.collectionId}/search`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({video_id:state.videoId})}); state.resultMode = 'similar'; state.activeResults = results; await loadSegments(results); } catch (error) { message(error.message, true); } };
 $('#active-prompt').oninput = updateSelectionSummary; $('#refresh').onclick = refreshDashboard;
