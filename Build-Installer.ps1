@@ -78,6 +78,7 @@ else {
         --icon "assets\clipfinder.ico" `
         --add-data "app\static;app\static" `
         --add-data "assets\clipfinder.ico;assets" `
+        --add-data "assets\close-pop.mp3;assets" `
         --collect-submodules app `
         --hidden-import webview.platforms.winforms `
         --hidden-import webview.platforms.win32 `

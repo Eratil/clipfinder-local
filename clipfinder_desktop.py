@@ -87,6 +87,31 @@ def show_error(title: str, text: str) -> None:
         print(f"{title}: {text}")
 
 
+def play_close_confirmation_sound() -> None:
+    """Play the bundled soft confirmation sound without using a Windows beep."""
+    if os.name != "nt":
+        return
+    sound_path = bundled_asset_path("assets/close-pop.mp3")
+    if not sound_path.is_file():
+        return
+    try:
+        import ctypes
+
+        winmm = ctypes.windll.winmm
+        winmm.mciSendStringW("close ClipFinderCloseSound", None, 0, None)
+        winmm.mciSendStringW(f'open "{sound_path}" type mpegvideo alias ClipFinderCloseSound', None, 0, None)
+        winmm.mciSendStringW("play ClipFinderCloseSound from 0", None, 0, None)
+    except OSError:
+        # Closing must always remain possible if a machine cannot play MP3.
+        pass
+
+
+def confirm_application_close(window) -> bool:
+    """Use a quiet confirmation dialog and cancel the native noisy one."""
+    play_close_confirmation_sound()
+    return bool(window.create_confirmation_dialog("Close ClipFinder", "Do you want to close ClipFinder?"))
+
+
 def local_server_is_ready() -> bool:
     try:
         with urllib.request.urlopen(HEALTH_URL, timeout=0.6) as response:
@@ -184,10 +209,11 @@ def run() -> None:
             width=1500,
             height=950,
             min_size=(1024, 700),
-            confirm_close=True,
+            confirm_close=False,
             background_color="#0e121a",
         )
-        window.events.closing += lambda *_: stop_server(server, thread)
+        window.events.closing += confirm_application_close
+        window.events.closed += lambda *_: stop_server(server, thread)
         webview.start(icon=str(bundled_asset_path("assets/clipfinder.ico")))
     except Exception as exc:
         show_error("ClipFinder desktop window", str(exc))
