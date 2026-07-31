@@ -255,7 +255,10 @@ function loadQuickReviewPreview(clip) {
   const start = Number(clip.start_seconds || 0);
   const end = Number(clip.end_seconds || start + 1);
   player.src = `/api/videos/${clip.video_id}/stream#t=${start.toFixed(2)},${end.toFixed(2)}`;
-  player.onloadedmetadata = () => { player.currentTime = start; };
+  player.onloadedmetadata = () => {
+    player.currentTime = start;
+    player.play().catch(() => {});
+  };
   player.load();
 }
 
@@ -266,7 +269,7 @@ function clearQuickReviewPreview() {
   player.load();
 }
 
-function renderQuickReview(autoListen = true) {
+function renderQuickReview() {
   const clip = currentQuickClip();
   const total = state.quickReview.clips.length;
   if (!clip || !total) return;
@@ -282,9 +285,7 @@ function renderQuickReview(autoListen = true) {
   $('#quick-review-reject').disabled = state.quickReview.saving;
   $('#quick-review-previous').disabled = state.quickReview.saving || state.quickReview.index === 0;
   $('#quick-review-next').disabled = state.quickReview.saving || state.quickReview.index === total - 1;
-  $('#quick-review-listen').disabled = state.quickReview.saving;
   loadQuickReviewPreview(clip);
-  if (autoListen) playClipAudio(clip).catch((error) => message(error.message, true));
 }
 
 async function openQuickReview() {
@@ -293,9 +294,11 @@ async function openQuickReview() {
     const clips = await api(`/videos/${state.videoId}/top-clips?limit=20&unrated_only=true`);
     if (!clips.length) return message('There are no unreviewed candidates left for quick selection.');
     state.quickReview = { clips, index: 0, saving: false };
+    globalAudioPlayer.pause(); globalAudioPlayer.removeAttribute('src'); globalAudioPlayer.load();
+    $('#audio-now-playing').hidden = true;
     const dialog = $('#quick-review-dialog');
     if (!dialog.open) dialog.showModal();
-    renderQuickReview(true);
+    renderQuickReview();
   } catch (error) { message(error.message, true); }
 }
 
@@ -303,7 +306,7 @@ async function rateQuickClip(rating) {
   const clip = currentQuickClip();
   if (!clip || state.quickReview.saving) return;
   state.quickReview.saving = true;
-  renderQuickReview(false);
+  renderQuickReview();
   try {
     await api(`/segments/${clip.id}`, { method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({rating, review_reason:''}) });
     clip.rating = rating; clip.review_reason = '';
@@ -311,23 +314,16 @@ async function rateQuickClip(rating) {
     if (original) { original.rating = rating; original.review_reason = ''; }
     if (state.quickReview.index < state.quickReview.clips.length - 1) state.quickReview.index += 1;
     await reloadActiveSegments();
-    renderQuickReview(true);
-  } catch (error) { message(error.message, true); renderQuickReview(false); }
-  finally { state.quickReview.saving = false; renderQuickReview(false); }
+    renderQuickReview();
+  } catch (error) { message(error.message, true); renderQuickReview(); }
+  finally { state.quickReview.saving = false; renderQuickReview(); }
 }
 
 function moveQuickReview(offset) {
   const next = Math.max(0, Math.min(state.quickReview.clips.length - 1, state.quickReview.index + offset));
   if (next === state.quickReview.index || state.quickReview.saving) return;
   state.quickReview.index = next;
-  renderQuickReview(true);
-}
-
-function toggleQuickListening() {
-  const clip = currentQuickClip();
-  if (!clip) return;
-  if (state.listeningSegment?.id === clip.id && !globalAudioPlayer.paused) { globalAudioPlayer.pause(); return; }
-  playClipAudio(clip).catch((error) => message(error.message, true));
+  renderQuickReview();
 }
 
 function closeQuickReview() {
@@ -788,7 +784,6 @@ $('#quick-review-button').onclick = openQuickReview;
 $('#quick-review-close').onclick = closeQuickReview;
 $('#quick-review-approve').onclick = () => rateQuickClip('accepted');
 $('#quick-review-reject').onclick = () => rateQuickClip('rejected');
-$('#quick-review-listen').onclick = toggleQuickListening;
 $('#quick-review-previous').onclick = () => moveQuickReview(-1);
 $('#quick-review-next').onclick = () => moveQuickReview(1);
 $('#quick-review-dialog').addEventListener('close', () => { clearQuickReviewPreview(); globalAudioPlayer.pause(); globalAudioPlayer.removeAttribute('src'); globalAudioPlayer.load(); $('#audio-now-playing').hidden = true; });
@@ -816,7 +811,6 @@ document.addEventListener('keydown', (event) => {
     const key = event.key.toLowerCase();
     if (key === 'a') { event.preventDefault(); rateQuickClip('accepted'); }
     else if (key === 'r') { event.preventDefault(); rateQuickClip('rejected'); }
-    else if (key === 's') { event.preventDefault(); toggleQuickListening(); }
     else if (event.key === 'ArrowLeft') { event.preventDefault(); moveQuickReview(-1); }
     else if (event.key === 'ArrowRight') { event.preventDefault(); moveQuickReview(1); }
     else if (event.key === 'Escape') { event.preventDefault(); closeQuickReview(); }
