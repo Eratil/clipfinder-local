@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from collections import Counter
 
 from app.services.embeddings import cosine, embed_texts
@@ -52,6 +53,10 @@ _READING_CUE_STEMS = {
     "zadani", "misj", "zainstal", "mieszk", "lokator", "kamery", "kamera",
     "zachowaj", "wchodz", "zbierz", "informac", "przedmiot", "dziennik",
     "notatk", "dokument", "instrukcj", "otworz", "odblokuj", "znajdz",
+}
+_DOCUMENT_CUE_STEMS = {
+    "dyrektyw", "zabran", "rozporzad", "ustaw", "paragraf", "artykul", "spoleczen", "obywatel",
+    "filozof", "doktryn", "ideologi", "antyrzadow", "przepisy", "postanowien",
 }
 GAME_REACTION_TAG = "reakcja na grę"
 
@@ -230,6 +235,11 @@ def assess_clip_quality(text: str, words: list[dict], start: float, end: float, 
     repeated_phrases = Counter(" ".join(tokens[index:index + 3]) for index in range(max(0, len(tokens) - 2)))
     repeated_phrase_count = max(repeated_phrases.values(), default=0)
     ui_cues = sum(1 for token in tokens if any(token.startswith(stem) for stem in _READING_CUE_STEMS))
+    document_text = unicodedata.normalize("NFKD", text.lower()).encode("ascii", "ignore").decode("ascii")
+    document_tokens = re.findall(r"[a-z]+", document_text)
+    document_cues = sum(1 for token in document_tokens if any(token.startswith(stem) for stem in _DOCUMENT_CUE_STEMS))
+    if any(phrase in document_text for phrase in ("glos prawdy", "zabrania sie")):
+        document_cues += 2
     sparse_punctuation = len(tokens) >= 28 and duration >= 22 and not re.search(r"[.!?]", text)
     matched_tags = [tag for tag in tags if tag in EMOTION_OR_OPINION_TAGS]
     reading = 0.0
@@ -245,6 +255,8 @@ def assess_clip_quality(text: str, words: list[dict], start: float, end: float, 
         reading += min(0.38, 0.18 + (repeated_phrase_count - 1) * 0.14)
     if ui_cues >= 2:
         reading += min(0.42, ui_cues * 0.11)
+    if document_cues >= 2:
+        reading += min(0.55, 0.20 + document_cues * 0.11)
     if sparse_punctuation and word_rate <= 4.2:
         reading += 0.18
     if len(tokens) >= 55 and duration >= 30 and not matched_tags:
@@ -274,6 +286,8 @@ def assess_clip_quality(text: str, words: list[dict], start: float, end: float, 
     elif reading >= 0.3:
         score -= 12
         signals.append("some reading cues")
+    if reading >= 0.48 and "possible reading aloud" not in signals[:3]:
+        signals = signals[:2] + ["possible reading aloud"]
     return max(1, min(99, round(score))), signals[:3], round(reading, 3)
 
 

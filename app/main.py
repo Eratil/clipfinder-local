@@ -94,7 +94,7 @@ def backfill_reading_filter() -> None:
                   voice_expression_score, chat_reaction_score, chat_joy_score, vision_score,
                   moment_reaction_score, moment_reaction_stage
            FROM segments WHERE quality_signals NOT LIKE ?""",
-        ('%"reading heuristics v2"%',),
+        ('%"reading heuristics v3"%',),
     )
     if not items:
         return
@@ -103,7 +103,7 @@ def backfill_reading_filter() -> None:
         original_tags = [tag for tag in json.loads(item.get("tags") or "[]") if tag != "reading"]
         words = json.loads(item.get("word_timestamps") or "[]")
         quality, new_signals, reading = assess_clip_quality(item["transcript"], words, item["start_seconds"], item["end_seconds"], original_tags)
-        signals = list(dict.fromkeys(json.loads(item.get("quality_signals") or "[]") + new_signals + ["reading heuristics v2"]))
+        signals = list(dict.fromkeys(json.loads(item.get("quality_signals") or "[]") + new_signals + ["reading heuristics v3"]))
         logical = assess_logical_sense(item["transcript"])
         context = int(item.get("context_score") or 50)
         self_contained = int(item.get("self_contained_score") or 50)

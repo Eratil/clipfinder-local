@@ -375,6 +375,58 @@ def visual_interest_scores(video_path: Path, records: list[dict], limit: int = 1
     return scores
 
 
+def visual_reading_scores(video_path: Path, records: list[dict], limit: int = 120) -> dict[str, int]:
+    """Flag static, text-heavy game screens such as notes and objective lists.
+
+    This intentionally does not use OCR: it is a lightweight visual signal that
+    needs to agree with the speech-based reading heuristics before a clip is
+    suppressed.  Cropping the central gameplay area avoids the facecam and
+    chat overlays that are common in recordings.
+    """
+    try:
+        import cv2
+    except Exception:
+        return {}
+    strongest = sorted(records, key=lambda item: item["quality_score"] + item["audio_event_score"], reverse=True)[:limit]
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        return {}
+    scores: dict[str, int] = {}
+    try:
+        for record in strongest:
+            duration = max(0.8, record["end"] - record["start"])
+            moments = [record["start"] + duration * 0.42, record["start"] + duration * 0.70, max(record["start"] + 0.25, record["end"] - 0.15)]
+            frames, edge_densities, bright_ratios = [], [], []
+            for moment in moments:
+                capture.set(cv2.CAP_PROP_POS_MSEC, moment * 1000)
+                ok, frame = capture.read()
+                if not ok:
+                    continue
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                height, width = gray.shape
+                center = gray[int(height * 0.13):int(height * 0.86), int(width * 0.18):int(width * 0.82)]
+                small = cv2.resize(center, (240, 135)).astype(np.float32)
+                edges = cv2.Canny(small.astype(np.uint8), 60, 150)
+                frames.append(small)
+                edge_densities.append(float(np.mean(edges > 0)))
+                bright_ratios.append(float(np.mean(small > 145)))
+            if len(frames) < 3:
+                continue
+            terminal_motion = float(np.mean(np.abs(frames[-1] - frames[1])))
+            text_density = float(np.mean(edge_densities[1:]))
+            bright_ratio = float(np.mean(bright_ratios[1:]))
+            if terminal_motion <= 8.0 and text_density >= 0.065:
+                score = 6
+                if bright_ratio >= 0.025:
+                    score += 3
+                if text_density >= 0.095:
+                    score += 2
+                scores[record["id"]] = min(12, score)
+    finally:
+        capture.release()
+    return scores
+
+
 def analyse(video_id: str, report: Progress) -> None:
     video = db.row("SELECT * FROM videos WHERE id = ?", (video_id,))
     if not video:
@@ -499,10 +551,22 @@ def analyse(video_id: str, report: Progress) -> None:
         )
         records.append({"id": str(uuid.uuid4()), "start": candidate["start"], "end": candidate["end"], "text": candidate["text"], "words": candidate.get("words", []), "vector": vector, "keywords": keywords, "tags": tags, "quality_score": quality_score, "quality_signals": quality_signals, "logical_sense_score": logical_sense_score, "context_score": context_score, "self_contained_score": self_contained_score, "context_before": candidate.get("context_before", ""), "context_after": candidate.get("context_after", ""), "reading_likelihood": reading_likelihood, "audio_event_score": event_score, "game_reaction_score": game_reaction_score, "voice_expression_score": voice_expression_score, "moment_reaction_score": moment_reaction_score, "moment_reaction_stage": moment_reaction_stage, "duplicate_group": ""})
     assign_duplicate_groups(records)
-    report(82, "Checking visual action in the strongest candidates")
+    report(82, "Checking visual action and text-heavy game screens")
     visual_scores = visual_interest_scores(source, records)
+    reading_screens = visual_reading_scores(source, records)
     for record in records:
-        record["vision_score"] = visual_scores.get(record["id"], 0)
+        reading_screen = reading_screens.get(record["id"], 0)
+        if reading_screen:
+            # A static screen full of text confirms that apparently coherent
+            # speech is being read from the game rather than authored live.
+            record["reading_likelihood"] = min(1.0, max(record["reading_likelihood"], 0.52) + reading_screen * 0.035)
+            record["quality_score"] = max(1, record["quality_score"] - 28)
+            record["logical_sense_score"] = min(record["logical_sense_score"], 35)
+            record["context_score"] = min(record["context_score"], 35)
+            record["self_contained_score"] = min(record["self_contained_score"], 35)
+            record["quality_signals"].append("static text-heavy game screen")
+            record["tags"] = list(dict.fromkeys(record["tags"] + ["reading"]))
+        record["vision_score"] = 0 if reading_screen else visual_scores.get(record["id"], 0)
         if record["vision_score"] >= 7:
             record["quality_signals"].append("visual action")
         record["tags"] = enrich_tags(
