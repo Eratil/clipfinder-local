@@ -159,14 +159,19 @@ def chat_summary(video_id: str) -> dict[str, Any]:
 
 
 def apply_chat_reactions(video_id: str) -> int:
-    """Score chat bursts after candidate clips, using a delayed reaction window."""
+    """Score chat bursts after the central moment of a candidate clip.
+
+    Most clips are longer than the event or punchline they contain.  Starting
+    from their midpoint lets the delayed chat response land inside the latter
+    half of a clip instead of missing reactions that happen before its end.
+    """
     settings = db.row("SELECT delay_seconds FROM chat_settings WHERE video_id=?", (video_id,))
     messages = db.rows("SELECT seconds, author, message FROM chat_messages WHERE video_id=? ORDER BY seconds", (video_id,))
     if not settings or not messages:
         return 0
     delay = float(settings["delay_seconds"])
     segments = db.rows(
-        """SELECT id, end_seconds, tags, logical_sense_score, context_score, self_contained_score, reading_likelihood,
+        """SELECT id, start_seconds, end_seconds, tags, logical_sense_score, context_score, self_contained_score, reading_likelihood,
                   game_reaction_score, voice_expression_score, vision_score
            FROM segments WHERE video_id=?""",
         (video_id,),
@@ -174,7 +179,8 @@ def apply_chat_reactions(video_id: str) -> int:
     message_times = [float(message["seconds"]) for message in messages]
     updates = []
     for segment in segments:
-        response_start = float(segment["end_seconds"]) + max(0.0, delay - 2.0)
+        midpoint = (float(segment["start_seconds"]) + float(segment["end_seconds"])) / 2.0
+        response_start = midpoint + max(0.0, delay - 2.0)
         response_end = response_start + 18.0
         baseline_start = max(0.0, response_start - 70.0)
         baseline_end = max(baseline_start, response_start - 8.0)
