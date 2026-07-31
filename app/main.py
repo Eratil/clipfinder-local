@@ -369,7 +369,10 @@ def run_remote_import(video_id: str, job_id: str) -> None:
     if not video or not video.get("source_url"):
         update_job(job_id, 100, "Remote source URL is missing.", "failed")
         return
-    analysis_started_at: float | None = None
+    # The recording card starts its progress bar with the download. Keep the
+    # displayed elapsed time aligned with that whole visible job, not just the
+    # later transcription stage.
+    analysis_started_at = time.monotonic()
     try:
         from yt_dlp import YoutubeDL
 
@@ -411,7 +414,6 @@ def run_remote_import(video_id: str, job_id: str) -> None:
                 "UPDATE videos SET original_name=?, path=?, status='queued', transcript_audio_track=1, audio_analysis_mode='single', error_message=NULL, updated_at=? WHERE id=?",
                 (f"{title}{source_path.suffix}", str(source_path), db.now(), video_id),
             )
-        analysis_started_at = time.monotonic()
         analyse(video_id, lambda progress, message: update_job(job_id, 20 + int(progress * 0.8), message))
         save_analysis_duration(video_id, analysis_started_at)
         update_job(job_id, 100, "Analysis completed", "completed")
