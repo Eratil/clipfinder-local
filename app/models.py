@@ -31,6 +31,11 @@ class SegmentPauseTrimUpdate(BaseModel):
     remove_pauses: bool
 
 
+class TagFeedbackUpdate(BaseModel):
+    tag: str = Field(min_length=1, max_length=80)
+    verdict: str = Field(pattern="^(correct|incorrect|unmarked)$")
+
+
 class ChatDelayUpdate(BaseModel):
     delay_seconds: float = Field(default=6, ge=0, le=60)
 

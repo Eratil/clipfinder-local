@@ -30,6 +30,7 @@ assets/*-transparent.png
 *.webm
 *.mp3
 *.wav
+!assets/close-pop.wav
 *.m4a
 *.flac
 *.aac

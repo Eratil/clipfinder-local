@@ -91,7 +91,7 @@ def play_close_confirmation_sound() -> None:
     """Play the bundled soft confirmation sound without using a Windows beep."""
     if os.name != "nt":
         return
-    sound_path = bundled_asset_path("assets/close-pop.mp3")
+    sound_path = bundled_asset_path("assets/close-pop.wav")
     if not sound_path.is_file():
         return
     try:
@@ -99,7 +99,10 @@ def play_close_confirmation_sound() -> None:
 
         winmm = ctypes.windll.winmm
         winmm.mciSendStringW("close ClipFinderCloseSound", None, 0, None)
-        winmm.mciSendStringW(f'open "{sound_path}" type mpegvideo alias ClipFinderCloseSound', None, 0, None)
+        # WAV starts more promptly than MP3 on the Windows MCI backend.
+        winmm.mciSendStringW(f'open "{sound_path}" type waveaudio alias ClipFinderCloseSound', None, 0, None)
+        # The bundled WAV is already attenuated to a quiet 5%, which is more
+        # reliable across MCI/Windows audio backends than runtime volume calls.
         winmm.mciSendStringW("play ClipFinderCloseSound from 0", None, 0, None)
     except OSError:
         # Closing must always remain possible if a machine cannot play MP3.

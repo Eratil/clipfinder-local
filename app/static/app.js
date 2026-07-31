@@ -1,4 +1,4 @@
-const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, listeningSegment: null, listenAudioTrack: 1, quickReview: { clips: [], index: 0, saving: false }, editingSegment: null, clipEditorOpen: false, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1, camera_x:.78, camera_y:.03, camera_width:.11, camera_height:.11, game_x:.22, game_y:0, game_width:.56, game_height:1 }, layoutCalibration: { mode:'camera', drawing:null }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0, updateDownloadId: null };
+const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, listeningSegment: null, listenAudioTrack: 1, quickReview: { clips: [], index: 0, saving: false }, editingSegment: null, clipEditorOpen: false, editorTab: 'edit', captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1, camera_x:.78, camera_y:.03, camera_width:.11, camera_height:.11, game_x:.22, game_y:0, game_width:.56, game_height:1 }, layoutCalibration: { mode:'camera', drawing:null }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0, updateDownloadId: null };
 const $ = (selector) => document.querySelector(selector);
 const fmt = (seconds) => new Date(seconds * 1000).toISOString().slice(11, 19);
 const elapsed = (seconds) => {
@@ -192,6 +192,59 @@ function clearClipEditor() {
   $('#clip-editor-form').hidden = true;
 }
 
+function setEditorTab(tab) {
+  state.editorTab = tab === 'analysis' ? 'analysis' : 'edit';
+  document.querySelectorAll('[data-editor-tab]').forEach((button) => {
+    const active = button.dataset.editorTab === state.editorTab;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
+  $('#clip-editor-edit-tab').hidden = state.editorTab !== 'edit';
+  $('#clip-editor-analysis-tab').hidden = state.editorTab !== 'analysis';
+}
+
+function updateSegmentFromResponse(segment, updated) {
+  Object.assign(segment, updated);
+  const original = state.activeResults?.find((item) => item.id === segment.id);
+  if (original) Object.assign(original, updated);
+}
+
+function renderTagFeedback(segment) {
+  const box = $('#editor-tag-feedback-list'); box.replaceChildren();
+  const tags = segment.tags || [];
+  const feedback = segment.tag_feedback || {};
+  const marked = Object.keys(feedback).length;
+  $('#editor-analysis-summary').textContent = tags.length
+    ? `${marked}/${tags.length} tags reviewed. Mark a tag as correct when it fits the clip, or incorrect when it was assigned by mistake.`
+    : 'This clip has no assigned tags yet.';
+  if (!tags.length) return;
+  for (const tag of tags) {
+    const row = make('div', 'tag-feedback-row');
+    row.append(make('span', 'tag', tag));
+    const actions = make('div', 'tag-feedback-actions');
+    const verdict = feedback[tag] || 'unmarked';
+    for (const [value, label, className] of [['correct', 'Correct', 'correct'], ['incorrect', 'Incorrect', 'incorrect'], ['unmarked', 'Clear', 'clear']]) {
+      const button = make('button', `quiet tag-feedback-button ${className}`, label);
+      button.classList.toggle('selected', verdict === value);
+      button.disabled = verdict === value;
+      button.onclick = async () => {
+        actions.querySelectorAll('button').forEach((item) => { item.disabled = true; });
+        try {
+          const updated = await api(`/segments/${segment.id}/tag-feedback`, { method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tag, verdict:value}) });
+          updateSegmentFromResponse(segment, updated);
+          renderTagFeedback(segment);
+          message(value === 'unmarked' ? `Cleared feedback for tag: ${tag}` : `Tag marked ${value}: ${tag}`);
+        } catch (error) {
+          renderTagFeedback(segment);
+          message(error.message, true);
+        }
+      };
+      actions.append(button);
+    }
+    row.append(actions); box.append(row);
+  }
+}
+
 function selectClipForEditor(segment, openPanel = true) {
   if (openPanel) setClipEditorOpen(true);
   state.editingSegment = segment;
@@ -209,6 +262,8 @@ function selectClipForEditor(segment, openPanel = true) {
   $('#editor-remove-pauses').checked = Boolean(segment.remove_pauses);
   $('#editor-export-name').value = state.exportNames[segment.id] || '';
   const exportButton = $('#editor-export'); exportButton.disabled = segment.rating !== 'accepted'; exportButton.textContent = segment.rating === 'accepted' ? 'Export MP4' : 'Approve before export';
+  renderTagFeedback(segment);
+  setEditorTab(state.editorTab);
   document.querySelectorAll('.segment').forEach((article) => article.classList.toggle('editing', article.dataset.segmentId === segment.id));
 }
 
@@ -811,6 +866,7 @@ $('#setup-toggle').onclick = () => setSetupSidebar(!$('#setup-sidebar').classLis
 $('#setup-close').onclick = () => setSetupSidebar(false);
 $('#clip-editor-close').onclick = () => setClipEditorOpen(false);
 $('#clip-editor-toggle').onclick = () => setClipEditorOpen(true);
+document.querySelectorAll('[data-editor-tab]').forEach((button) => { button.onclick = () => setEditorTab(button.dataset.editorTab); });
 setClipEditorOpen(false);
 document.addEventListener('keydown', (event) => {
   const quickOpen = $('#quick-review-dialog').open;

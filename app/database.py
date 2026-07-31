@@ -226,6 +226,14 @@ def initialize() -> None:
                 UNIQUE(segment_id, profile)
             );
             CREATE INDEX IF NOT EXISTS idx_preference_feedback_profile ON preference_feedback(profile, decision, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS tag_feedback (
+                segment_id TEXT NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+                tag TEXT NOT NULL,
+                verdict TEXT NOT NULL CHECK(verdict IN ('correct', 'incorrect')),
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(segment_id, tag)
+            );
+            CREATE INDEX IF NOT EXISTS idx_tag_feedback_verdict ON tag_feedback(verdict, updated_at DESC);
             """
         )
         columns = {item["name"] for item in con.execute("PRAGMA table_info(segments)").fetchall()}
@@ -328,13 +336,29 @@ def row(query: str, parameters: tuple = ()) -> dict | None:
     return result[0] if result else None
 
 
-def serialize_segment(segment: dict) -> dict:
+def _tag_feedback_by_segment(segment_ids: list[str]) -> dict[str, dict[str, str]]:
+    if not segment_ids:
+        return {}
+    placeholders = ",".join("?" for _ in segment_ids)
+    feedback: dict[str, dict[str, str]] = {segment_id: {} for segment_id in segment_ids}
+    for item in rows(f"SELECT segment_id, tag, verdict FROM tag_feedback WHERE segment_id IN ({placeholders})", tuple(segment_ids)):
+        feedback.setdefault(item["segment_id"], {})[item["tag"]] = item["verdict"]
+    return feedback
+
+
+def serialize_segment(segment: dict, tag_feedback: dict[str, str] | None = None) -> dict:
     segment["keywords"] = json.loads(segment["keywords"])
     segment["tags"] = json.loads(segment.get("tags") or "[]")
     segment["word_timestamps"] = json.loads(segment.get("word_timestamps") or "[]")
     segment["quality_signals"] = json.loads(segment.get("quality_signals") or "[]")
     segment["chat_messages"] = json.loads(segment.get("chat_messages") or "[]")
+    segment["tag_feedback"] = tag_feedback if tag_feedback is not None else _tag_feedback_by_segment([segment["id"]]).get(segment["id"], {})
     segment["censor_profanity"] = bool(segment.get("censor_profanity"))
     segment["remove_pauses"] = bool(segment.get("remove_pauses"))
     segment.pop("embedding", None)
     return segment
+
+
+def serialize_segments(segments: list[dict]) -> list[dict]:
+    feedback = _tag_feedback_by_segment([segment["id"] for segment in segments])
+    return [serialize_segment(segment, feedback.get(segment["id"], {})) for segment in segments]

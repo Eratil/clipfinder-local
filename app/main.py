@@ -46,6 +46,7 @@ from app.models import (
     SegmentCensorUpdate,
     SegmentPauseTrimUpdate,
     SegmentTranscriptUpdate,
+    TagFeedbackUpdate,
     SimilaritySearch,
 )
 from app.services.embeddings import cosine, embed_texts
@@ -727,7 +728,7 @@ def video_segments(video_id: str, q: str = "", rating: str = "", tag: str = "", 
     }
     field, descending = sort_fields.get(sort, sort_fields["suggested_desc"])
     ranked.sort(key=lambda item: float(item.get(field) or 0), reverse=descending)
-    return [db.serialize_segment(item) for item in ranked]
+    return db.serialize_segments(ranked)
 
 
 @app.get("/api/videos/{video_id}/chat")
@@ -885,6 +886,28 @@ def update_segment_pause_trim(segment_id: str, body: SegmentPauseTrimUpdate):
         if not con.execute("SELECT id FROM segments WHERE id=?", (segment_id,)).fetchone():
             not_found("Segment not found")
         con.execute("UPDATE segments SET remove_pauses=? WHERE id=?", (int(body.remove_pauses), segment_id))
+    updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
+    return db.serialize_segment(updated)
+
+
+@app.patch("/api/segments/{segment_id}/tag-feedback")
+def update_segment_tag_feedback(segment_id: str, body: TagFeedbackUpdate):
+    tag = " ".join(body.tag.split())
+    with db.connection() as con:
+        segment = con.execute("SELECT id, tags FROM segments WHERE id=?", (segment_id,)).fetchone()
+        if not segment:
+            not_found("Segment not found")
+        tags = json.loads(segment["tags"] or "[]")
+        if tag not in tags:
+            raise HTTPException(400, "This tag is no longer assigned to the clip.")
+        if body.verdict == "unmarked":
+            con.execute("DELETE FROM tag_feedback WHERE segment_id=? AND tag=?", (segment_id, tag))
+        else:
+            con.execute(
+                """INSERT INTO tag_feedback (segment_id, tag, verdict, updated_at) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(segment_id, tag) DO UPDATE SET verdict=excluded.verdict, updated_at=excluded.updated_at""",
+                (segment_id, tag, body.verdict, db.now()),
+            )
     updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
     return db.serialize_segment(updated)
 
@@ -1129,7 +1152,7 @@ def top_clips(video_id: str, limit: int = 10, unrated_only: bool = False):
     candidates = db.rows(query, (video_id,))
     ranked = suppress_duplicate_groups(score_candidates(candidates, profile=active_profile()))
     ranked = [item for item in ranked if not is_disallowed_reading(item)]
-    return [db.serialize_segment(item) for item in ranked[:max(1, min(30, limit))]]
+    return db.serialize_segments(ranked[:max(1, min(30, limit))])
 
 
 @app.put("/api/analysis-audio-defaults")
@@ -1327,7 +1350,7 @@ def ranked_candidates(video_id: str, reference: list[float], limit: int) -> list
         raise HTTPException(400, "Selected video does not have completed analysis.")
     ranked = suppress_duplicate_groups(score_candidates(candidates, reference=reference, profile=active_profile()))
     ranked = [item for item in ranked if not is_disallowed_reading(item)]
-    return [db.serialize_segment(item) for item in ranked[:limit]]
+    return db.serialize_segments(ranked[:limit])
 
 
 @app.post("/api/collections/{collection_id}/search")

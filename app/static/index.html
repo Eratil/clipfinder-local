@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ClipFinder Local</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260729-layouts" />
+    <link rel="stylesheet" href="/static/style.css?v=20260801-tag-feedback" />
   </head>
   <body class="clip-editor-closed">
     <main>
@@ -270,36 +270,47 @@
     <button id="clip-editor-toggle" class="quiet clip-editor-toggle" aria-controls="clip-editor-sidebar" aria-expanded="false" hidden>Clip editor</button>
     <aside id="clip-editor-sidebar" class="clip-editor-sidebar" aria-label="Clip editor" aria-hidden="true">
       <div class="section-title clip-editor-head"><div><h2>Clip editor</h2><p id="clip-editor-title" class="hint">Select a clip to edit it.</p></div><button id="clip-editor-close" class="quiet" aria-label="Hide clip editor">Hide</button></div>
+      <div class="editor-tabs" role="tablist" aria-label="Clip panel tabs">
+        <button type="button" class="quiet editor-tab active" data-editor-tab="edit" role="tab" aria-selected="true">Clip editor</button>
+        <button type="button" class="quiet editor-tab" data-editor-tab="analysis" role="tab" aria-selected="false">Extended analysis</button>
+      </div>
       <div id="clip-editor-empty" class="hint">Click any candidate card to edit its range, captions, review status and export.</div>
       <div id="clip-editor-form" hidden>
-        <div class="clip-editor-fields">
-          <label>Start (seconds)<input id="editor-start" type="number" min="0" step="0.1" /></label>
-          <label>End (seconds)<input id="editor-end" type="number" min="0" step="0.1" /></label>
-          <button id="editor-save-range" class="quiet">Save range</button>
-          <label>Caption position
-            <select id="editor-caption-position"><option value="bottom">Bottom</option><option value="middle">Middle</option><option value="top">Top</option></select>
-          </label>
-          <label>Clip status
-            <select id="editor-rating-select"><option value="unrated">Not reviewed</option><option value="accepted">Approved</option><option value="rejected">Rejected</option></select>
-          </label>
-          <label>Reason if rejected
-            <select id="editor-review-reason">
-              <option value="not interesting">Not interesting enough</option>
-              <option value="reading notes">Reading notes / item text</option>
-              <option value="game dialogue">Game dialogue / cutscene</option>
-              <option value="not enough emotion">Not enough emotion</option>
-              <option value="no clear point">No clear point or punchline</option>
-              <option value="bad transcription">Bad transcription</option>
-            </select>
-          </label>
-          <button id="editor-save-rating" class="quiet">Save status</button>
+        <div id="clip-editor-edit-tab" class="editor-tab-pane" role="tabpanel">
+          <div class="clip-editor-fields">
+            <label>Start (seconds)<input id="editor-start" type="number" min="0" step="0.1" /></label>
+            <label>End (seconds)<input id="editor-end" type="number" min="0" step="0.1" /></label>
+            <button id="editor-save-range" class="quiet">Save range</button>
+            <label>Caption position
+              <select id="editor-caption-position"><option value="bottom">Bottom</option><option value="middle">Middle</option><option value="top">Top</option></select>
+            </label>
+            <label>Clip status
+              <select id="editor-rating-select"><option value="unrated">Not reviewed</option><option value="accepted">Approved</option><option value="rejected">Rejected</option></select>
+            </label>
+            <label>Reason if rejected
+              <select id="editor-review-reason">
+                <option value="not interesting">Not interesting enough</option>
+                <option value="reading notes">Reading notes / item text</option>
+                <option value="game dialogue">Game dialogue / cutscene</option>
+                <option value="not enough emotion">Not enough emotion</option>
+                <option value="no clear point">No clear point or punchline</option>
+                <option value="bad transcription">Bad transcription</option>
+              </select>
+            </label>
+            <button id="editor-save-rating" class="quiet">Save status</button>
+          </div>
+          <label>Caption text (you can correct the transcription)<textarea id="editor-transcript" rows="5"></textarea></label>
+          <button id="editor-save-transcript" class="quiet">Save caption text</button>
+          <label class="check censor-toggle"><input id="editor-censor-profanity" type="checkbox" /> Mute profanity from mid-word in exported audio and mask it in captions</label>
+          <label class="check pause-trim-toggle"><input id="editor-remove-pauses" type="checkbox" /> Remove long pauses from preview and exported video</label>
+          <label>Export file name (optional)<input id="editor-export-name" maxlength="120" placeholder="e.g. funny-reaction-01" /></label>
+          <button id="editor-export" class="quiet">Approve before export</button>
         </div>
-        <label>Caption text (you can correct the transcription)<textarea id="editor-transcript" rows="5"></textarea></label>
-        <button id="editor-save-transcript" class="quiet">Save caption text</button>
-        <label class="check censor-toggle"><input id="editor-censor-profanity" type="checkbox" /> Mute profanity from mid-word in exported audio and mask it in captions</label>
-        <label class="check pause-trim-toggle"><input id="editor-remove-pauses" type="checkbox" /> Remove long pauses from preview and exported video</label>
-        <label>Export file name (optional)<input id="editor-export-name" maxlength="120" placeholder="e.g. funny-reaction-01" /></label>
-        <button id="editor-export" class="quiet">Approve before export</button>
+        <div id="clip-editor-analysis-tab" class="editor-tab-pane" role="tabpanel" hidden>
+          <h3>Tag feedback</h3>
+          <p id="editor-analysis-summary" class="hint">Mark each assigned tag as correct or incorrect. This is stored locally and helps audit future improvements.</p>
+          <div id="editor-tag-feedback-list" class="tag-feedback-list"></div>
+        </div>
       </div>
     </aside>
     <section id="audio-now-playing" class="audio-now-playing" aria-live="polite" hidden>
