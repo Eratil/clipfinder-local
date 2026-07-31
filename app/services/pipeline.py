@@ -458,6 +458,13 @@ def analyse(video_id: str, report: Progress) -> None:
         context_score = int(candidate.get("context_score") or 50)
         self_contained_score = int(candidate.get("self_contained_score") or 50)
         context_signals = candidate.get("context_signals") or []
+        # A task, note or NPC line can be grammatically complete, but is not a
+        # standalone creator moment.  Do not label it as such before chat has
+        # a chance to prove that a short viewer-comment reply was interesting.
+        if reading_likelihood >= 0.48:
+            logical_sense_score = min(logical_sense_score, 35)
+            context_score = min(context_score, 35)
+            self_contained_score = min(self_contained_score, 35)
         game_reaction_score = reaction_scores[index]
         voice_expression_score = microphone_expression_scores[index]
         moment_reaction_score, moment_reaction_stage = score_moment_reaction(game_reaction_score)
@@ -477,7 +484,7 @@ def analyse(video_id: str, report: Progress) -> None:
         elif context_score <= 38:
             quality_score = max(1, quality_score - 6)
             quality_signals.extend(context_signals)
-        if reading_likelihood >= 0.55:
+        if reading_likelihood >= 0.48:
             tags = list(dict.fromkeys(tags + ["reading"]))
         tags = enrich_tags(
             tags,

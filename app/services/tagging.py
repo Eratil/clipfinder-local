@@ -45,6 +45,14 @@ CONTEXT_TAG_PREFIXES = ("reakcja: ", "kontekst: ", "struktura: ", "format: ", "m
 _FILLERS = {"yyy", "eee", "hmm", "um", "jakby", "znaczy"}
 _TRAILING_CONNECTORS = {"a", "ale", "bo", "czy", "i", "jak", "że", "żeby", "więc", "to"}
 _COHERENCE_CONNECTORS = {"bo", "dlatego", "więc", "ale", "jednak", "potem", "teraz", "jeśli", "gdy", "ponieważ"}
+# Repeated objective/UI language is a strong signal that the streamer is
+# reading a game's task, note or dialogue.  These are stems deliberately, so
+# inflected Polish forms are caught as well.
+_READING_CUE_STEMS = {
+    "zadani", "misj", "zainstal", "mieszk", "lokator", "kamery", "kamera",
+    "zachowaj", "wchodz", "zbierz", "informac", "przedmiot", "dziennik",
+    "notatk", "dokument", "instrukcj", "otworz", "odblokuj", "znajdz",
+}
 GAME_REACTION_TAG = "reakcja na grę"
 
 _tag_vectors: list[list[float]] | None = None
@@ -85,7 +93,7 @@ def enrich_tags(
     """Attach evidence-based context tags and replace stale dynamic values."""
     cleaned = [tag for tag in tags if not tag.startswith(CONTEXT_TAG_PREFIXES)]
     context: list[str] = []
-    if reading_likelihood >= 0.55:
+    if reading_likelihood >= 0.48:
         context.append("format: czytanie")
     if logical_sense_score >= 68:
         context.append("struktura: samodzielna myśl")
@@ -219,6 +227,11 @@ def assess_clip_quality(text: str, words: list[dict], start: float, end: float, 
     long_pauses = sum(1 for pause in pauses if pause >= 0.9)
     fillers = sum(token in {"yyy", "eee", "hmm", "um", "jakby", "znaczy"} for token in tokens)
     reading_words = sum(token in {"notatka", "notatki", "przedmiot", "przedmiotu", "opis", "opisu", "dziennik", "list", "dokument"} for token in tokens)
+    repeated_phrases = Counter(" ".join(tokens[index:index + 3]) for index in range(max(0, len(tokens) - 2)))
+    repeated_phrase_count = max(repeated_phrases.values(), default=0)
+    ui_cues = sum(1 for token in tokens if any(token.startswith(stem) for stem in _READING_CUE_STEMS))
+    sparse_punctuation = len(tokens) >= 28 and duration >= 22 and not re.search(r"[.!?]", text)
+    matched_tags = [tag for tag in tags if tag in EMOTION_OR_OPINION_TAGS]
     reading = 0.0
     if len(tokens) >= 10 and word_rate < 1.55:
         reading += 0.30
@@ -228,25 +241,35 @@ def assess_clip_quality(text: str, words: list[dict], start: float, end: float, 
         reading += min(0.25, fillers * 0.08)
     if reading_words:
         reading += min(0.25, reading_words * 0.12)
+    if repeated_phrase_count >= 2:
+        reading += min(0.38, 0.18 + (repeated_phrase_count - 1) * 0.14)
+    if ui_cues >= 2:
+        reading += min(0.42, ui_cues * 0.11)
+    if sparse_punctuation and word_rate <= 4.2:
+        reading += 0.18
+    if len(tokens) >= 55 and duration >= 30 and not matched_tags:
+        reading += 0.12
     reading = min(1.0, reading)
 
     signals: list[str] = []
     score = 35
-    if 6 <= duration <= 45:
+    if 6 <= duration <= 30:
         score += 12
         signals.append("good clip length")
+    elif 30 < duration <= 40:
+        score += 3
+        signals.append("long clip")
     if 1.4 <= word_rate <= 4.8:
         score += 10
         signals.append("natural speaking pace")
-    matched_tags = [tag for tag in tags if tag in EMOTION_OR_OPINION_TAGS]
     if matched_tags:
         score += min(24, 8 * len(matched_tags))
         signals.append("emotion or opinion")
     if any(mark in text for mark in ("!", "?")):
         score += 7
         signals.append("expressive delivery")
-    if reading >= 0.55:
-        score -= 32
+    if reading >= 0.48:
+        score -= 42
         signals.append("possible reading aloud")
     elif reading >= 0.3:
         score -= 12

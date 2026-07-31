@@ -52,6 +52,7 @@ from app.services.chat import apply_chat_reactions, chat_summary, import_chat, u
 from app.services.discovery import (
     active_profile,
     assign_duplicate_groups,
+    is_disallowed_reading,
     profile_payload,
     preference_features,
     score_candidates,
@@ -76,12 +77,58 @@ def backfill_segment_quality() -> None:
             tags = json.loads(item.get("tags") or "[]")
             words = json.loads(item.get("word_timestamps") or "[]")
             score, signals, reading = assess_clip_quality(item["transcript"], words, item["start_seconds"], item["end_seconds"], tags)
-            if reading >= 0.55:
+            if reading >= 0.48:
                 tags = list(dict.fromkeys(tags + ["reading"]))
             con.execute(
                 "UPDATE segments SET tags=?, quality_score=?, quality_signals=?, reading_likelihood=? WHERE id=?",
                 (json.dumps(tags, ensure_ascii=False), score, json.dumps(signals), reading, item["id"]),
             )
+
+
+def backfill_reading_filter() -> None:
+    """Apply the stricter task/note reading rule to existing recordings once."""
+    items = db.rows(
+        """SELECT id, transcript, tags, word_timestamps, start_seconds, end_seconds, quality_signals,
+                  logical_sense_score, context_score, self_contained_score, game_reaction_score,
+                  voice_expression_score, chat_reaction_score, chat_joy_score, vision_score,
+                  moment_reaction_score, moment_reaction_stage
+           FROM segments WHERE quality_signals NOT LIKE ?""",
+        ('%"reading heuristics v2"%',),
+    )
+    if not items:
+        return
+    updates = []
+    for item in items:
+        original_tags = [tag for tag in json.loads(item.get("tags") or "[]") if tag != "reading"]
+        words = json.loads(item.get("word_timestamps") or "[]")
+        quality, new_signals, reading = assess_clip_quality(item["transcript"], words, item["start_seconds"], item["end_seconds"], original_tags)
+        signals = list(dict.fromkeys(json.loads(item.get("quality_signals") or "[]") + new_signals + ["reading heuristics v2"]))
+        logical = assess_logical_sense(item["transcript"])
+        context = int(item.get("context_score") or 50)
+        self_contained = int(item.get("self_contained_score") or 50)
+        if reading >= 0.48:
+            original_tags.append("reading")
+            logical, context, self_contained = min(logical, 35), min(context, 35), min(self_contained, 35)
+        tags = enrich_tags(
+            original_tags,
+            logical_sense_score=logical,
+            reading_likelihood=reading,
+            game_reaction_score=int(item.get("game_reaction_score") or 0),
+            voice_expression_score=int(item.get("voice_expression_score") or 0),
+            chat_reaction_score=int(item.get("chat_reaction_score") or 0),
+            chat_joy_score=int(item.get("chat_joy_score") or 0),
+            vision_score=int(item.get("vision_score") or 0),
+            context_score=context,
+            self_contained_score=self_contained,
+            moment_reaction_score=int(item.get("moment_reaction_score") or 0),
+            moment_reaction_stage=item.get("moment_reaction_stage") or "",
+        )
+        updates.append((quality, json.dumps(signals, ensure_ascii=False), reading, logical, context, self_contained, json.dumps(tags, ensure_ascii=False), item["id"]))
+    with db.connection() as con:
+        con.executemany(
+            "UPDATE segments SET quality_score=?, quality_signals=?, reading_likelihood=?, logical_sense_score=?, context_score=?, self_contained_score=?, tags=? WHERE id=?",
+            updates,
+        )
 
 
 def backfill_context_signals() -> None:
@@ -193,8 +240,8 @@ def remove_legacy_game_audio_bonus() -> None:
 def backfill_duplicate_groups() -> None:
     """Group older candidates once so the compact review list works immediately."""
     for video in db.rows("SELECT DISTINCT video_id FROM segments WHERE embedding IS NOT NULL"):
-        items = db.rows("SELECT id, start_seconds, embedding FROM segments WHERE video_id=? AND embedding IS NOT NULL", (video["video_id"],))
-        records = [{"id": item["id"], "start": item["start_seconds"], "vector": json.loads(item["embedding"]), "duplicate_group": ""} for item in items]
+        items = db.rows("SELECT id, start_seconds, end_seconds, embedding FROM segments WHERE video_id=? AND embedding IS NOT NULL", (video["video_id"],))
+        records = [{"id": item["id"], "start": item["start_seconds"], "end": item["end_seconds"], "vector": json.loads(item["embedding"]), "duplicate_group": ""} for item in items]
         assign_duplicate_groups(records)
         with db.connection() as con:
             for record in records:
@@ -221,6 +268,7 @@ def backfill_preference_feedback() -> None:
 async def lifespan(_: FastAPI):
     db.initialize()
     backfill_segment_quality()
+    backfill_reading_filter()
     backfill_context_signals()
     backfill_segment_context()
     remove_legacy_game_audio_bonus()
@@ -669,6 +717,8 @@ def video_segments(video_id: str, q: str = "", rating: str = "", tag: str = "", 
         parameters.append('%"reading"%')
     items = db.rows(f"SELECT * FROM segments WHERE {' AND '.join(clauses)} AND embedding IS NOT NULL", tuple(parameters))
     ranked = suppress_duplicate_groups(score_candidates(items, profile=active_profile()), keep_alternatives=show_duplicates)
+    if tag.strip() != "reading":
+        ranked = [item for item in ranked if not is_disallowed_reading(item)]
     sort_fields = {
         "suggested_desc": ("ranking_score", True), "suggested_asc": ("ranking_score", False),
         "quality_desc": ("quality_score", True), "quality_asc": ("quality_score", False),
@@ -761,7 +811,7 @@ def update_segment_timing(segment_id: str, body: SegmentTimingUpdate):
         tags = infer_tags(transcript, vector)
         quality_score, quality_signals, reading_likelihood = assess_clip_quality(transcript, words, body.start_seconds, body.end_seconds, tags)
         logical_sense_score = assess_logical_sense(transcript)
-        if reading_likelihood >= 0.55:
+        if reading_likelihood >= 0.48:
             tags = list(dict.fromkeys(tags + ["reading"]))
         tags = enrich_tags(tags, logical_sense_score=logical_sense_score, reading_likelihood=reading_likelihood)
     except Exception as exc:
@@ -790,7 +840,7 @@ def update_segment_transcript(segment_id: str, body: SegmentTranscriptUpdate):
     quality_score, quality_signals, reading_likelihood = assess_clip_quality(transcript, words, segment["start_seconds"], segment["end_seconds"], tags)
     logical_sense_score = assess_logical_sense(transcript)
     self_contained_score = assess_self_containment(transcript, segment.get("context_before") or "", segment.get("context_after") or "")
-    if reading_likelihood >= 0.55:
+    if reading_likelihood >= 0.48:
         tags = list(dict.fromkeys(tags + ["reading"]))
     tags = enrich_tags(
         tags,
@@ -1051,6 +1101,7 @@ def top_clips(video_id: str, limit: int = 10, unrated_only: bool = False):
         query += " AND rating='unrated'"
     candidates = db.rows(query, (video_id,))
     ranked = suppress_duplicate_groups(score_candidates(candidates, profile=active_profile()))
+    ranked = [item for item in ranked if not is_disallowed_reading(item)]
     return [db.serialize_segment(item) for item in ranked[:max(1, min(30, limit))]]
 
 
@@ -1248,6 +1299,7 @@ def ranked_candidates(video_id: str, reference: list[float], limit: int) -> list
     if not candidates:
         raise HTTPException(400, "Selected video does not have completed analysis.")
     ranked = suppress_duplicate_groups(score_candidates(candidates, reference=reference, profile=active_profile()))
+    ranked = [item for item in ranked if not is_disallowed_reading(item)]
     return [db.serialize_segment(item) for item in ranked[:limit]]
 
 

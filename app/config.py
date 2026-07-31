@@ -10,8 +10,10 @@ class Settings(BaseSettings):
     whisper_model: str = "large-v3"
     whisper_device: str = "cuda"
     whisper_compute_type: str = "float16"
-    segment_min_seconds: int = 15
-    segment_max_seconds: int = 60
+    # Short, focused candidates are much easier to review.  Longer pieces are
+    # still created when one spoken sentence or a clear punchline needs them.
+    segment_min_seconds: int = 10
+    segment_max_seconds: int = 36
     worker_max_concurrency: int = 1
     update_repository: str = "Eratil/clipfinder-local"
 

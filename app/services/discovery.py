@@ -120,6 +120,35 @@ def _mean_top_similarity(vector: np.ndarray, examples: np.ndarray, count: int = 
     return float(np.mean(best))
 
 
+def is_disallowed_reading(candidate: dict) -> bool:
+    """Hide likely game/note reading unless chat proves a short reply worked."""
+    reading = float(candidate.get("reading_likelihood") or 0)
+    if reading < 0.48:
+        return False
+    duration = max(0.0, float(candidate.get("end_seconds", candidate.get("end", 0)) or 0) - float(candidate.get("start_seconds", candidate.get("start", 0)) or 0))
+    chat = int(candidate.get("chat_reaction_score") or 0)
+    joy = int(candidate.get("chat_joy_score") or 0)
+    # Intentional exception: a short quoted viewer comment may remain only
+    # when the following answer clearly entertained the chat.
+    return not (duration <= 24 and chat >= 7 and joy >= 3)
+
+
+def _duration_adjustment(candidate: dict, tags: list[str], chat_score: int) -> tuple[float, str]:
+    """Prefer concise clips while allowing complete opinions and answers."""
+    duration = max(0.0, float(candidate.get("end_seconds", candidate.get("end", 0)) or 0) - float(candidate.get("start_seconds", candidate.get("start", 0)) or 0))
+    long_form = bool({"forma: opinia", "forma: rada", "forma: krytyka", "forma: historia", "forma: puenta"}.intersection(tags))
+    long_form = long_form or (chat_score >= 8 and int(candidate.get("logical_sense_score") or 0) >= 60)
+    if 8 <= duration <= 26:
+        return 8.0, "concise length"
+    if 26 < duration <= 32:
+        return 4.0, "reviewable length"
+    if 32 < duration <= 42:
+        return (1.0, "long complete answer") if long_form else (-11.0, "too long for a focused clip")
+    if duration > 42:
+        return (-8.0, "extended opinion or answer") if long_form else (-25.0, "far too long for a focused clip")
+    return -4.0, "very short clip"
+
+
 def score_candidates(candidates: list[dict], reference: list[list[float]] | None = None, profile: str | None = None) -> list[dict]:
     """Add a transparent 0-99 score using local preferences and content signals."""
     if not candidates:
@@ -166,7 +195,10 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
         tag_bonus = sum(weight for tag, weight in definition["tag_weights"].items() if tag in tags)
         if "reakcja na grę" in tags:
             tag_bonus += {"general": 6, "soulslike": 10, "horror": 8}.get(profile, 4)
-        score = 22 + quality * 0.46 + audio * 0.75 + visual * 0.65 + chat * 0.85 + moment_reaction * 0.45 + (context - 50) * 0.10 + (self_contained - 50) * 0.12 + tag_bonus - reading * 28
+        excluded_reading = is_disallowed_reading(candidate)
+        duration_adjustment, duration_reason = _duration_adjustment(candidate, tags, chat)
+        reading_penalty = reading * (52 if excluded_reading else 10)
+        score = 22 + quality * 0.46 + audio * 0.75 + visual * 0.65 + chat * 0.85 + moment_reaction * 0.45 + (context - 50) * 0.10 + (self_contained - 50) * 0.12 + tag_bonus + duration_adjustment - reading_penalty
         strong_emotion = bool({"humor", "gniew", "zaskoczenie", "radość", "złość"}.intersection(tags)) or game_reaction >= 7 or voice_expression >= 9
         happy_chat = chat_joy >= 4 and chat >= 5
         context_penalty = 0
@@ -200,12 +232,18 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
         tag_feedback = _tag_preference(candidate, profile_accepted_rows, profile_rejected_rows)
         feedback_bonus += tag_feedback
         score += feedback_bonus
+        if excluded_reading:
+            # It remains accessible under the reading tag for manual checking,
+            # but cannot become a suggested best clip.
+            score = min(score, 18)
         if reference:
             candidate["similarity"] = round(prompt_match, 4)
         candidate["approval_match"] = round(approval_match, 4)
         candidate["profile_feedback_score"] = round(feedback_bonus, 2)
+        candidate["excluded_from_discovery"] = excluded_reading
         candidate["ranking_score"] = max(1, min(99, round(score)))
         reasons = [f"quality {quality}/99"]
+        reasons.append(duration_reason)
         if reference:
             reasons.insert(0, f"prompt match {round(max(0, prompt_match) * 100)}%")
         if len(accepted) >= 4 and approval_match >= 0.30:
@@ -251,8 +289,10 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
             reasons.append("matches active content profile")
         if strongest_rejection >= 0.42:
             reasons.append(f"similar to rejection: {strongest_rejection_reason}")
-        if reading >= 0.55:
-            reasons.append("possible reading")
+        if excluded_reading:
+            reasons.append("likely task/note reading - excluded from best clips")
+        elif reading >= 0.48:
+            reasons.append("short reading kept because chat reacted")
         candidate["ranking_reason"] = "; ".join(reasons)
         ranked.append(candidate)
     return ranked
@@ -294,9 +334,14 @@ def assign_duplicate_groups(records: list[dict], threshold: float = 0.88) -> Non
 
     for left in range(len(records)):
         for right in range(left + 1, len(records)):
-            if abs(records[left]["start"] - records[right]["start"]) < 18:
-                continue
-            if similarities[left, right] >= threshold:
+            left_start, left_end = float(records[left]["start"]), float(records[left].get("end", records[left]["start"]))
+            right_start, right_end = float(records[right]["start"]), float(records[right].get("end", records[right]["start"]))
+            overlap = max(0.0, min(left_end, right_end) - max(left_start, right_start))
+            shorter = max(0.1, min(left_end - left_start, right_end - right_start))
+            # Generated candidates for one sentence often share the same
+            # start.  They are alternatives, not three different moments.
+            overlapping_variant = overlap / shorter >= 0.55 and similarities[left, right] >= 0.70
+            if overlapping_variant or similarities[left, right] >= threshold:
                 union(left, right)
     groups: dict[int, list[int]] = defaultdict(list)
     for index in range(len(records)):

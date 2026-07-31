@@ -159,12 +159,7 @@ def chat_summary(video_id: str) -> dict[str, Any]:
 
 
 def apply_chat_reactions(video_id: str) -> int:
-    """Score chat bursts after the central moment of a candidate clip.
-
-    Most clips are longer than the event or punchline they contain.  Starting
-    from their midpoint lets the delayed chat response land inside the latter
-    half of a clip instead of missing reactions that happen before its end.
-    """
+    """Score chat activity across a candidate and its delayed response tail."""
     settings = db.row("SELECT delay_seconds FROM chat_settings WHERE video_id=?", (video_id,))
     messages = db.rows("SELECT seconds, author, message FROM chat_messages WHERE video_id=? ORDER BY seconds", (video_id,))
     if not settings or not messages:
@@ -179,9 +174,11 @@ def apply_chat_reactions(video_id: str) -> int:
     message_times = [float(message["seconds"]) for message in messages]
     updates = []
     for segment in segments:
-        midpoint = (float(segment["start_seconds"]) + float(segment["end_seconds"])) / 2.0
-        response_start = midpoint + max(0.0, delay - 2.0)
-        response_end = response_start + 18.0
+        clip_start, clip_end = float(segment["start_seconds"]), float(segment["end_seconds"])
+        # Evaluate the whole spoken fragment, then retain a small delayed tail
+        # for messages that appear after its final line or punchline.
+        response_start = clip_start + max(0.0, delay - 2.0)
+        response_end = clip_end + delay + 18.0
         baseline_start = max(0.0, response_start - 70.0)
         baseline_end = max(baseline_start, response_start - 8.0)
         reaction = messages[bisect_left(message_times, response_start):bisect_right(message_times, response_end)]
@@ -194,21 +191,22 @@ def apply_chat_reactions(video_id: str) -> int:
         expressive = sum(1 for message in reaction if REACTION_PATTERN.search(message["message"]))
         joy = sum(1 for message in reaction if JOY_PATTERN.search(message["message"]))
         score = 0
-        if count >= 2:
-            score += min(7, count * 2)
-        if unique >= 2:
+        active_chat = count >= max(3, expected * 1.35)
+        if active_chat:
+            score += min(6, max(1, round((count - expected) * 1.4)))
+        if active_chat and unique >= 2:
             score += min(5, unique)
-        if count >= max(4, expected * 1.8):
+        if count >= max(4, expected * 1.55):
             score += min(8, round((surge - 1) * 3.5))
-        if expressive >= 2:
+        if active_chat and expressive >= 2:
             score += min(4, expressive)
         score = max(0, min(20, score))
         joy_score = 0
-        if joy:
+        if active_chat and joy:
             joy_score += min(6, joy * 2)
-        if joy >= 2 and unique >= 2:
+        if active_chat and joy >= 2 and unique >= 2:
             joy_score += min(4, unique)
-        if joy and count >= max(3, expected * 1.5):
+        if active_chat and joy and count >= max(3, expected * 1.5):
             joy_score += min(4, round(max(0.0, surge - 1) * 2.5))
         joy_score = max(0, min(14, joy_score))
         moment_score, moment_stage = score_moment_reaction(int(segment.get("game_reaction_score") or 0), score, joy_score)
