@@ -84,6 +84,7 @@ def initialize() -> None:
                 context_before TEXT NOT NULL DEFAULT '',
                 context_after TEXT NOT NULL DEFAULT '',
                 censor_profanity INTEGER NOT NULL DEFAULT 0,
+                remove_pauses INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_segments_video_time ON segments(video_id, start_seconds);
@@ -234,6 +235,8 @@ def initialize() -> None:
             con.execute("ALTER TABLE segments ADD COLUMN word_timestamps TEXT NOT NULL DEFAULT '[]'")
         if "censor_profanity" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN censor_profanity INTEGER NOT NULL DEFAULT 0")
+        if "remove_pauses" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN remove_pauses INTEGER NOT NULL DEFAULT 0")
         if "review_reason" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN review_reason TEXT NOT NULL DEFAULT ''")
         if "quality_score" not in columns:
@@ -332,5 +335,6 @@ def serialize_segment(segment: dict) -> dict:
     segment["quality_signals"] = json.loads(segment.get("quality_signals") or "[]")
     segment["chat_messages"] = json.loads(segment.get("chat_messages") or "[]")
     segment["censor_profanity"] = bool(segment.get("censor_profanity"))
+    segment["remove_pauses"] = bool(segment.get("remove_pauses"))
     segment.pop("embedding", None)
     return segment

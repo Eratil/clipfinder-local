@@ -44,6 +44,7 @@ from app.models import (
     SavedPromptCreate,
     SegmentTimingUpdate,
     SegmentCensorUpdate,
+    SegmentPauseTrimUpdate,
     SegmentTranscriptUpdate,
     SimilaritySearch,
 )
@@ -58,7 +59,7 @@ from app.services.discovery import (
     score_candidates,
     suppress_duplicate_groups,
 )
-from app.services.media import MediaError, audio_track_count, export_audio_preview, export_clip, write_caption_ass
+from app.services.media import MediaError, audio_track_count, export_audio_preview, export_clip, pause_trim_ranges, remap_words_for_kept_ranges, write_caption_ass
 from app.services.pipeline import analyse, import_reference_folder, transcribe_clip_range
 from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_context, assess_logical_sense, assess_self_containment, build_reference_prompt, detailed_lexical_tags, enrich_tags, infer_tags, score_moment_reaction
 from app.services.updater import automatic_updates_available, install_downloaded_update, job_status as update_download_status, start_download as start_update_download
@@ -822,7 +823,8 @@ def update_segment_timing(segment_id: str, body: SegmentTimingUpdate):
             (body.start_seconds, body.end_seconds, transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), logical_sense_score, reading_likelihood, segment_id),
         )
     apply_chat_reactions(segment["video_id"])
-    (settings.previews_dir / f"{segment_id}.mp3").unlink(missing_ok=True)
+    for preview in settings.previews_dir.glob(f"{segment_id}-*"):
+        preview.unlink(missing_ok=True)
     updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
     return db.serialize_segment(updated)
 
@@ -861,6 +863,8 @@ def update_segment_transcript(segment_id: str, body: SegmentTranscriptUpdate):
             "UPDATE segments SET transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, logical_sense_score=?, self_contained_score=?, reading_likelihood=? WHERE id=?",
             (transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), logical_sense_score, self_contained_score, reading_likelihood, segment_id),
         )
+    for preview in settings.previews_dir.glob(f"{segment_id}-*"):
+        preview.unlink(missing_ok=True)
     updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
     return db.serialize_segment(updated)
 
@@ -871,6 +875,16 @@ def update_segment_censor(segment_id: str, body: SegmentCensorUpdate):
         if not con.execute("SELECT id FROM segments WHERE id=?", (segment_id,)).fetchone():
             not_found("Segment not found")
         con.execute("UPDATE segments SET censor_profanity=? WHERE id=?", (int(body.censor_profanity), segment_id))
+    updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
+    return db.serialize_segment(updated)
+
+
+@app.patch("/api/segments/{segment_id}/pause-trim")
+def update_segment_pause_trim(segment_id: str, body: SegmentPauseTrimUpdate):
+    with db.connection() as con:
+        if not con.execute("SELECT id FROM segments WHERE id=?", (segment_id,)).fetchone():
+            not_found("Segment not found")
+        con.execute("UPDATE segments SET remove_pauses=? WHERE id=?", (int(body.remove_pauses), segment_id))
     updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
     return db.serialize_segment(updated)
 
@@ -917,7 +931,8 @@ def _export_segment(segment_id: str, lead_in_seconds: float, lead_out_seconds: f
     if caption_position not in {"top", "middle", "bottom"} or not re.fullmatch(r"#[0-9A-Fa-f]{6}", base_color) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", active_color):
         raise HTTPException(400, "Invalid caption settings.")
     censor_profanity = bool(segment.get("censor_profanity"))
-    suffix = ("" if captions_preset == "none" else f"_captions-{captions_preset}") + ("" if layout == "original" else f"_{layout}") + ("_censored" if censor_profanity else "")
+    remove_pauses = bool(segment.get("remove_pauses"))
+    suffix = ("" if captions_preset == "none" else f"_captions-{captions_preset}") + ("" if layout == "original" else f"_{layout}") + ("_censored" if censor_profanity else "") + ("_dynamic" if remove_pauses else "")
     fallback = f"{Path(segment['original_name']).stem}_{start:.0f}-{end:.0f}{suffix}"
     destination = _available_export_path(_safe_export_name(filename, fallback))
     defaults = export_defaults() or {}
@@ -930,10 +945,20 @@ def _export_segment(segment_id: str, lead_in_seconds: float, lead_out_seconds: f
     captions_path = None
     try:
         word_timestamps = json.loads(segment.get("word_timestamps") or "[]")
+        pause_ranges = pause_trim_ranges(word_timestamps, end - start, start) if remove_pauses else [(0.0, end - start)]
+        output_duration = sum(right - left for left, right in pause_ranges)
+        if remove_pauses and len(pause_ranges) > 1:
+            relative_words = [
+                {**word, "start": float(word["start"]) - start, "end": float(word["end"]) - start}
+                for word in word_timestamps
+                if word.get("start") is not None and word.get("end") is not None
+            ]
+            remapped = remap_words_for_kept_ranges(relative_words, pause_ranges)
+            word_timestamps = [{**word, "start": start + float(word["start"]), "end": start + float(word["end"])} for word in remapped]
         if captions_preset != "none":
             captions_path = settings.work_dir / f"{segment_id}-{captions_preset}.ass"
-            write_caption_ass(captions_path, segment["transcript"], end - start, captions_preset, word_timestamps, start, caption_position, base_color, active_color, censor_profanity)
-        export_clip(Path(segment["path"]), destination, start, end, captions_path, layout, audio_track, word_timestamps, segment["transcript"], censor_profanity, camera_rect, game_rect)
+            write_caption_ass(captions_path, segment["transcript"], output_duration, captions_preset, word_timestamps, start, caption_position, base_color, active_color, censor_profanity)
+        export_clip(Path(segment["path"]), destination, start, end, captions_path, layout, audio_track, word_timestamps, segment["transcript"], censor_profanity, camera_rect, game_rect, pause_ranges)
     except MediaError as exc:
         raise HTTPException(500, f"Unable to export clip: {exc}") from exc
     finally:
@@ -943,7 +968,7 @@ def _export_segment(segment_id: str, lead_in_seconds: float, lead_out_seconds: f
 
 
 @app.get("/api/segments/{segment_id}/audio-preview")
-def audio_preview(segment_id: str, audio_track: int = 1):
+def audio_preview(segment_id: str, audio_track: int = 1, remove_pauses: bool = False):
     segment = db.row("SELECT s.*, v.path FROM segments s JOIN videos v ON v.id=s.video_id WHERE s.id=?", (segment_id,))
     if not segment:
         not_found("Segment not found")
@@ -958,10 +983,12 @@ def audio_preview(segment_id: str, audio_track: int = 1):
         raise HTTPException(500, f"Unable to inspect audio tracks: {exc}") from exc
     if audio_track > available_tracks:
         raise HTTPException(400, f"Track {audio_track} does not exist in this recording. Available audio tracks: {available_tracks}.")
-    destination = settings.previews_dir / f"{segment_id}-track{audio_track}.mp3"
+    destination = settings.previews_dir / f"{segment_id}-track{audio_track}{'-dynamic' if remove_pauses else ''}.mp3"
     if not destination.is_file():
         try:
-            export_audio_preview(source, destination, segment["start_seconds"], segment["end_seconds"], audio_track)
+            words = json.loads(segment.get("word_timestamps") or "[]")
+            pause_ranges = pause_trim_ranges(words, float(segment["end_seconds"]) - float(segment["start_seconds"]), float(segment["start_seconds"])) if remove_pauses else None
+            export_audio_preview(source, destination, segment["start_seconds"], segment["end_seconds"], audio_track, pause_ranges)
         except MediaError as exc:
             raise HTTPException(500, f"Unable to prepare audio preview: {exc}") from exc
     return FileResponse(destination, media_type="audio/mpeg", filename=destination.name)

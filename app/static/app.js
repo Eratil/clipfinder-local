@@ -206,6 +206,7 @@ function selectClipForEditor(segment, openPanel = true) {
   if ([...reviewReason.options].some((option) => option.value === segment.review_reason)) reviewReason.value = segment.review_reason;
   $('#editor-transcript').value = segment.transcript || '';
   $('#editor-censor-profanity').checked = Boolean(segment.censor_profanity);
+  $('#editor-remove-pauses').checked = Boolean(segment.remove_pauses);
   $('#editor-export-name').value = state.exportNames[segment.id] || '';
   const exportButton = $('#editor-export'); exportButton.disabled = segment.rating !== 'accepted'; exportButton.textContent = segment.rating === 'accepted' ? 'Export MP4' : 'Approve before export';
   document.querySelectorAll('.segment').forEach((article) => article.classList.toggle('editing', article.dataset.segmentId === segment.id));
@@ -223,7 +224,7 @@ async function saveSegmentRating(segment, rating) {
 async function playClipAudio(segment) {
   const player = $('#global-audio-player');
   state.listeningSegment = segment;
-  $('#audio-now-playing-title').textContent = 'Listening to clip';
+  $('#audio-now-playing-title').textContent = segment.remove_pauses ? 'Listening to dynamic clip' : 'Listening to clip';
   $('#audio-now-playing-detail').textContent = `${fmt(segment.start_seconds)} - ${fmt(segment.end_seconds)} / ${segment.transcript || 'No recognized speech'}`;
   $('#audio-now-playing').hidden = false;
   $('#listen-audio-track').value = String(state.listenAudioTrack || 1);
@@ -234,9 +235,10 @@ async function loadListeningAudio() {
   const segment = state.listeningSegment; if (!segment) return;
   const player = $('#global-audio-player'); const track = Number($('#listen-audio-track').value || 1);
   state.listenAudioTrack = track;
-  const source = `/api/segments/${segment.id}/audio-preview?audio_track=${encodeURIComponent(track)}`;
+  const removePauses = Boolean(segment.remove_pauses);
+  const source = `/api/segments/${segment.id}/audio-preview?audio_track=${encodeURIComponent(track)}&remove_pauses=${removePauses}`;
   try {
-    await api(`/segments/${segment.id}/audio-preview?audio_track=${encodeURIComponent(track)}`);
+    await api(`/segments/${segment.id}/audio-preview?audio_track=${encodeURIComponent(track)}&remove_pauses=${removePauses}`);
     player.src = source; player.load(); await player.play();
   } catch (error) {
     player.pause(); player.removeAttribute('src'); player.load(); message(error.message, true);
@@ -696,6 +698,12 @@ $('#editor-censor-profanity').onchange = async () => {
   const segment = selectedEditorSegment(); if (!segment) return;
   const toggle = $('#editor-censor-profanity'); toggle.disabled = true;
   try { const updated = await api(`/segments/${segment.id}/censor`, { method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({censor_profanity:toggle.checked}) }); Object.assign(segment, updated); const original = state.activeResults?.find((item) => item.id === segment.id); if (original) Object.assign(original, updated); message(updated.censor_profanity ? 'Profanity censoring enabled for this clip export.' : 'Profanity censoring disabled for this clip export.'); }
+  catch (error) { toggle.checked = !toggle.checked; message(error.message, true); } finally { toggle.disabled = false; }
+};
+$('#editor-remove-pauses').onchange = async () => {
+  const segment = selectedEditorSegment(); if (!segment) return;
+  const toggle = $('#editor-remove-pauses'); toggle.disabled = true;
+  try { const updated = await api(`/segments/${segment.id}/pause-trim`, { method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({remove_pauses:toggle.checked}) }); Object.assign(segment, updated); const original = state.activeResults?.find((item) => item.id === segment.id); if (original) Object.assign(original, updated); if (state.listeningSegment?.id === segment.id) await loadListeningAudio(); message(updated.remove_pauses ? 'Long pauses will be removed in preview and export.' : 'Preview and export will keep original pauses.'); }
   catch (error) { toggle.checked = !toggle.checked; message(error.message, true); } finally { toggle.disabled = false; }
 };
 $('#editor-export').onclick = () => {

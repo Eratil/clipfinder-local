@@ -244,7 +244,64 @@ def _audio_censor_filter(audio_stream: str, ranges: list[tuple[float, float]], d
     return f"[{audio_stream}]asetpts=PTS-STARTPTS,volume=0:enable='{conditions}'[aout]"
 
 
-def export_clip(source: Path, target: Path, start: float, end: float, captions_path: Path | None = None, layout: str = "original", audio_track: int = 1, word_timestamps: list[dict] | None = None, transcript: str = "", censor_profanity: bool = False, camera_rect: tuple[float, float, float, float] = (0.78, 0.03, 0.11, 0.11), game_rect: tuple[float, float, float, float] = (0.22, 0.0, 0.56, 1.0)) -> None:
+def pause_trim_ranges(words: list[dict], duration: float, clip_start: float = 0.0, threshold: float = 0.85, padding: float = 0.12) -> list[tuple[float, float]]:
+    """Keep speech and short natural gaps; remove only clearly long pauses."""
+    normalized = []
+    for word in words:
+        if word.get("start") is None or word.get("end") is None:
+            continue
+        left = max(0.0, float(word["start"]) - clip_start)
+        right = min(duration, float(word["end"]) - clip_start)
+        if right > left:
+            normalized.append((left, right))
+    if len(normalized) < 2:
+        return [(0.0, duration)]
+    normalized.sort()
+    ranges: list[tuple[float, float]] = []
+    kept_start = 0.0
+    previous_end = normalized[0][1]
+    for next_start, next_end in normalized[1:]:
+        if next_start - previous_end >= threshold:
+            kept_end = min(duration, previous_end + padding)
+            if kept_end - kept_start >= 0.08:
+                ranges.append((kept_start, kept_end))
+            kept_start = max(0.0, next_start - padding)
+        previous_end = max(previous_end, next_end)
+    if duration - kept_start >= 0.08:
+        ranges.append((kept_start, duration))
+    return ranges or [(0.0, duration)]
+
+
+def remap_words_for_kept_ranges(words: list[dict], ranges: list[tuple[float, float]]) -> list[dict]:
+    """Move word timestamps onto the timeline after removed pauses."""
+    remapped = []
+    offset = 0.0
+    for left, right in ranges:
+        for word in words:
+            if word.get("start") is None or word.get("end") is None:
+                continue
+            word_start, word_end = float(word["start"]), float(word["end"])
+            overlap_start, overlap_end = max(left, word_start), min(right, word_end)
+            if overlap_end <= overlap_start:
+                continue
+            remapped.append({**word, "start": offset + overlap_start - left, "end": offset + overlap_end - left})
+        offset += right - left
+    return remapped
+
+
+def _pause_trim_graph(video_stream: str, audio_stream: str, ranges: list[tuple[float, float]]) -> tuple[list[str], str, str]:
+    """Return FFmpeg graph stages which concatenate the kept video/audio pieces."""
+    stages: list[str] = []
+    inputs: list[str] = []
+    for index, (left, right) in enumerate(ranges):
+        stages.append(f"[{video_stream}]trim=start={left:.3f}:end={right:.3f},setpts=PTS-STARTPTS[v{index}]")
+        stages.append(f"[{audio_stream}]atrim=start={left:.3f}:end={right:.3f},asetpts=PTS-STARTPTS[a{index}]")
+        inputs.extend((f"[v{index}]", f"[a{index}]"))
+    stages.append("".join(inputs) + f"concat=n={len(ranges)}:v=1:a=1[basev][basea]")
+    return stages, "basev", "basea"
+
+
+def export_clip(source: Path, target: Path, start: float, end: float, captions_path: Path | None = None, layout: str = "original", audio_track: int = 1, word_timestamps: list[dict] | None = None, transcript: str = "", censor_profanity: bool = False, camera_rect: tuple[float, float, float, float] = (0.78, 0.03, 0.11, 0.11), game_rect: tuple[float, float, float, float] = (0.22, 0.0, 0.56, 1.0), pause_ranges: list[tuple[float, float]] | None = None) -> None:
     """Export an exact clip in its original format or a 1080x1920 short layout."""
     if audio_track < 1:
         raise MediaError("Invalid audio track")
@@ -253,17 +310,25 @@ def export_clip(source: Path, target: Path, start: float, end: float, captions_p
     caption_filter = f"ass='{_ffmpeg_filter_path(captions_path)}'" if captions_path else ""
     duration = end - start
     words = _caption_words(transcript, word_timestamps or [], start, duration)
-    censor_ranges = _censored_audio_ranges(words, duration) if censor_profanity else []
-    audio_filter = _audio_censor_filter(selected_audio, censor_ranges, duration) if censor_ranges else ""
+    pause_ranges = pause_ranges or [(0.0, duration)]
+    trim_pauses = len(pause_ranges) > 1
+    output_duration = sum(right - left for left, right in pause_ranges) if trim_pauses else duration
+    censor_ranges = _censored_audio_ranges(words, output_duration) if censor_profanity else []
+    graph_stages: list[str] = []
+    video_stream, audio_stream = "0:v", selected_audio
+    if trim_pauses:
+        graph_stages, video_stream, audio_stream = _pause_trim_graph(video_stream, audio_stream, pause_ranges)
+    audio_filter = _audio_censor_filter(audio_stream, censor_ranges, output_duration) if censor_ranges else ""
+    audio_map = "[aout]" if audio_filter else (f"[{audio_stream}]" if trim_pauses else selected_audio)
     if layout == "portrait_split":
         camera = _crop_filter(camera_rect)
         game = f"{_crop_filter(game_rect)},scale=1080:1280:force_original_aspect_ratio=increase,crop=1080:1280"
         top = f"{camera},scale=1080:640:force_original_aspect_ratio=decrease,pad=1080:640:(ow-iw)/2:(oh-ih)/2:color=0x10141d"
         output = "[base]" + (caption_filter + "," if caption_filter else "") + "format=yuv420p,setsar=1[outv]"
-        graph = f"[0:v]split=2[camera][game];[camera]{top}[top];[game]{game}[bottom];[top][bottom]vstack=inputs=2[base];{output}"
+        graph_stages.extend((f"[{video_stream}]split=2[camera][game]", f"[camera]{top}[top]", f"[game]{game}[bottom]", "[top][bottom]vstack=inputs=2[base]", output))
         if audio_filter:
-            graph += ";" + audio_filter
-        command.extend(["-filter_complex", graph, "-map", "[outv]", "-map", "[aout]" if audio_filter else selected_audio])
+            graph_stages.append(audio_filter)
+        command.extend(["-filter_complex", ";".join(graph_stages), "-map", "[outv]", "-map", audio_map])
     else:
         filters: list[str] = []
         if layout in {"portrait_camera", "portrait_game"}:
@@ -272,12 +337,14 @@ def export_clip(source: Path, target: Path, start: float, end: float, captions_p
             raise MediaError("Unknown clip layout")
         if caption_filter:
             filters.append(caption_filter)
-        if audio_filter:
-            graph = f"[0:v]{','.join(filters) if filters else 'null'}[outv];{audio_filter}"
-            command.extend(["-filter_complex", graph, "-map", "[outv]", "-map", "[aout]"])
+        if trim_pauses or audio_filter:
+            graph_stages.append(f"[{video_stream}]{','.join(filters) if filters else 'null'}[outv]")
+            if audio_filter:
+                graph_stages.append(audio_filter)
+            command.extend(["-filter_complex", ";".join(graph_stages), "-map", "[outv]", "-map", audio_map])
         elif filters:
             command.extend(["-vf", ",".join(filters)])
-        if not audio_filter:
+        if not trim_pauses and not audio_filter:
             command.extend(["-map", "0:v:0", "-map", selected_audio])
     command.extend([
         "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-c:a", "aac", "-b:a", "192k",
@@ -286,11 +353,21 @@ def export_clip(source: Path, target: Path, start: float, end: float, captions_p
     run(command)
 
 
-def export_audio_preview(source: Path, target: Path, start: float, end: float, audio_track: int = 1) -> None:
+def export_audio_preview(source: Path, target: Path, start: float, end: float, audio_track: int = 1, pause_ranges: list[tuple[float, float]] | None = None) -> None:
     """Create a small cached mono MP3 for fast candidate review."""
     if audio_track < 1:
         raise MediaError("Invalid audio track")
-    run([
-        "ffmpeg", "-y", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(source),
-        "-map", f"0:a:{audio_track - 1}", "-vn", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "96k", str(target),
-    ])
+    command = ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(source)]
+    selected_audio = f"0:a:{audio_track - 1}"
+    pause_ranges = pause_ranges or [(0.0, end - start)]
+    if len(pause_ranges) > 1:
+        stages, inputs = [], []
+        for index, (left, right) in enumerate(pause_ranges):
+            stages.append(f"[{selected_audio}]atrim=start={left:.3f}:end={right:.3f},asetpts=PTS-STARTPTS[a{index}]")
+            inputs.append(f"[a{index}]")
+        stages.append("".join(inputs) + f"concat=n={len(pause_ranges)}:v=0:a=1[aout]")
+        command.extend(["-filter_complex", ";".join(stages), "-map", "[aout]"])
+    else:
+        command.extend(["-map", selected_audio])
+    command.extend(["-vn", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "96k", str(target)])
+    run(command)

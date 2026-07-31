@@ -297,6 +297,7 @@
         <label>Caption text (you can correct the transcription)<textarea id="editor-transcript" rows="5"></textarea></label>
         <button id="editor-save-transcript" class="quiet">Save caption text</button>
         <label class="check censor-toggle"><input id="editor-censor-profanity" type="checkbox" /> Mute profanity from mid-word in exported audio and mask it in captions</label>
+        <label class="check pause-trim-toggle"><input id="editor-remove-pauses" type="checkbox" /> Remove long pauses from preview and exported video</label>
         <label>Export file name (optional)<input id="editor-export-name" maxlength="120" placeholder="e.g. funny-reaction-01" /></label>
         <button id="editor-export" class="quiet">Approve before export</button>
       </div>
@@ -330,6 +331,6 @@
       <p class="hint quick-review-shortcuts"><kbd>A</kbd> approve &nbsp; <kbd>R</kbd> reject &nbsp; <kbd>←</kbd><kbd>→</kbd> previous / next</p>
       <div class="actions quick-review-actions"><button id="quick-review-approve">Approve</button><button id="quick-review-reject" class="quiet">Reject</button><button id="quick-review-previous" class="quiet">Previous</button><button id="quick-review-next" class="quiet">Next</button></div>
     </dialog>
-    <script src="/static/app.js?v=20260731-quick-preview"></script>
+    <script src="/static/app.js?v=20260801-pause-trim"></script>
   </body>
 </html>
