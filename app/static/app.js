@@ -1,6 +1,11 @@
 const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, listeningSegment: null, listenAudioTrack: 1, quickReview: { clips: [], index: 0, saving: false }, editingSegment: null, clipEditorOpen: false, captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00' }, globalExport: { layout: 'original', audio_track: 1, camera_x:.78, camera_y:.03, camera_width:.11, camera_height:.11, game_x:.22, game_y:0, game_width:.56, game_height:1 }, layoutCalibration: { mode:'camera', drawing:null }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, statusErrorUntil: 0, updateDownloadId: null };
 const $ = (selector) => document.querySelector(selector);
 const fmt = (seconds) => new Date(seconds * 1000).toISOString().slice(11, 19);
+const elapsed = (seconds) => {
+  const total = Math.max(0, Math.round(Number(seconds || 0)));
+  const hours = Math.floor(total / 3600); const minutes = Math.floor((total % 3600) / 60); const rest = total % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
+};
 const clamp = (number) => Math.max(0, Math.min(100, Number(number || 0)));
 const bytes = (value) => { const amount = Number(value || 0); if (!amount) return '0 B'; const units = ['B', 'KB', 'MB', 'GB', 'TB']; const index = Math.min(units.length - 1, Math.floor(Math.log(amount) / Math.log(1024))); return `${(amount / (1024 ** index)).toFixed(index < 2 ? 0 : 1)} ${units[index]}`; };
 
@@ -91,7 +96,8 @@ async function loadVideos() {
   for (const video of videos) {
     const card = make('article', `video ${video.status} ${state.videoId === video.id ? 'selected' : ''}`);
     const info = make('div', 'video-info'); info.append(make('strong', 'video-name', video.original_name));
-    info.append(make('p', 'video-meta', `${video.duration_seconds ? fmt(video.duration_seconds) : '--:--:--'} / ${bytes(video.size_bytes)} / ${video.message || video.status}`));
+    const analysisTime = Number(video.analysis_seconds || 0) > 0 ? ` / analysis: ${elapsed(video.analysis_seconds)}` : '';
+    info.append(make('p', 'video-meta', `${video.duration_seconds ? fmt(video.duration_seconds) : '--:--:--'} / ${bytes(video.size_bytes)}${analysisTime} / ${video.message || video.status}`));
     const progress = make('div', 'video-progress'); const track = make('div', 'progress-track'); const fill = make('div', 'progress-fill'); fill.style.width = `${clamp(video.progress)}%`; track.append(fill); progress.append(track, make('strong', '', `${clamp(video.progress)}%`));
     card.append(info, make('span', 'pill', video.status), progress);
     if (['failed', 'interrupted', 'ready'].includes(video.status)) { const label = video.status === 'ready' ? 'Reanalyze recording' : 'Run analysis again'; const retry = make('button', 'quiet', label); retry.onclick = async (event) => { event.stopPropagation(); await api(`/videos/${video.id}/analyse`, { method:'POST' }); message('Analysis queued again.'); await refreshDashboard(); }; const remove = make('button', 'quiet danger-button', 'Delete recording'); remove.onclick = async (event) => { event.stopPropagation(); if (!window.confirm(`Delete ${video.original_name}, its analysis data and ${bytes(video.size_bytes)} of source video? Exported clips will be kept.`)) return; remove.disabled = true; try { await api(`/videos/${video.id}`, { method:'DELETE' }); if (state.videoId === video.id) { state.videoId = null; state.activeResults = null; $('#workspace').hidden = true; } message('Source recording and its analysis data deleted. Exported clips were kept.'); await refreshDashboard(); } catch (error) { message(error.message, true); remove.disabled = false; } }; card.append(retry, remove); }

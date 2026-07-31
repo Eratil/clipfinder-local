@@ -2,6 +2,7 @@ import json
 import os
 import re
 import shutil
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -255,6 +256,13 @@ def update_job(job_id: str, progress: int, message: str, state: str = "running")
         )
 
 
+def save_analysis_duration(video_id: str, started_at: float) -> None:
+    """Store elapsed wall time for the most recent analysis attempt."""
+    elapsed = round(max(0.0, time.monotonic() - started_at), 2)
+    with db.connection() as con:
+        con.execute("UPDATE videos SET analysis_seconds=?, updated_at=? WHERE id=?", (elapsed, db.now(), video_id))
+
+
 def approximate_word_timestamps(transcript: str, start: float, end: float) -> list[dict]:
     """Use proportional word timing after a user rewrites the transcript."""
     tokens = re.findall(r"\S+", transcript)
@@ -271,13 +279,16 @@ def approximate_word_timestamps(transcript: str, start: float, end: float) -> li
 
 
 def run_analysis(video_id: str, job_id: str) -> None:
+    started_at = time.monotonic()
     try:
         update_job(job_id, 1, "Waiting for worker", "running")
         analyse(video_id, lambda progress, message: update_job(job_id, progress, message))
+        save_analysis_duration(video_id, started_at)
         update_job(job_id, 100, "Analysis completed", "completed")
     except Exception as exc:
+        elapsed = round(max(0.0, time.monotonic() - started_at), 2)
         with db.connection() as con:
-            con.execute("UPDATE videos SET status='failed', error_message=?, updated_at=? WHERE id=?", (str(exc), db.now(), video_id))
+            con.execute("UPDATE videos SET status='failed', error_message=?, analysis_seconds=?, updated_at=? WHERE id=?", (str(exc), elapsed, db.now(), video_id))
         update_job(job_id, 100, str(exc), "failed")
 
 
@@ -330,6 +341,7 @@ def run_remote_import(video_id: str, job_id: str) -> None:
     if not video or not video.get("source_url"):
         update_job(job_id, 100, "Remote source URL is missing.", "failed")
         return
+    analysis_started_at: float | None = None
     try:
         from yt_dlp import YoutubeDL
 
@@ -371,12 +383,14 @@ def run_remote_import(video_id: str, job_id: str) -> None:
                 "UPDATE videos SET original_name=?, path=?, status='queued', transcript_audio_track=1, audio_analysis_mode='single', error_message=NULL, updated_at=? WHERE id=?",
                 (f"{title}{source_path.suffix}", str(source_path), db.now(), video_id),
             )
+        analysis_started_at = time.monotonic()
         analyse(video_id, lambda progress, message: update_job(job_id, 20 + int(progress * 0.8), message))
+        save_analysis_duration(video_id, analysis_started_at)
         update_job(job_id, 100, "Analysis completed", "completed")
     except ModuleNotFoundError as exc:
         detail = "Remote import requires yt-dlp. Run: python -m pip install -r requirements.txt" if exc.name == "yt_dlp" else str(exc)
         with db.connection() as con:
-            con.execute("UPDATE videos SET status='failed', error_message=?, updated_at=? WHERE id=?", (detail, db.now(), video_id))
+            con.execute("UPDATE videos SET status='failed', error_message=?, analysis_seconds=?, updated_at=? WHERE id=?", (detail, round(max(0.0, time.monotonic() - analysis_started_at), 2) if analysis_started_at else 0, db.now(), video_id))
         update_job(job_id, 100, detail, "failed")
     except Exception as exc:
         detail = str(exc)
@@ -386,7 +400,7 @@ def run_remote_import(video_id: str, job_id: str) -> None:
                 "Update/reinstall ClipFinder so its certificate bundle is refreshed, then try again."
             )
         with db.connection() as con:
-            con.execute("UPDATE videos SET status='failed', error_message=?, updated_at=? WHERE id=?", (detail, db.now(), video_id))
+            con.execute("UPDATE videos SET status='failed', error_message=?, analysis_seconds=?, updated_at=? WHERE id=?", (detail, round(max(0.0, time.monotonic() - analysis_started_at), 2) if analysis_started_at else 0, db.now(), video_id))
         update_job(job_id, 100, detail, "failed")
 
 
@@ -518,7 +532,7 @@ def restart_analysis(video_id: str, background_tasks: BackgroundTasks):
         raise HTTPException(400, "The original video file is no longer available.")
     job_id, timestamp = str(uuid.uuid4()), db.now()
     with db.connection() as con:
-        con.execute("UPDATE videos SET status='queued', error_message=NULL, updated_at=? WHERE id=?", (timestamp, video_id))
+        con.execute("UPDATE videos SET status='queued', error_message=NULL, analysis_seconds=0, updated_at=? WHERE id=?", (timestamp, video_id))
         con.execute(
             "INSERT INTO jobs (id, video_id, state, progress, message, created_at, updated_at) VALUES (?, ?, 'queued', 0, 'Queued again', ?, ?)",
             (job_id, video_id, timestamp, timestamp),

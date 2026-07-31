@@ -37,6 +37,7 @@ def initialize() -> None:
                 path TEXT NOT NULL,
                 source_url TEXT,
                 duration_seconds REAL,
+                analysis_seconds REAL NOT NULL DEFAULT 0,
                 status TEXT NOT NULL,
                 error_message TEXT,
                 created_at TEXT NOT NULL,
@@ -284,6 +285,8 @@ def initialize() -> None:
             con.execute("ALTER TABLE videos ADD COLUMN transcript_audio_track INTEGER NOT NULL DEFAULT 1")
         if "audio_analysis_mode" not in video_columns:
             con.execute("ALTER TABLE videos ADD COLUMN audio_analysis_mode TEXT NOT NULL DEFAULT 'single'")
+        if "analysis_seconds" not in video_columns:
+            con.execute("ALTER TABLE videos ADD COLUMN analysis_seconds REAL NOT NULL DEFAULT 0")
         export_columns = {item["name"] for item in con.execute("PRAGMA table_info(export_defaults)").fetchall()}
         for name, default in {
             "camera_x": "0.78", "camera_y": "0.03", "camera_width": "0.11", "camera_height": "0.11",
