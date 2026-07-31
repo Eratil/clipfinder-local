@@ -2,6 +2,7 @@ import json
 import os
 import re
 import shutil
+import statistics
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -261,6 +262,33 @@ def save_analysis_duration(video_id: str, started_at: float) -> None:
     elapsed = round(max(0.0, time.monotonic() - started_at), 2)
     with db.connection() as con:
         con.execute("UPDATE videos SET analysis_seconds=?, updated_at=? WHERE id=?", (elapsed, db.now(), video_id))
+
+
+def estimate_analysis_duration(video: dict) -> tuple[float | None, int]:
+    """Estimate a new run from the user's completed analyses.
+
+    The ratio of processing time to video length is more stable than a fixed
+    number of minutes.  Use a median to keep one unusually slow model download
+    or long video from skewing the prediction.
+    """
+    duration = float(video.get("duration_seconds") or 0)
+    if duration <= 0 or video.get("status") not in {"queued", "processing"}:
+        return None, 0
+    mode = str(video.get("audio_analysis_mode") or "single")
+    history = db.rows(
+        """SELECT duration_seconds, analysis_seconds FROM videos
+           WHERE status='ready' AND id != ? AND audio_analysis_mode=?
+             AND duration_seconds >= 30 AND analysis_seconds > 1
+           ORDER BY updated_at DESC""",
+        (video["id"], mode),
+    )
+    ratios = [float(item["analysis_seconds"]) / float(item["duration_seconds"]) for item in history if item["duration_seconds"]]
+    if not ratios:
+        return None, 0
+    # Recent recordings better reflect the current model cache and machine
+    # state; the median of the latest eight stays robust against outliers.
+    ratio = statistics.median(ratios[-8:])
+    return round(max(15.0, duration * ratio), 1), min(8, len(ratios))
 
 
 def approximate_word_timestamps(transcript: str, start: float, end: float) -> list[dict]:
@@ -552,6 +580,9 @@ def videos():
     for item in items:
         source = Path(item["path"])
         item["size_bytes"] = source.stat().st_size if source.is_file() else 0
+        estimate, samples = estimate_analysis_duration(item)
+        item["estimated_analysis_seconds"] = estimate
+        item["estimate_sample_count"] = samples
     return items
 
 
