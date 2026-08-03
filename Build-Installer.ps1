@@ -79,6 +79,7 @@ else {
         --add-data "app\static;app\static" `
         --add-data "assets\clipfinder.ico;assets" `
         --add-data "assets\close-pop.wav;assets" `
+        --add-data "assets\fonts;assets\fonts" `
         --collect-submodules app `
         --hidden-import webview.platforms.winforms `
         --hidden-import webview.platforms.win32 `
@@ -112,7 +113,8 @@ else {
     # places; the separate GPU add-on provides those at runtime when needed.
     $torchLibraryDirectories = @(
         (Join-Path $projectRoot 'dist\ClipFinder\_internal\torch\lib'),
-        (Join-Path $projectRoot 'dist\ClipFinder\_internal')
+        (Join-Path $projectRoot 'dist\ClipFinder\_internal'),
+        (Join-Path $projectRoot 'dist\ClipFinder\_internal\ctranslate2')
     ) | Where-Object { Test-Path -LiteralPath $_ }
     $unneededTorchFiles = @(
         '*.lib', '*.exp', '*.pdb',

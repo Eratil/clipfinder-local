@@ -37,8 +37,12 @@ class Settings(BaseSettings):
     def work_dir(self) -> Path:
         return self.clipfinder_data_dir / "work"
 
+    @property
+    def reference_dir(self) -> Path:
+        return self.clipfinder_data_dir / "reference-downloads"
+
     def ensure_directories(self) -> None:
-        for directory in (self.clipfinder_data_dir, self.incoming_dir, self.exports_dir, self.previews_dir, self.work_dir):
+        for directory in (self.clipfinder_data_dir, self.incoming_dir, self.exports_dir, self.previews_dir, self.work_dir, self.reference_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
 

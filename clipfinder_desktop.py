@@ -26,6 +26,7 @@ PORT = 8000
 APP_URL = f"http://{HOST}:{PORT}/"
 HEALTH_URL = f"{APP_URL}api/health"
 _bundled_dll_directories: list[object] = []
+LOADING_PAGE = """<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>ClipFinder</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0e121a;color:#edf2fa;font:16px Segoe UI,Arial,sans-serif}.card{display:grid;justify-items:center;gap:18px;text-align:center}.spinner{width:38px;height:38px;border:4px solid #2b374a;border-top-color:#77e3c0;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}h1{margin:0;font-size:28px}p{max-width:420px;margin:0;color:#9eacc0;line-height:1.5}</style></head><body><div class=\"card\"><div class=\"spinner\"></div><h1>Starting ClipFinder</h1><p>Preparing your local library. This can take a little longer after an update.</p></div></body></html>"""
 
 
 def bundled_asset_path(relative_path: str) -> Path:
@@ -71,9 +72,13 @@ def apply_runtime_configuration() -> None:
     if (ffmpeg_directory / "ffmpeg.exe").is_file():
         os.environ["PATH"] = str(ffmpeg_directory) + os.pathsep + os.environ.get("PATH", "")
 
-    for key in ("cuda_bin_dir", "cudnn_bin_dir"):
+    # Keep the two paths explicitly available as well as on PATH.  The CUDA
+    # preflight and CTranslate2 use ``os.add_dll_directory`` on modern Python;
+    # PATH alone is not a reliable DLL search location there.
+    for key, environment_key in (("cuda_bin_dir", "CUDA_BIN_DIR"), ("cudnn_bin_dir", "CUDNN_BIN_DIR")):
         directory = Path(str(config.get(key, "")))
         if directory.is_dir():
+            os.environ[environment_key] = str(directory)
             os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
 
 
@@ -171,7 +176,11 @@ def start_local_server() -> tuple[uvicorn.Server | None, threading.Thread | None
     thread = threading.Thread(target=server.run, name="ClipFinder local server", daemon=True)
     thread.start()
 
-    deadline = time.monotonic() + 20
+    # The first start after an update may need to migrate an existing local
+    # database.  It is safe but can take longer than the old 20-second limit.
+    # Subsequent starts are quick because migrations are recorded as complete.
+    startup_timeout_seconds = 90
+    deadline = time.monotonic() + startup_timeout_seconds
     while time.monotonic() < deadline:
         if local_server_is_ready():
             return server, thread
@@ -180,7 +189,10 @@ def start_local_server() -> tuple[uvicorn.Server | None, threading.Thread | None
         time.sleep(0.15)
 
     server.should_exit = True
-    raise RuntimeError("ClipFinder's local server did not start. Run Start-ClipFinder.cmd to see its diagnostic output.")
+    raise RuntimeError(
+        f"ClipFinder's local server did not start within {startup_timeout_seconds} seconds. "
+        "Run Start-ClipFinder.cmd to see its diagnostic output."
+    )
 
 
 def stop_server(server: uvicorn.Server | None, thread: threading.Thread | None) -> None:
@@ -202,13 +214,11 @@ def run() -> None:
         )
         return
 
-    server: uvicorn.Server | None = None
-    thread: threading.Thread | None = None
+    server_state: dict[str, uvicorn.Server | threading.Thread | None] = {"server": None, "thread": None}
     try:
-        server, thread = start_local_server()
         window = webview.create_window(
             "ClipFinder",
-            APP_URL,
+            html=LOADING_PAGE,
             width=1500,
             height=950,
             min_size=(1024, 700),
@@ -216,11 +226,22 @@ def run() -> None:
             background_color="#0e121a",
         )
         window.events.closing += confirm_application_close
-        window.events.closed += lambda *_: stop_server(server, thread)
-        webview.start(icon=str(bundled_asset_path("assets/clipfinder.ico")))
+        window.events.closed += lambda *_: stop_server(server_state["server"], server_state["thread"])
+
+        def start_backend() -> None:
+            try:
+                server, thread = start_local_server()
+                server_state["server"] = server
+                server_state["thread"] = thread
+                window.load_url(APP_URL)
+            except Exception as exc:
+                show_error("ClipFinder desktop window", str(exc))
+                window.load_html(f"<html><body style='background:#0e121a;color:#edf2fa;font:16px Segoe UI;padding:40px'><h2>ClipFinder could not start</h2><p>{exc}</p><p>Run Start-ClipFinder.cmd to see diagnostic output.</p></body></html>")
+
+        webview.start(start_backend, icon=str(bundled_asset_path("assets/clipfinder.ico")))
     except Exception as exc:
         show_error("ClipFinder desktop window", str(exc))
-        stop_server(server, thread)
+        stop_server(server_state["server"], server_state["thread"])
 
 
 if __name__ == "__main__":

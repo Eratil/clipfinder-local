@@ -11,14 +11,15 @@ from app import database as db
 from app.config import settings
 from app.services.embeddings import embed_texts
 from app.services.cuda_runtime import cuda12_runtime_error
+from app.services import diagnostics
 from app.services.discovery import assign_duplicate_groups
 from app.services.media import audio_track_count, duration_seconds, extract_audio, extract_audio_range
 from app.services.scenes import detect_boundaries
-from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_context, assess_logical_sense, assess_self_containment, enrich_tags, infer_tags, score_moment_reaction
+from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_context, assess_extended_completeness, assess_logical_sense, assess_self_containment, enrich_tags, infer_tags, score_moment_reaction
 from app.services.chat import apply_chat_reactions
 
 Progress = Callable[[int, str], None]
-_transcription_model = None
+_transcription_models: dict[tuple[str, str, str], object] = {}
 
 
 def transcription_runtime() -> tuple[str, str, str | None]:
@@ -41,25 +42,37 @@ def transcribe(
     duration: float | None = None,
     progress_start: int = 18,
     progress_end: int = 62,
+    model_name: str | None = None,
 ) -> list[dict]:
-    global _transcription_model
-    if _transcription_model is None:
+    selected_model = model_name or settings.whisper_model
+    device, compute_type, fallback_reason = transcription_runtime()
+    model_key = (selected_model, device, compute_type)
+    if model_key not in _transcription_models:
         from faster_whisper import WhisperModel
-        device, compute_type, fallback_reason = transcription_runtime()
         if fallback_reason:
             progress(progress_start, "CUDA unavailable - switching transcription to CPU")
         else:
-            progress(progress_start, f"Loading transcription model on {device.upper()}")
+            progress(progress_start, f"Loading {selected_model} transcription model on {device.upper()}")
         try:
-            _transcription_model = WhisperModel(settings.whisper_model, device=device, compute_type=compute_type)
-        except Exception:
+            _transcription_models[model_key] = WhisperModel(selected_model, device=device, compute_type=compute_type)
+        except Exception as exc:
             if device != "cuda":
                 raise
             # A driver/runtime can look valid but still fail when CTranslate2
             # creates the model. Preserve analysis by retrying on CPU.
-            progress(progress_start, "GPU model failed - retrying transcription on CPU")
-            _transcription_model = WhisperModel(settings.whisper_model, device="cpu", compute_type="int8")
-    model = _transcription_model
+            diagnostics.log_failure(
+                f"GPU transcription model failed: model={selected_model} compute_type={compute_type}",
+                exc,
+            )
+            detail = " ".join(str(exc).split())[:180]
+            progress(
+                progress_start,
+                f"GPU model failed{(': ' + detail) if detail else ''} - retrying transcription on CPU",
+            )
+            device, compute_type = "cpu", "int8"
+            model_key = (selected_model, device, compute_type)
+            _transcription_models[model_key] = WhisperModel(selected_model, device=device, compute_type=compute_type)
+    model = _transcription_models[model_key]
     parts, _info = model.transcribe(str(audio_path), vad_filter=True, word_timestamps=True)
     result: list[dict] = []
     last_progress = progress_start
@@ -79,7 +92,13 @@ def transcribe(
     return result
 
 
-def build_candidates(parts: list[dict], duration: float, boundaries: list[float] | None = None) -> list[dict]:
+def build_candidates(
+    parts: list[dict],
+    duration: float,
+    boundaries: list[float] | None = None,
+    include_context: bool = True,
+    context_window_seconds: float = 12.0,
+) -> list[dict]:
     """Pack neighbouring speech into reviewable 15–60 second candidates."""
     if not parts:
         return [{"start": start, "end": min(start + settings.segment_max_seconds, duration), "text": ""}
@@ -107,7 +126,7 @@ def build_candidates(parts: list[dict], duration: float, boundaries: list[float]
             adjusted.append(_add_context(sentence_aligned, duration))
         else:
             adjusted.append(_snap_to_scene(_add_context(sentence_aligned, duration), boundaries or [], duration))
-    return _attach_speech_context(adjusted, parts)
+    return _attach_speech_context(adjusted, parts, window_seconds=context_window_seconds) if include_context else adjusted
 
 
 def _add_context(candidate: dict, duration: float) -> dict:
@@ -340,8 +359,42 @@ def voice_led_content(tags: list[str]) -> bool:
     )
 
 
-def visual_interest_scores(video_path: Path, records: list[dict], limit: int = 120) -> dict[str, int]:
-    """Inspect only the strongest candidates for scene motion and visual change."""
+def _gameplay_crop(frame: np.ndarray, gameplay_rect: tuple[float, float, float, float] | None) -> np.ndarray:
+    """Use the calibrated gameplay area and exclude facecam/stream overlay space."""
+    if not gameplay_rect:
+        return frame
+    x, y, width, height = gameplay_rect
+    source_height, source_width = frame.shape[:2]
+    left = max(0, min(source_width - 1, round(float(x) * source_width)))
+    top = max(0, min(source_height - 1, round(float(y) * source_height)))
+    right = max(left + 1, min(source_width, round((float(x) + float(width)) * source_width)))
+    bottom = max(top + 1, min(source_height, round((float(y) + float(height)) * source_height)))
+    crop = frame[top:bottom, left:right]
+    return crop if crop.shape[0] >= 24 and crop.shape[1] >= 24 else frame
+
+
+def _coherent_motion_metrics(before: np.ndarray, after: np.ndarray, cv2) -> tuple[float, float, float]:
+    """Measure large, connected game motion rather than small overlay particles."""
+    difference = cv2.absdiff(before, after)
+    smoothed = cv2.GaussianBlur(difference, (5, 5), 0)
+    movement = float(np.mean(difference))
+    mask = (smoothed >= 18).astype(np.uint8)
+    # Fill ordinary gameplay motion into a coherent region. Independent alert
+    # emotes remain small components even when many appear on screen.
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    _count, _labels, stats, _centres = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    active_ratio = float(np.mean(mask > 0))
+    largest_ratio = float(np.max(stats[1:, cv2.CC_STAT_AREA]) / mask.size) if len(stats) > 1 else 0.0
+    return movement, active_ratio, largest_ratio
+
+
+def visual_interest_scores(
+    video_path: Path,
+    records: list[dict],
+    limit: int = 120,
+    gameplay_rect: tuple[float, float, float, float] | None = None,
+) -> dict[str, int]:
+    """Score only coherent gameplay movement, excluding overlays and facecam."""
     try:
         import cv2
     except Exception:
@@ -361,13 +414,25 @@ def visual_interest_scores(video_path: Path, records: list[dict], limit: int = 1
                 ok, frame = capture.read()
                 if not ok:
                     continue
-                gray = cv2.cvtColor(cv2.resize(frame, (160, 90)), cv2.COLOR_BGR2GRAY).astype(np.float32)
+                gameplay = _gameplay_crop(frame, gameplay_rect)
+                gray = cv2.cvtColor(cv2.resize(gameplay, (200, 112)), cv2.COLOR_BGR2GRAY).astype(np.uint8)
                 frames.append(gray)
             if len(frames) < 2:
                 continue
-            movement = float(np.mean(np.abs(frames[-1] - frames[0])))
-            texture = float(np.mean([frame.std() for frame in frames]))
-            score = max(0, min(16, round(max(0.0, movement - 8) * 0.42 + max(0.0, texture - 28) * 0.14)))
+            comparisons = [_coherent_motion_metrics(frames[index], frames[index + 1], cv2) for index in range(len(frames) - 1)]
+            movement = float(np.mean([item[0] for item in comparisons]))
+            active_ratio = float(np.mean([item[1] for item in comparisons]))
+            coherent_ratio = float(np.mean([item[2] for item in comparisons]))
+            # Alerts such as falling emotes are visually busy but are made of
+            # many tiny, disconnected components. They must not be tagged as
+            # gameplay action or earn a ranking bonus.
+            if coherent_ratio < 0.035 or (coherent_ratio < 0.065 and active_ratio < 0.14):
+                continue
+            score = max(0, min(16, round(
+                max(0.0, movement - 10) * 0.24
+                + max(0.0, active_ratio - 0.08) * 32
+                + max(0.0, coherent_ratio - 0.03) * 62
+            )))
             if score:
                 scores[record["id"]] = score
     finally:
@@ -432,7 +497,19 @@ def analyse(video_id: str, report: Progress) -> None:
     if not video:
         raise ValueError("Nie znaleziono nagrania")
     source = Path(video["path"])
+    analysis_mode = str(video.get("analysis_mode") or "default")
+    if analysis_mode not in {"fast", "default", "extended"}:
+        analysis_mode = "default"
+    fast_mode = analysis_mode == "fast"
+    extended_mode = analysis_mode == "extended"
     audio_defaults = db.row("SELECT * FROM analysis_audio_defaults WHERE id=1") or {}
+    export_defaults = db.row("SELECT game_x, game_y, game_width, game_height FROM export_defaults WHERE id=1") or {}
+    gameplay_rect = (
+        float(export_defaults.get("game_x", 0.12)),
+        float(export_defaults.get("game_y", 0.08)),
+        float(export_defaults.get("game_width", 0.76)),
+        float(export_defaults.get("game_height", 0.84)),
+    )
     # Downloaded YouTube/Twitch material normally contains one mixed audio
     # stream.  Keep it independent from the user's multi-track OBS defaults.
     mode = "single" if video.get("source_url") else audio_defaults.get("mode", "single")
@@ -451,7 +528,7 @@ def analyse(video_id: str, report: Progress) -> None:
         skipped_tracks.append(f"transcription track {requested_transcript_track}")
 
     event_tracks: list[tuple[str, int]] = []
-    if mode == "split":
+    if not fast_mode and mode == "split":
         configured_events = []
         if audio_defaults.get("use_all_sounds"):
             configured_events.append(("all-sounds event", int(audio_defaults.get("all_sounds_track", 1))))
@@ -468,22 +545,32 @@ def analyse(video_id: str, report: Progress) -> None:
 
     dedicated_microphone_track = mode == "split" and requested_transcript_track == transcript_track
     with db.connection() as con:
-        con.execute("UPDATE videos SET duration_seconds=?, status='processing', transcript_audio_track=?, audio_analysis_mode=?, updated_at=? WHERE id=?", (duration, transcript_track, mode, db.now(), video_id))
+        con.execute("UPDATE videos SET duration_seconds=?, status='processing', transcript_audio_track=?, audio_analysis_mode=?, analysis_mode=?, updated_at=? WHERE id=?", (duration, transcript_track, mode, analysis_mode, db.now(), video_id))
 
     audio_path = settings.work_dir / f"{video_id}.wav"
     if skipped_tracks:
         report(8, f"Using available audio track {transcript_track}; skipped unavailable/separate tracks")
-    report(10, "Extracting audio")
+    report(10, "Extracting microphone audio" if mode == "split" else "Extracting audio")
     extract_audio(source, audio_path, transcript_track)
-    transcript = transcribe(audio_path, report, duration)
-    report(66, "Detecting scene changes")
-    boundaries = detect_boundaries(source)
+    transcript = transcribe(audio_path, report, duration, model_name="small" if fast_mode else None)
+    boundaries: list[float] = []
+    if fast_mode:
+        report(66, "Fast mode: creating text candidates")
+    else:
+        report(66, "Detecting scene changes")
+        boundaries = detect_boundaries(source)
     report(72, "Creating clip candidates")
-    candidates = build_candidates(transcript, duration, boundaries)
-    microphone_energies = audio_energy_windows(audio_path)
+    candidates = build_candidates(
+        transcript,
+        duration,
+        boundaries,
+        include_context=not fast_mode,
+        context_window_seconds=20.0 if extended_mode else 12.0,
+    )
+    microphone_energies = audio_energy_windows(audio_path) if not fast_mode else np.asarray([], dtype=np.float32)
     # A single mixed track cannot distinguish a loud game event from the voice.
     # In that legacy mode we keep audio neutral instead of inventing a reaction.
-    microphone_expression_scores = dynamic_audio_scores(microphone_energies, candidates) if dedicated_microphone_track else [0] * len(candidates)
+    microphone_expression_scores = dynamic_audio_scores(microphone_energies, candidates) if not fast_mode and dedicated_microphone_track else [0] * len(candidates)
     event_energies: list[tuple[str, np.ndarray]] = []
     temporary_audio: list[Path] = []
     for label, track in event_tracks:
@@ -549,11 +636,23 @@ def analyse(video_id: str, report: Progress) -> None:
             moment_reaction_score=moment_reaction_score,
             moment_reaction_stage=moment_reaction_stage,
         )
-        records.append({"id": str(uuid.uuid4()), "start": candidate["start"], "end": candidate["end"], "text": candidate["text"], "words": candidate.get("words", []), "vector": vector, "keywords": keywords, "tags": tags, "quality_score": quality_score, "quality_signals": quality_signals, "logical_sense_score": logical_sense_score, "context_score": context_score, "self_contained_score": self_contained_score, "context_before": candidate.get("context_before", ""), "context_after": candidate.get("context_after", ""), "reading_likelihood": reading_likelihood, "audio_event_score": event_score, "game_reaction_score": game_reaction_score, "voice_expression_score": voice_expression_score, "moment_reaction_score": moment_reaction_score, "moment_reaction_stage": moment_reaction_stage, "duplicate_group": ""})
+        records.append({"id": str(uuid.uuid4()), "start": candidate["start"], "end": candidate["end"], "text": candidate["text"], "words": candidate.get("words", []), "vector": vector, "keywords": keywords, "tags": tags, "quality_score": quality_score, "quality_signals": quality_signals, "logical_sense_score": logical_sense_score, "context_score": context_score, "self_contained_score": self_contained_score, "extended_completeness_score": -1, "context_before": candidate.get("context_before", ""), "context_after": candidate.get("context_after", ""), "reading_likelihood": reading_likelihood, "audio_event_score": event_score, "game_reaction_score": game_reaction_score, "voice_expression_score": voice_expression_score, "moment_reaction_score": moment_reaction_score, "moment_reaction_stage": moment_reaction_stage, "duplicate_group": ""})
     assign_duplicate_groups(records)
-    report(82, "Checking visual action and text-heavy game screens")
-    visual_scores = visual_interest_scores(source, records)
-    reading_screens = visual_reading_scores(source, records)
+    visual_scores: dict[str, int] = {}
+    reading_screens: dict[str, int] = {}
+    if fast_mode:
+        report(82, "Fast mode: skipping visual and game-audio checks")
+    elif extended_mode:
+        # Extended mode spends its extra work on the thing that makes a clip
+        # useful on its own: a complete thought. Visual analysis remains the
+        # same calibrated gameplay scan used by the default workflow.
+        report(82, "Extended mode: checking complete thoughts and context")
+        visual_scores = visual_interest_scores(source, records, gameplay_rect=gameplay_rect)
+        reading_screens = visual_reading_scores(source, records)
+    else:
+        report(82, "Checking visual action and text-heavy game screens")
+        visual_scores = visual_interest_scores(source, records, gameplay_rect=gameplay_rect)
+        reading_screens = visual_reading_scores(source, records)
     for record in records:
         reading_screen = reading_screens.get(record["id"], 0)
         if reading_screen:
@@ -569,6 +668,17 @@ def analyse(video_id: str, report: Progress) -> None:
         record["vision_score"] = 0 if reading_screen else visual_scores.get(record["id"], 0)
         if record["vision_score"] >= 7:
             record["quality_signals"].append("visual action")
+        if extended_mode:
+            completeness = assess_extended_completeness(
+                record["text"], record["context_before"], record["context_after"], record["quality_signals"],
+            )
+            record["extended_completeness_score"] = completeness
+            if completeness >= 76:
+                record["quality_score"] = min(99, record["quality_score"] + 6)
+                record["quality_signals"].append("extended complete-thought verification")
+            elif completeness <= 43:
+                record["quality_score"] = max(1, record["quality_score"] - 14)
+                record["quality_signals"].append("extended incomplete-thought warning")
         record["tags"] = enrich_tags(
             record["tags"],
             logical_sense_score=record["logical_sense_score"],
@@ -585,8 +695,8 @@ def analyse(video_id: str, report: Progress) -> None:
         con.execute("DELETE FROM segments WHERE video_id = ?", (video_id,))
         for record in records:
             con.execute(
-                "INSERT INTO segments (id, video_id, start_seconds, end_seconds, transcript, keywords, tags, word_timestamps, embedding, quality_score, quality_signals, logical_sense_score, context_score, self_contained_score, context_before, context_after, reading_likelihood, audio_event_score, game_reaction_score, voice_expression_score, moment_reaction_score, moment_reaction_stage, vision_score, duplicate_group, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record["id"], video_id, record["start"], record["end"], record["text"], json.dumps(record["keywords"], ensure_ascii=False), json.dumps(record["tags"], ensure_ascii=False), json.dumps(record["words"], ensure_ascii=False), json.dumps(record["vector"]), record["quality_score"], json.dumps(record["quality_signals"]), record["logical_sense_score"], record["context_score"], record["self_contained_score"], record["context_before"], record["context_after"], record["reading_likelihood"], record["audio_event_score"], record["game_reaction_score"], record["voice_expression_score"], record["moment_reaction_score"], record["moment_reaction_stage"], record["vision_score"], record["duplicate_group"], db.now()),
+                "INSERT INTO segments (id, video_id, start_seconds, end_seconds, transcript, keywords, tags, word_timestamps, embedding, quality_score, quality_signals, logical_sense_score, context_score, self_contained_score, extended_completeness_score, context_before, context_after, reading_likelihood, audio_event_score, game_reaction_score, voice_expression_score, moment_reaction_score, moment_reaction_stage, vision_score, duplicate_group, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (record["id"], video_id, record["start"], record["end"], record["text"], json.dumps(record["keywords"], ensure_ascii=False), json.dumps(record["tags"], ensure_ascii=False), json.dumps(record["words"], ensure_ascii=False), json.dumps(record["vector"]), record["quality_score"], json.dumps(record["quality_signals"]), record["logical_sense_score"], record["context_score"], record["self_contained_score"], record["extended_completeness_score"], record["context_before"], record["context_after"], record["reading_likelihood"], record["audio_event_score"], record["game_reaction_score"], record["voice_expression_score"], record["moment_reaction_score"], record["moment_reaction_stage"], record["vision_score"], record["duplicate_group"], db.now()),
             )
         con.execute("UPDATE videos SET status='ready', updated_at=? WHERE id=?", (db.now(), video_id))
     # A chat transcript may have been imported before a reanalysis. Reapply it
@@ -595,19 +705,15 @@ def analyse(video_id: str, report: Progress) -> None:
     audio_path.unlink(missing_ok=True)
     for path in temporary_audio:
         path.unlink(missing_ok=True)
-    report(100, f"Ready: {len(candidates)} candidates")
+    mode_label = {"fast": "Fast scan", "default": "Default analysis", "extended": "Extended analysis"}[analysis_mode]
+    report(100, f"{mode_label} ready: {len(candidates)} candidates")
 
 
-def import_reference_folder(collection_id: str, folder_path: str, include_subfolders: bool, report: Progress) -> int:
-    """Transcribe local reference clips and store their text embeddings in a collection."""
-    root = Path(folder_path).expanduser().resolve()
-    if not root.is_dir():
-        raise ValueError("Reference folder does not exist or is not a folder")
-    allowed = {".mp4", ".mkv", ".mov", ".webm", ".avi"}
-    iterator = root.rglob("*") if include_subfolders else root.glob("*")
-    files = [item for item in iterator if item.is_file() and item.suffix.lower() in allowed]
+def import_reference_files(collection_id: str, files: list[Path], report: Progress, source_keys: dict[Path, str] | None = None) -> int:
+    """Transcribe selected local or downloaded reference clips into a collection."""
+    files = [item.resolve() for item in files if item.is_file()]
     if not files:
-        raise ValueError("No supported video files were found in the reference folder")
+        raise ValueError("No supported reference video files were found")
 
     imported = 0
     for index, source in enumerate(files, start=1):
@@ -632,7 +738,7 @@ def import_reference_folder(collection_id: str, folder_path: str, include_subfol
                     """INSERT INTO external_examples (id, collection_id, source_path, original_name, transcript, embedding, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(collection_id, source_path) DO UPDATE SET transcript=excluded.transcript, embedding=excluded.embedding, created_at=excluded.created_at""",
-                    (str(uuid.uuid4()), collection_id, str(source), source.name, transcript, json.dumps(embedding), db.now()),
+                    (str(uuid.uuid4()), collection_id, (source_keys or {}).get(source, str(source)), source.name, transcript, json.dumps(embedding), db.now()),
                 )
             imported += 1
         finally:
@@ -640,3 +746,13 @@ def import_reference_folder(collection_id: str, folder_path: str, include_subfol
         report(int(index / len(files) * 96), f"Imported {index}/{len(files)} references")
     report(100, f"Ready: {imported} reference clips")
     return imported
+
+
+def import_reference_folder(collection_id: str, folder_path: str, include_subfolders: bool, report: Progress) -> int:
+    """Transcribe all supported local reference clips in a folder."""
+    root = Path(folder_path).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError("Reference folder does not exist or is not a folder")
+    allowed = {".mp4", ".mkv", ".mov", ".webm", ".avi"}
+    iterator = root.rglob("*") if include_subfolders else root.glob("*")
+    return import_reference_files(collection_id, [item for item in iterator if item.is_file() and item.suffix.lower() in allowed], report)

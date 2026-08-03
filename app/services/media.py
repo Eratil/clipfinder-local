@@ -2,6 +2,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -119,7 +120,7 @@ def _ass_text(text: str) -> str:
     return text.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
 
 
-def _ass_color(color: str) -> str:
+def _ass_color(color: str, opacity: int = 100) -> str:
     if not color.startswith("#") or len(color) != 7:
         raise MediaError("Invalid caption colour")
     red, green, blue = color[1:3], color[3:5], color[5:7]
@@ -127,7 +128,42 @@ def _ass_color(color: str) -> str:
         int(red + green + blue, 16)
     except ValueError as exc:
         raise MediaError("Invalid caption colour") from exc
-    return f"&H00{blue}{green}{red}".upper()
+    opacity = max(0, min(100, int(opacity)))
+    alpha = round(255 * (1 - opacity / 100))
+    return f"&H{alpha:02X}{blue}{green}{red}".upper()
+
+
+CAPTION_PRESETS = {
+    "clean": {"size": 46, "outline": 3, "bold": 1, "italic": 0, "word_highlight": False, "scale": 100, "box": False},
+    "highlight": {"size": 52, "outline": 4, "bold": 1, "italic": 0, "word_highlight": True, "scale": 112, "box": False},
+    "minimal": {"size": 34, "outline": 2, "bold": 0, "italic": 0, "word_highlight": False, "scale": 100, "box": False},
+    "boxed_pop": {"size": 46, "outline": 5, "bold": 1, "italic": 0, "word_highlight": False, "scale": 100, "box": True},
+    "neon_gaming": {"size": 50, "outline": 2, "bold": 1, "italic": 0, "word_highlight": True, "scale": 116, "box": False},
+    "cinematic": {"size": 42, "outline": 10, "bold": 0, "italic": 0, "word_highlight": False, "scale": 100, "box": True},
+    "karaoke_punch": {"size": 54, "outline": 4, "bold": 1, "italic": 0, "word_highlight": True, "scale": 124, "box": False},
+    "minimal_center": {"size": 32, "outline": 2, "bold": 0, "italic": 0, "word_highlight": False, "scale": 100, "box": False, "alignment": 5},
+}
+
+CAPTION_FONT_FAMILIES = {
+    "Inter": "Inter",
+    "Montserrat": "Montserrat",
+    "Poppins": "Poppins",
+    "Lato": "Lato",
+    "Roboto Condensed": "Roboto Condensed",
+    "Oswald": "Oswald",
+    "Nunito": "Nunito",
+    "Noto Sans": "Noto Sans",
+    "Bungee": "Bungee",
+    "Cinzel": "Cinzel",
+    "Pixelify Sans": "Pixelify Sans",
+}
+
+
+def bundled_fonts_directory() -> Path:
+    """Resolve bundled caption fonts in source and PyInstaller builds."""
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2])) / "assets" / "fonts"
+    return Path(__file__).resolve().parents[2] / "assets" / "fonts"
 
 
 def write_caption_ass(
@@ -141,17 +177,38 @@ def write_caption_ass(
     base_color: str = "#FFFFFF",
     active_color: str = "#FFFF00",
     censor_profanity: bool = False,
+    outline_enabled: bool = True,
+    outline_color: str = "#000000",
+    glow_enabled: bool = False,
+    opacity: int = 100,
+    font_family: str = "Inter",
 ) -> None:
-    """Create an ASS subtitle track; the highlight preset follows each spoken word."""
-    sizes = {"clean": (46, 3, 1), "highlight": (52, 4, 1), "minimal": (34, 2, 0)}
-    alignments = {"top": 8, "middle": 5, "bottom": 2}
-    if preset not in sizes or position not in alignments:
+    """Create an ASS subtitle track with optional outline, glow and text opacity."""
+    # The fractional positions deliberately use a centred anchor, so their
+    # visual centre lands at 2/5 or 4/5 of the vertical frame rather than
+    # being pushed against a screen edge by ASS's top/bottom margins.
+    alignments = {"top": 8, "two_fifths": 5, "middle": 5, "four_fifths": 5, "bottom": 2}
+    position_overrides = {
+        "two_fifths": r"{\an5\pos(960,432)}",
+        "four_fifths": r"{\an5\pos(960,864)}",
+    }
+    if preset not in CAPTION_PRESETS or position not in alignments or font_family not in CAPTION_FONT_FAMILIES:
         raise MediaError("Unknown caption preset")
-    size, outline, bold = sizes[preset]
-    primary = _ass_color(base_color)
-    secondary = _ass_color(base_color)
-    highlighted = _ass_color(active_color)
-    style = f"Arial,{size},{primary},{secondary},&HAA000000,&H96000000,{bold},0,0,0,100,100,0,0,1,{outline},1,{alignments[position]},42,42,32,1"
+    if not 20 <= int(opacity) <= 100:
+        raise MediaError("Caption opacity must be between 20 and 100")
+    config = CAPTION_PRESETS[preset]
+    primary = _ass_color(base_color, opacity)
+    secondary = _ass_color(base_color, opacity)
+    highlighted = _ass_color(active_color, opacity)
+    outline = int(config["outline"]) if outline_enabled else 0
+    border_style = 3 if config.get("box") and outline_enabled else 1
+    shadow = 3 if glow_enabled else 1
+    glow_color = active_color if config.get("word_highlight") else base_color
+    back_color = _ass_color(glow_color, max(20, min(55, int(opacity * 0.45)))) if glow_enabled else "&H96000000"
+    # Position is controlled per clip, so it must win over a style's old
+    # preferred alignment (for example Minimal Center).
+    alignment = alignments[position]
+    style = f"{CAPTION_FONT_FAMILIES[font_family]},{config['size']},{primary},{secondary},{_ass_color(outline_color, opacity)},{back_color},{config['bold']},{config['italic']},0,0,100,100,0,0,{border_style},{outline},{shadow},{alignment},42,42,32,1"
     words = _caption_words(transcript, word_timestamps or [], clip_start, duration)
     sentences: list[list[dict]] = []
     sentence: list[dict] = []
@@ -180,18 +237,18 @@ def write_caption_ass(
     for phrase in phrases:
         phrase_start = max(0, phrase[0]["start"])
         phrase_end = min(duration, max(phrase[-1]["end"], phrase_start + 0.2))
-        if preset == "highlight":
+        if config["word_highlight"]:
             for word_index, word in enumerate(phrase):
                 next_start = phrase[word_index + 1]["start"] if word_index + 1 < len(phrase) else phrase_end
-                text = " ".join(
-                    (r"{\c" + highlighted + r"\fscx112\fscy112}" + _ass_text(display_word(item["word"])) + r"{\r}")
+                text = position_overrides.get(position, "") + " ".join(
+                    (r"{\c" + highlighted + r"\fscx" + str(config["scale"]) + r"\fscy" + str(config["scale"]) + r"}" + _ass_text(display_word(item["word"])) + r"{\r}")
                     if index == word_index else _ass_text(display_word(item["word"]))
                     for index, item in enumerate(phrase)
                 )
                 lines.append(f"Dialogue: 0,{_ass_time(max(phrase_start, word['start']))},{_ass_time(max(next_start, word['end']))},Default,,0,0,0,,{text}")
             continue
         else:
-            text = " ".join(_ass_text(display_word(word["word"])) for word in phrase)
+            text = position_overrides.get(position, "") + " ".join(_ass_text(display_word(word["word"])) for word in phrase)
         lines.append(f"Dialogue: 0,{_ass_time(phrase_start)},{_ass_time(phrase_end)},Default,,0,0,0,,{text}")
     header = (
         "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n"
@@ -212,7 +269,10 @@ def _crop_filter(rect: tuple[float, float, float, float]) -> str:
     height = min(height, 1.0 - y)
     if width < 0.02 or height < 0.02:
         raise MediaError("Saved camera or gameplay area is too small. Calibrate the layout again.")
-    return f"crop=trunc(iw*{width:.6f})*2:trunc(ih*{height:.6f})*2:trunc(iw*{x:.6f}/2)*2:trunc(ih*{y:.6f}/2)*2"
+    # FFmpeg crop dimensions must be even for the output encoder. Divide by
+    # two *before* truncating, then multiply back; doing it in the opposite
+    # order doubled the crop and could exceed the source frame dimensions.
+    return f"crop=trunc(iw*{width:.6f}/2)*2:trunc(ih*{height:.6f}/2)*2:trunc(iw*{x:.6f}/2)*2:trunc(ih*{y:.6f}/2)*2"
 
 
 def _portrait_filter(layout: str, camera_rect: tuple[float, float, float, float], game_rect: tuple[float, float, float, float]) -> str:
@@ -307,7 +367,11 @@ def export_clip(source: Path, target: Path, start: float, end: float, captions_p
         raise MediaError("Invalid audio track")
     command = ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(source)]
     selected_audio = f"0:a:{audio_track - 1}"
-    caption_filter = f"ass='{_ffmpeg_filter_path(captions_path)}'" if captions_path else ""
+    caption_filter = ""
+    if captions_path:
+        fonts_dir = bundled_fonts_directory()
+        font_option = f":fontsdir='{_ffmpeg_filter_path(fonts_dir)}'" if fonts_dir.is_dir() else ""
+        caption_filter = f"ass='{_ffmpeg_filter_path(captions_path)}'{font_option}"
     duration = end - start
     words = _caption_words(transcript, word_timestamps or [], start, duration)
     pause_ranges = pause_ranges or [(0.0, duration)]

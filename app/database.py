@@ -38,6 +38,7 @@ def initialize() -> None:
                 source_url TEXT,
                 duration_seconds REAL,
                 analysis_seconds REAL NOT NULL DEFAULT 0,
+                analysis_mode TEXT NOT NULL DEFAULT 'default',
                 status TEXT NOT NULL,
                 error_message TEXT,
                 created_at TEXT NOT NULL,
@@ -81,6 +82,9 @@ def initialize() -> None:
                 logical_sense_score INTEGER NOT NULL DEFAULT -1,
                 context_score INTEGER NOT NULL DEFAULT -1,
                 self_contained_score INTEGER NOT NULL DEFAULT -1,
+                extended_completeness_score INTEGER NOT NULL DEFAULT -1,
+                chat_question_match_score INTEGER NOT NULL DEFAULT 0,
+                chat_question_text TEXT NOT NULL DEFAULT '',
                 context_before TEXT NOT NULL DEFAULT '',
                 context_after TEXT NOT NULL DEFAULT '',
                 censor_profanity INTEGER NOT NULL DEFAULT 0,
@@ -143,6 +147,16 @@ def initialize() -> None:
                 updated_at TEXT NOT NULL,
                 UNIQUE(collection_id, folder_path)
             );
+            CREATE TABLE IF NOT EXISTS reference_url_sources (
+                id TEXT PRIMARY KEY,
+                collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+                source_url TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                original_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(collection_id, source_url)
+            );
             CREATE TABLE IF NOT EXISTS saved_prompts (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
@@ -159,6 +173,11 @@ def initialize() -> None:
                 captions_preset TEXT NOT NULL DEFAULT 'highlight',
                 base_color TEXT NOT NULL DEFAULT '#FFFFFF',
                 active_color TEXT NOT NULL DEFAULT '#FFFF00',
+                font_family TEXT NOT NULL DEFAULT 'Inter',
+                outline_enabled INTEGER NOT NULL DEFAULT 1,
+                outline_color TEXT NOT NULL DEFAULT '#000000',
+                glow_enabled INTEGER NOT NULL DEFAULT 0,
+                opacity INTEGER NOT NULL DEFAULT 100,
                 updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS caption_favorites (
@@ -167,6 +186,11 @@ def initialize() -> None:
                 captions_preset TEXT NOT NULL,
                 base_color TEXT NOT NULL,
                 active_color TEXT NOT NULL,
+                font_family TEXT NOT NULL DEFAULT 'Inter',
+                outline_enabled INTEGER NOT NULL DEFAULT 1,
+                outline_color TEXT NOT NULL DEFAULT '#000000',
+                glow_enabled INTEGER NOT NULL DEFAULT 0,
+                opacity INTEGER NOT NULL DEFAULT 100,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS export_defaults (
@@ -211,8 +235,30 @@ def initialize() -> None:
             CREATE TABLE IF NOT EXISTS discovery_defaults (
                 id INTEGER PRIMARY KEY CHECK(id=1),
                 active_profile TEXT NOT NULL DEFAULT 'general',
+                reference_collection_id TEXT NOT NULL DEFAULT '',
+                pattern_set_id TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS discovery_pattern_sets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                profile TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(profile, name)
+            );
+            CREATE TABLE IF NOT EXISTS discovery_pattern_examples (
+                id TEXT PRIMARY KEY,
+                pattern_set_id TEXT NOT NULL REFERENCES discovery_pattern_sets(id) ON DELETE CASCADE,
+                duration_seconds REAL NOT NULL,
+                tags TEXT NOT NULL,
+                quality_score INTEGER NOT NULL,
+                logical_sense_score INTEGER NOT NULL,
+                reading_likelihood REAL NOT NULL,
+                embedding TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_discovery_pattern_examples_set ON discovery_pattern_examples(pattern_set_id, created_at DESC);
             CREATE TABLE IF NOT EXISTS preference_feedback (
                 id TEXT PRIMARY KEY,
                 segment_id TEXT NOT NULL,
@@ -234,6 +280,10 @@ def initialize() -> None:
                 PRIMARY KEY(segment_id, tag)
             );
             CREATE INDEX IF NOT EXISTS idx_tag_feedback_verdict ON tag_feedback(verdict, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS maintenance_tasks (
+                name TEXT PRIMARY KEY,
+                completed_at TEXT NOT NULL
+            );
             """
         )
         columns = {item["name"] for item in con.execute("PRAGMA table_info(segments)").fetchall()}
@@ -285,6 +335,12 @@ def initialize() -> None:
             con.execute("ALTER TABLE segments ADD COLUMN context_score INTEGER NOT NULL DEFAULT -1")
         if "self_contained_score" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN self_contained_score INTEGER NOT NULL DEFAULT -1")
+        if "extended_completeness_score" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN extended_completeness_score INTEGER NOT NULL DEFAULT -1")
+        if "chat_question_match_score" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN chat_question_match_score INTEGER NOT NULL DEFAULT 0")
+        if "chat_question_text" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN chat_question_text TEXT NOT NULL DEFAULT ''")
         if "context_before" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN context_before TEXT NOT NULL DEFAULT ''")
         if "context_after" not in columns:
@@ -298,6 +354,24 @@ def initialize() -> None:
             con.execute("ALTER TABLE videos ADD COLUMN audio_analysis_mode TEXT NOT NULL DEFAULT 'single'")
         if "analysis_seconds" not in video_columns:
             con.execute("ALTER TABLE videos ADD COLUMN analysis_seconds REAL NOT NULL DEFAULT 0")
+        if "analysis_mode" not in video_columns:
+            con.execute("ALTER TABLE videos ADD COLUMN analysis_mode TEXT NOT NULL DEFAULT 'default'")
+        discovery_columns = {item["name"] for item in con.execute("PRAGMA table_info(discovery_defaults)").fetchall()}
+        if "reference_collection_id" not in discovery_columns:
+            con.execute("ALTER TABLE discovery_defaults ADD COLUMN reference_collection_id TEXT NOT NULL DEFAULT ''")
+        if "pattern_set_id" not in discovery_columns:
+            con.execute("ALTER TABLE discovery_defaults ADD COLUMN pattern_set_id TEXT NOT NULL DEFAULT ''")
+        for table in ("caption_defaults", "caption_favorites"):
+            caption_columns = {item["name"] for item in con.execute(f"PRAGMA table_info({table})").fetchall()}
+            for name, declaration in {
+                "font_family": "TEXT NOT NULL DEFAULT 'Inter'",
+                "outline_enabled": "INTEGER NOT NULL DEFAULT 1",
+                "outline_color": "TEXT NOT NULL DEFAULT '#000000'",
+                "glow_enabled": "INTEGER NOT NULL DEFAULT 0",
+                "opacity": "INTEGER NOT NULL DEFAULT 100",
+            }.items():
+                if name not in caption_columns:
+                    con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
         export_columns = {item["name"] for item in con.execute("PRAGMA table_info(export_defaults)").fetchall()}
         for name, default in {
             "camera_x": "0.78", "camera_y": "0.03", "camera_width": "0.11", "camera_height": "0.11",
@@ -306,7 +380,7 @@ def initialize() -> None:
             if name not in export_columns:
                 con.execute(f"ALTER TABLE export_defaults ADD COLUMN {name} REAL NOT NULL DEFAULT {default}")
         con.execute(
-            "INSERT OR IGNORE INTO caption_defaults (id, captions_preset, base_color, active_color, updated_at) VALUES (1, 'highlight', '#FFFFFF', '#FFFF00', ?)",
+            "INSERT OR IGNORE INTO caption_defaults (id, captions_preset, base_color, active_color, font_family, outline_enabled, outline_color, glow_enabled, opacity, updated_at) VALUES (1, 'highlight', '#FFFFFF', '#FFFF00', 'Inter', 1, '#000000', 0, 100, ?)",
             (now(),),
         )
         con.execute(
@@ -334,6 +408,20 @@ def rows(query: str, parameters: tuple = ()) -> list[dict]:
 def row(query: str, parameters: tuple = ()) -> dict | None:
     result = rows(query, parameters)
     return result[0] if result else None
+
+
+def maintenance_task_completed(name: str) -> bool:
+    """Return whether a potentially expensive one-off data migration has run."""
+    return row("SELECT name FROM maintenance_tasks WHERE name=?", (name,)) is not None
+
+
+def mark_maintenance_task_completed(name: str) -> None:
+    """Mark a completed data migration only after its work has succeeded."""
+    with connection() as con:
+        con.execute(
+            "INSERT OR REPLACE INTO maintenance_tasks (name, completed_at) VALUES (?, ?)",
+            (name, now()),
+        )
 
 
 def _tag_feedback_by_segment(segment_ids: list[str]) -> dict[str, dict[str, str]]:

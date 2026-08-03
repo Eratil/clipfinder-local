@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -20,7 +21,7 @@ except ImportError:
     pass
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import database as db
@@ -31,6 +32,7 @@ from app.models import (
     AnalysisAudioDefaultsUpdate,
     ChatDelayUpdate,
     DiscoveryDefaultsUpdate,
+    DiscoveryPatternSetCreate,
     CollectionCreate,
     DescriptionSearch,
     ExampleCreate,
@@ -40,6 +42,9 @@ from app.models import (
     RatingUpdate,
     RejectionReasonCreate,
     ReferenceFolderImport,
+    ReferenceUrlImport,
+    RemotePreviewCreate,
+    RemotePreviewSave,
     RemoteVideoCreate,
     SavedPromptCreate,
     SegmentTimingUpdate,
@@ -60,12 +65,13 @@ from app.services.discovery import (
     score_candidates,
     suppress_duplicate_groups,
 )
-from app.services.media import MediaError, audio_track_count, export_audio_preview, export_clip, pause_trim_ranges, remap_words_for_kept_ranges, write_caption_ass
-from app.services.pipeline import analyse, import_reference_folder, transcribe_clip_range
-from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_context, assess_logical_sense, assess_self_containment, build_reference_prompt, detailed_lexical_tags, enrich_tags, infer_tags, score_moment_reaction
+from app.services.media import MediaError, audio_track_count, export_audio_preview, export_clip, pause_trim_ranges, remap_words_for_kept_ranges, run as run_media_command, write_caption_ass
+from app.services.pipeline import analyse, import_reference_files, import_reference_folder, transcribe, transcribe_clip_range
+from app.services.tagging import CHAT_QUESTION_ANSWER_TAG, CHAT_QUESTION_TAG, GAME_REACTION_TAG, assess_clip_quality, assess_context, assess_logical_sense, assess_self_containment, build_reference_prompt, detailed_lexical_tags, enrich_tags, infer_tags, score_moment_reaction
 from app.services.updater import automatic_updates_available, install_downloaded_update, job_status as update_download_status, start_download as start_update_download
 from app.services.updates import update_status
 from app.services.runtime_status import runtime_status
+from app.services import diagnostics
 from app.version import __version__
 
 
@@ -195,7 +201,13 @@ def backfill_detailed_tags() -> None:
     )
     updates = []
     for item in items:
-        tags = list(dict.fromkeys(json.loads(item.get("tags") or "[]") + detailed_lexical_tags(item["transcript"])))
+        # Question labels are now evidence-based: only chat.py may restore
+        # them after matching a viewer question to a spoken answer.
+        previous = [
+            tag for tag in json.loads(item.get("tags") or "[]")
+            if tag not in {CHAT_QUESTION_TAG, "forma: pytanie", CHAT_QUESTION_ANSWER_TAG}
+        ]
+        tags = list(dict.fromkeys(previous + detailed_lexical_tags(item["transcript"])))
         tags = enrich_tags(
             tags,
             logical_sense_score=int(item.get("logical_sense_score") or -1),
@@ -266,30 +278,69 @@ def backfill_preference_feedback() -> None:
             )
 
 
+def run_startup_maintenance() -> None:
+    """Run historic data migrations once instead of delaying every app launch.
+
+    New recordings, chat imports and review actions already update their own
+    data at the point of change.  These tasks only exist to bring databases
+    created by older ClipFinder versions up to the current feature set.
+    """
+    tasks = (
+        ("segment-quality-v1", backfill_segment_quality),
+        ("reading-filter-v3", backfill_reading_filter),
+        ("context-signals-v1", backfill_context_signals),
+        ("segment-context-v1", backfill_segment_context),
+        ("legacy-game-audio-v1", remove_legacy_game_audio_bonus),
+        ("moment-reactions-v1", backfill_moment_reactions),
+        ("duplicate-groups-v1", backfill_duplicate_groups),
+        ("detailed-tags-v2", backfill_detailed_tags),
+        ("preference-feedback-v1", backfill_preference_feedback),
+    )
+    tasks = (*tasks, ("chat-reactions-v1", lambda: [apply_chat_reactions(item["video_id"]) for item in db.rows("SELECT video_id FROM chat_settings")]))
+    for task_name, callback in tasks:
+        if db.maintenance_task_completed(task_name):
+            continue
+        started = time.perf_counter()
+        diagnostics.logger().info("Startup maintenance started: %s", task_name)
+        callback()
+        db.mark_maintenance_task_completed(task_name)
+        diagnostics.logger().info(
+            "Startup maintenance completed: %s in %.2fs",
+            task_name,
+            time.perf_counter() - started,
+        )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    diagnostics.configure()
+    diagnostics.logger().info("Backend starting: version=%s pid=%s", __version__, os.getpid())
     db.initialize()
-    backfill_segment_quality()
-    backfill_reading_filter()
-    backfill_context_signals()
-    backfill_segment_context()
-    remove_legacy_game_audio_bonus()
-    backfill_moment_reactions()
-    backfill_duplicate_groups()
-    backfill_detailed_tags()
-    backfill_preference_feedback()
-    for item in db.rows("SELECT video_id FROM chat_settings"):
-        apply_chat_reactions(item["video_id"])
+    run_startup_maintenance()
+    current_runtime = runtime_status()
+    diagnostics.logger().info(
+        "Runtime detected: headline=%s transcription=%s similarity=%s gpu=%s",
+        current_runtime.get("headline"),
+        current_runtime.get("transcription", {}).get("label"),
+        current_runtime.get("embeddings", {}).get("label"),
+        current_runtime.get("gpu", {}).get("name") if current_runtime.get("gpu") else "not detected",
+    )
     yield
+    diagnostics.logger().info("Backend stopped")
 
 
 app = FastAPI(title="ClipFinder Local", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+app.mount("/assets", StaticFiles(directory=Path(__file__).parent.parent / "assets"), name="assets")
 
 
 @app.middleware("http")
 async def prevent_frontend_cache(request: Request, call_next):
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        diagnostics.log_failure(f"Unhandled API error: {request.method} {request.url.path}", exc)
+        raise
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-store, max-age=0"
     return response
@@ -324,13 +375,14 @@ def estimate_analysis_duration(video: dict) -> tuple[float | None, int]:
     duration = float(video.get("duration_seconds") or 0)
     if duration <= 0 or video.get("status") not in {"queued", "processing"}:
         return None, 0
-    mode = str(video.get("audio_analysis_mode") or "single")
+    audio_mode = str(video.get("audio_analysis_mode") or "single")
+    analysis_mode = str(video.get("analysis_mode") or "default")
     history = db.rows(
         """SELECT duration_seconds, analysis_seconds FROM videos
-           WHERE status='ready' AND id != ? AND audio_analysis_mode=?
+           WHERE status='ready' AND id != ? AND audio_analysis_mode=? AND analysis_mode=?
              AND duration_seconds >= 30 AND analysis_seconds > 1
            ORDER BY updated_at DESC""",
-        (video["id"], mode),
+        (video["id"], audio_mode, analysis_mode),
     )
     ratios = [float(item["analysis_seconds"]) / float(item["duration_seconds"]) for item in history if item["duration_seconds"]]
     if not ratios:
@@ -359,12 +411,15 @@ def approximate_word_timestamps(transcript: str, start: float, end: float) -> li
 def run_analysis(video_id: str, job_id: str) -> None:
     started_at = time.monotonic()
     try:
+        diagnostics.logger().info("Analysis started: video_id=%s job_id=%s", video_id, job_id)
         update_job(job_id, 1, "Waiting for worker", "running")
         analyse(video_id, lambda progress, message: update_job(job_id, progress, message))
         save_analysis_duration(video_id, started_at)
         update_job(job_id, 100, "Analysis completed", "completed")
+        diagnostics.logger().info("Analysis completed: video_id=%s job_id=%s elapsed_seconds=%.2f", video_id, job_id, time.monotonic() - started_at)
     except Exception as exc:
         elapsed = round(max(0.0, time.monotonic() - started_at), 2)
+        diagnostics.log_failure(f"Analysis failed: video_id={video_id} job_id={job_id} elapsed_seconds={elapsed:.2f}", exc)
         with db.connection() as con:
             con.execute("UPDATE videos SET status='failed', error_message=?, analysis_seconds=?, updated_at=? WHERE id=?", (str(exc), elapsed, db.now(), video_id))
         update_job(job_id, 100, str(exc), "failed")
@@ -380,6 +435,17 @@ def _supported_remote_url(value: str) -> str:
     return url
 
 
+def _supported_reference_url(value: str) -> str:
+    """Validate a public, single short/video used only as a local example."""
+    url = value.strip()
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    supported = ("youtube.com", "youtu.be", "tiktok.com")
+    if parsed.scheme not in {"http", "https"} or not host or not any(host == domain or host.endswith("." + domain) for domain in supported):
+        raise HTTPException(400, "Use a public YouTube Short/video or TikTok link.")
+    return url
+
+
 def _downloaded_video_path(video_id: str) -> Path:
     candidates = [
         path for path in settings.incoming_dir.glob(f"{video_id}.*")
@@ -387,6 +453,16 @@ def _downloaded_video_path(video_id: str) -> Path:
     ]
     if not candidates:
         raise RuntimeError("The download finished without a usable video file.")
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _downloaded_reference_path(import_id: str) -> Path:
+    candidates = [
+        path for path in settings.reference_dir.glob(f"{import_id}.*")
+        if path.suffix.lower() in {".mp4", ".mkv", ".mov", ".webm", ".avi"} and path.is_file()
+    ]
+    if not candidates:
+        raise RuntimeError("The reference download finished without a usable video file.")
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
@@ -424,6 +500,7 @@ def run_remote_import(video_id: str, job_id: str) -> None:
     # later transcription stage.
     analysis_started_at = time.monotonic()
     try:
+        diagnostics.logger().info("Remote import started: video_id=%s job_id=%s", video_id, job_id)
         from yt_dlp import YoutubeDL
 
         _configure_remote_download_certificates()
@@ -467,6 +544,7 @@ def run_remote_import(video_id: str, job_id: str) -> None:
         analyse(video_id, lambda progress, message: update_job(job_id, 20 + int(progress * 0.8), message))
         save_analysis_duration(video_id, analysis_started_at)
         update_job(job_id, 100, "Analysis completed", "completed")
+        diagnostics.logger().info("Remote import and analysis completed: video_id=%s job_id=%s elapsed_seconds=%.2f", video_id, job_id, time.monotonic() - analysis_started_at)
     except ModuleNotFoundError as exc:
         detail = "Remote import requires yt-dlp. Run: python -m pip install -r requirements.txt" if exc.name == "yt_dlp" else str(exc)
         with db.connection() as con:
@@ -474,6 +552,7 @@ def run_remote_import(video_id: str, job_id: str) -> None:
         update_job(job_id, 100, detail, "failed")
     except Exception as exc:
         detail = str(exc)
+        diagnostics.log_failure(f"Remote import failed: video_id={video_id} job_id={job_id}", exc)
         if "CERTIFICATE_VERIFY_FAILED" in detail or "certificate verify failed" in detail.lower():
             detail = (
                 "HTTPS certificate verification failed while contacting YouTube/Twitch. "
@@ -512,6 +591,196 @@ def run_reference_import(collection_id: str, import_id: str, folder_path: str, i
         update_reference_import(import_id, 100, str(exc), "failed")
 
 
+def run_reference_url_import(collection_id: str, import_id: str, source_url: str) -> None:
+    """Download one public short/video, then index it as a collection example."""
+    try:
+        from yt_dlp import YoutubeDL
+
+        _configure_remote_download_certificates()
+        update_reference_import(import_id, 1, "Preparing reference download", "running")
+
+        def report_download(status: dict) -> None:
+            if status.get("status") == "downloading":
+                total = status.get("total_bytes") or status.get("total_bytes_estimate") or 0
+                current = status.get("downloaded_bytes") or 0
+                percent = int(current / total * 45) if total else 5
+                update_reference_import(import_id, max(2, min(45, percent)), "Downloading reference clip")
+            elif status.get("status") == "finished":
+                update_reference_import(import_id, 46, "Download complete. Transcribing reference clip")
+
+        options = {
+            "format": "bv*+ba/b",
+            "merge_output_format": "mp4",
+            "outtmpl": str(settings.reference_dir / f"{import_id}.%(ext)s"),
+            "noplaylist": True,
+            "progress_hooks": [report_download],
+            "retries": 3,
+            "fragment_retries": 3,
+            "extractor_retries": 3,
+            "quiet": True,
+            "no_warnings": True,
+        }
+        with YoutubeDL(options) as downloader:
+            info = downloader.extract_info(source_url, download=True)
+        source_path = _downloaded_reference_path(import_id)
+        title = str(info.get("title") or source_path.stem).strip()
+        count = import_reference_files(
+            collection_id,
+            [source_path],
+            lambda progress, message: update_reference_import(import_id, 46 + int(progress * 0.54), message),
+            {source_path.resolve(): source_url},
+        )
+        with db.connection() as con:
+            con.execute(
+                """INSERT INTO reference_url_sources (id, collection_id, source_url, source_path, original_name, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(collection_id, source_url) DO UPDATE SET source_path=excluded.source_path, original_name=excluded.original_name, updated_at=excluded.updated_at""",
+                (str(uuid.uuid4()), collection_id, source_url, str(source_path), title, db.now(), db.now()),
+            )
+        update_reference_import(import_id, 100, f"Imported {count} reference clip from link", "completed", count)
+    except Exception as exc:
+        detail = str(exc)
+        if "CERTIFICATE_VERIFY_FAILED" in detail or "certificate verify failed" in detail.lower():
+            detail = "HTTPS certificate verification failed while downloading the reference link. Update/reinstall ClipFinder, then try again."
+        update_reference_import(import_id, 100, detail, "failed")
+
+
+# Remote previews deliberately stay out of SQLite: they are a transient way to
+# review one public Short/video. The source media is never stored in a
+# collection, incoming recording or export directory.
+_remote_preview_jobs: dict[str, dict] = {}
+_remote_preview_fingerprints: dict[str, dict] = {}
+_REMOTE_PREVIEW_MAX_SECONDS = 600
+
+
+def _update_remote_preview(job_id: str, *, state: str | None = None, progress: int | None = None,
+                           message: str | None = None, result: dict | None = None) -> None:
+    job = _remote_preview_jobs.get(job_id)
+    if not job:
+        return
+    if state is not None:
+        job["state"] = state
+    if progress is not None:
+        job["progress"] = max(0, min(100, int(progress)))
+    if message is not None:
+        job["message"] = message
+    if result is not None:
+        job["result"] = result
+
+
+def _remote_stream_info(source_url: str, selector: str) -> tuple[dict, str]:
+    from yt_dlp import YoutubeDL
+
+    options = {
+        "format": selector,
+        "noplaylist": True,
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 2,
+        "extractor_retries": 2,
+    }
+    with YoutubeDL(options) as downloader:
+        info = downloader.extract_info(source_url, download=False)
+    stream_url = str(info.get("url") or "")
+    if not stream_url:
+        raise RuntimeError("The service did not provide a usable temporary stream for this link.")
+    return info, stream_url
+
+
+def _preview_ffmpeg_headers(info: dict) -> list[str]:
+    headers = info.get("http_headers") or {}
+    useful = [(str(key), str(value)) for key, value in headers.items()
+              if str(key).lower() in {"user-agent", "referer", "origin"} and value]
+    if not useful:
+        return []
+    return ["-headers", "".join(f"{key}: {value}\\r\\n" for key, value in useful)]
+
+
+def run_remote_preview(job_id: str, source_url: str) -> None:
+    work_dir = settings.work_dir / f"remote-preview-{job_id}"
+    audio_path = work_dir / "audio.wav"
+    frame_path = work_dir / "frame.jpg"
+    try:
+        from yt_dlp import YoutubeDL  # Clear error if the optional dependency is absent.
+        del YoutubeDL
+        _configure_remote_download_certificates()
+        work_dir.mkdir(parents=True, exist_ok=True)
+        _update_remote_preview(job_id, state="running", progress=4, message="Reading public link metadata")
+        info, audio_url = _remote_stream_info(source_url, "bestaudio/best")
+        duration = float(info.get("duration") or 0)
+        if duration <= 0:
+            raise RuntimeError("Could not determine the video duration. Try a public, single Short/video link.")
+        if duration > _REMOTE_PREVIEW_MAX_SECONDS:
+            raise RuntimeError("This preview accepts one Short/video up to 10 minutes. Use normal recording analysis for longer material.")
+        title = str(info.get("title") or "Untitled short/video").strip()
+
+        _update_remote_preview(job_id, progress=12, message="Streaming temporary audio for analysis")
+        run_media_command([
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            *_preview_ffmpeg_headers(info), "-i", audio_url, "-t", f"{duration:.3f}",
+            "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(audio_path),
+        ])
+
+        _update_remote_preview(job_id, progress=24, message="Capturing one temporary preview frame")
+        frame_data_url = ""
+        try:
+            frame_info, frame_url = _remote_stream_info(source_url, "bestvideo[height<=480]/best")
+            run_media_command([
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                *_preview_ffmpeg_headers(frame_info), "-ss", "1", "-i", frame_url,
+                "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "6", str(frame_path),
+            ])
+            if frame_path.is_file() and frame_path.stat().st_size <= 900_000:
+                frame_data_url = "data:image/jpeg;base64," + base64.b64encode(frame_path.read_bytes()).decode("ascii")
+        except Exception as frame_error:
+            diagnostics.logger().info("Remote preview frame skipped: %s", frame_error)
+
+        def report(progress: int, message: str) -> None:
+            _update_remote_preview(job_id, progress=25 + int(progress * 0.6), message=message)
+
+        _update_remote_preview(job_id, progress=28, message="Transcribing temporary audio")
+        parts = transcribe(audio_path, report, duration=duration, progress_start=5, progress_end=95)
+        transcript = " ".join(str(part.get("text") or "").strip() for part in parts).strip()
+        words = [word for part in parts for word in (part.get("words") or [])]
+        _update_remote_preview(job_id, progress=85, message="Scoring transcript")
+        embedding = embed_texts([transcript or "no speech detected"])[0]
+        tags = infer_tags(transcript, embedding)
+        quality, quality_signals, reading_likelihood = assess_clip_quality(transcript, words, 0, duration, tags)
+        logical_sense = assess_logical_sense(transcript)
+        _remote_preview_fingerprints[job_id] = {
+            "duration_seconds": duration,
+            "tags": tags,
+            "quality_score": quality,
+            "logical_sense_score": logical_sense,
+            "reading_likelihood": reading_likelihood,
+            "embedding": embedding,
+        }
+
+        result = {
+            "title": title,
+            "source_url": source_url,
+            "duration_seconds": round(duration, 2),
+            "transcript": transcript,
+            "tags": tags,
+            "quality_score": quality,
+            "quality_signals": quality_signals,
+            "logical_sense_score": logical_sense,
+            "reading_likelihood": reading_likelihood,
+            "frame_data_url": frame_data_url,
+            "retention": "Temporary audio and frame were deleted after analysis. The original video was not saved.",
+        }
+        _update_remote_preview(job_id, state="completed", progress=100, message="Preview analysis completed", result=result)
+    except Exception as exc:
+        detail = str(exc)
+        if "CERTIFICATE_VERIFY_FAILED" in detail or "certificate verify failed" in detail.lower():
+            detail = "HTTPS certificate verification failed. Update/reinstall ClipFinder, then try again."
+        diagnostics.log_failure(f"Remote preview failed: url={source_url}", exc)
+        _update_remote_preview(job_id, state="failed", progress=100, message=detail)
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
 @app.get("/", include_in_schema=False)
 def home():
     return FileResponse(Path(__file__).parent / "static" / "index.html")
@@ -522,9 +791,61 @@ def health():
     return {"status": "ok", "data_dir": str(settings.clipfinder_data_dir), "version": __version__}
 
 
+@app.post("/api/remote-preview", status_code=202)
+def create_remote_preview(body: RemotePreviewCreate, background_tasks: BackgroundTasks):
+    source_url = _supported_reference_url(body.source_url)
+    job_id = str(uuid.uuid4())
+    _remote_preview_jobs[job_id] = {
+        "id": job_id, "state": "queued", "progress": 0, "message": "Queued", "result": None,
+    }
+    background_tasks.add_task(run_remote_preview, job_id, source_url)
+    return {"job_id": job_id}
+
+
+@app.get("/api/remote-preview/{job_id}")
+def get_remote_preview(job_id: str):
+    job = _remote_preview_jobs.get(job_id)
+    if not job:
+        not_found("Preview job not found. Preview results are available only during this app session.")
+    return job
+
+
+@app.post("/api/remote-preview/{job_id}/save-pattern", status_code=201)
+def save_remote_preview_pattern(job_id: str, body: RemotePreviewSave):
+    job = _remote_preview_jobs.get(job_id)
+    fingerprint = _remote_preview_fingerprints.get(job_id)
+    if not job or job.get("state") != "completed" or not fingerprint:
+        raise HTTPException(400, "Complete the temporary preview before saving its analysis pattern.")
+    pattern_set = db.row("SELECT id, name FROM discovery_pattern_sets WHERE id=?", (body.pattern_set_id,))
+    if not pattern_set:
+        not_found("Discovery pattern set not found")
+    with db.connection() as con:
+        con.execute(
+            """INSERT INTO discovery_pattern_examples
+               (id, pattern_set_id, duration_seconds, tags, quality_score, logical_sense_score, reading_likelihood, embedding, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(uuid.uuid4()), pattern_set["id"], float(fingerprint["duration_seconds"]),
+                json.dumps(fingerprint["tags"], ensure_ascii=False), int(fingerprint["quality_score"]),
+                int(fingerprint["logical_sense_score"]), float(fingerprint["reading_likelihood"]),
+                json.dumps(fingerprint["embedding"]), db.now(),
+            ),
+        )
+    return {"ok": True, "pattern_set_id": pattern_set["id"], "pattern_set_name": pattern_set["name"]}
+
+
 @app.get("/api/runtime-status")
 def get_runtime_status():
     return {**runtime_status(), "version": __version__}
+
+
+@app.get("/api/diagnostics/report")
+def diagnostic_report():
+    """Download a support report without user media, transcripts or source links."""
+    return PlainTextResponse(
+        diagnostics.build_report(runtime_status(), __version__),
+        headers={"Content-Disposition": "attachment; filename=clipfinder-diagnostics.txt"},
+    )
 
 
 @app.get("/api/update-status")
@@ -558,9 +879,11 @@ def install_app_update(job_id: str):
 
 
 @app.post("/api/videos", status_code=201)
-async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = File(...), analysis_mode: str = Form("default")):
     if not file.filename or Path(file.filename).suffix.lower() not in {".mp4", ".mkv", ".mov", ".webm"}:
         raise HTTPException(400, "Add MP4, MKV, MOV or WebM video file.")
+    if analysis_mode not in {"fast", "default", "extended"}:
+        raise HTTPException(400, "Choose Fast, Default or Extended analysis.")
     video_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
     destination = settings.incoming_dir / f"{video_id}{Path(file.filename).suffix.lower()}"
     try:
@@ -574,8 +897,8 @@ async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = Fil
     timestamp = db.now()
     with db.connection() as con:
         con.execute(
-            "INSERT INTO videos (id, original_name, path, status, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?)",
-            (video_id, file.filename, str(destination), timestamp, timestamp),
+            "INSERT INTO videos (id, original_name, path, analysis_mode, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?)",
+            (video_id, file.filename, str(destination), analysis_mode, timestamp, timestamp),
         )
         con.execute(
             "INSERT INTO jobs (id, video_id, state, progress, message, created_at, updated_at) VALUES (?, ?, 'queued', 0, 'Queued', ?, ?)",
@@ -592,8 +915,8 @@ def import_remote_video(body: RemoteVideoCreate, background_tasks: BackgroundTas
     placeholder = settings.incoming_dir / f"{video_id}.download"
     with db.connection() as con:
         con.execute(
-            "INSERT INTO videos (id, original_name, path, source_url, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?)",
-            (video_id, "YouTube/Twitch download", str(placeholder), source_url, timestamp, timestamp),
+            "INSERT INTO videos (id, original_name, path, source_url, analysis_mode, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)",
+            (video_id, "YouTube/Twitch download", str(placeholder), source_url, body.analysis_mode, timestamp, timestamp),
         )
         con.execute(
             "INSERT INTO jobs (id, video_id, state, progress, message, created_at, updated_at) VALUES (?, ?, 'queued', 0, 'Queued remote download', ?, ?)",
@@ -914,12 +1237,12 @@ def update_segment_tag_feedback(segment_id: str, body: TagFeedbackUpdate):
 
 @app.post("/api/segments/{segment_id}/export")
 def export_segment(segment_id: str, body: ExportRequest):
-    return _export_segment(segment_id, body.lead_in_seconds, body.lead_out_seconds, body.captions_preset, body.caption_position, body.base_color, body.active_color, body.layout, body.audio_track, body.filename)
+    return _export_segment(segment_id, body.lead_in_seconds, body.lead_out_seconds, body.captions_preset, body.caption_position, body.base_color, body.active_color, body.layout, body.audio_track, body.filename, body.outline_enabled, body.outline_color, body.glow_enabled, body.opacity, body.font_family, body.camera_x, body.camera_y, body.camera_width, body.camera_height, body.game_x, body.game_y, body.game_width, body.game_height)
 
 
 @app.get("/api/segments/{segment_id}/export")
-def download_segment(segment_id: str, lead_in_seconds: float = 0, lead_out_seconds: float = 0, captions_preset: str = "none", caption_position: str = "bottom", base_color: str = "#FFFFFF", active_color: str = "#FFFF00", layout: str = "original", audio_track: int = 1, filename: str = ""):
-    return _export_segment(segment_id, lead_in_seconds, lead_out_seconds, captions_preset, caption_position, base_color, active_color, layout, audio_track, filename)
+def download_segment(segment_id: str, lead_in_seconds: float = 0, lead_out_seconds: float = 0, captions_preset: str = "none", caption_position: str = "bottom", base_color: str = "#FFFFFF", active_color: str = "#FFFF00", layout: str = "original", audio_track: int = 1, filename: str = "", outline_enabled: bool = True, outline_color: str = "#000000", glow_enabled: bool = False, opacity: int = 100, font_family: str = "Inter", camera_x: float | None = None, camera_y: float | None = None, camera_width: float | None = None, camera_height: float | None = None, game_x: float | None = None, game_y: float | None = None, game_width: float | None = None, game_height: float | None = None):
+    return _export_segment(segment_id, lead_in_seconds, lead_out_seconds, captions_preset, caption_position, base_color, active_color, layout, audio_track, filename, outline_enabled, outline_color, glow_enabled, opacity, font_family, camera_x, camera_y, camera_width, camera_height, game_x, game_y, game_width, game_height)
 
 
 def _safe_export_name(value: str, fallback: str) -> str:
@@ -937,7 +1260,7 @@ def _available_export_path(stem: str) -> Path:
     return candidate
 
 
-def _export_segment(segment_id: str, lead_in_seconds: float, lead_out_seconds: float, captions_preset: str = "none", caption_position: str = "bottom", base_color: str = "#FFFFFF", active_color: str = "#FFFF00", layout: str = "original", audio_track: int = 1, filename: str = ""):
+def _export_segment(segment_id: str, lead_in_seconds: float, lead_out_seconds: float, captions_preset: str = "none", caption_position: str = "bottom", base_color: str = "#FFFFFF", active_color: str = "#FFFF00", layout: str = "original", audio_track: int = 1, filename: str = "", outline_enabled: bool = True, outline_color: str = "#000000", glow_enabled: bool = False, opacity: int = 100, font_family: str = "Inter", camera_x: float | None = None, camera_y: float | None = None, camera_width: float | None = None, camera_height: float | None = None, game_x: float | None = None, game_y: float | None = None, game_width: float | None = None, game_height: float | None = None):
     segment = db.row("SELECT s.*, v.path, v.original_name FROM segments s JOIN videos v ON v.id=s.video_id WHERE s.id=?", (segment_id,))
     if not segment:
         not_found("Segment not found")
@@ -945,26 +1268,37 @@ def _export_segment(segment_id: str, lead_in_seconds: float, lead_out_seconds: f
         raise HTTPException(409, "Approve this clip before exporting MP4.")
     start = max(0, segment["start_seconds"] - min(10, max(0, lead_in_seconds)))
     end = segment["end_seconds"] + min(10, max(0, lead_out_seconds))
-    if captions_preset not in {"none", "clean", "highlight", "minimal"}:
+    if captions_preset not in {"none", "clean", "highlight", "minimal", "boxed_pop", "neon_gaming", "cinematic", "karaoke_punch", "minimal_center"}:
         raise HTTPException(400, "Unknown caption preset.")
     if layout not in {"original", "portrait_camera", "portrait_game", "portrait_split"}:
         raise HTTPException(400, "Unknown clip layout.")
     if audio_track not in {1, 2, 3, 4}:
         raise HTTPException(400, "Audio track must be between 1 and 4.")
-    if caption_position not in {"top", "middle", "bottom"} or not re.fullmatch(r"#[0-9A-Fa-f]{6}", base_color) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", active_color):
+    if caption_position not in {"top", "two_fifths", "middle", "four_fifths", "bottom"} or font_family not in {"Inter", "Montserrat", "Poppins", "Lato", "Roboto Condensed", "Oswald", "Nunito", "Noto Sans", "Bungee", "Cinzel", "Pixelify Sans"} or not re.fullmatch(r"#[0-9A-Fa-f]{6}", base_color) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", active_color) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", outline_color) or not 20 <= opacity <= 100:
         raise HTTPException(400, "Invalid caption settings.")
     censor_profanity = bool(segment.get("censor_profanity"))
     remove_pauses = bool(segment.get("remove_pauses"))
     suffix = ("" if captions_preset == "none" else f"_captions-{captions_preset}") + ("" if layout == "original" else f"_{layout}") + ("_censored" if censor_profanity else "") + ("_dynamic" if remove_pauses else "")
     fallback = f"{Path(segment['original_name']).stem}_{start:.0f}-{end:.0f}{suffix}"
     destination = _available_export_path(_safe_export_name(filename, fallback))
-    defaults = export_defaults() or {}
-    camera_rect = tuple(float(defaults.get(key, value)) for key, value in (
-        ("camera_x", 0.78), ("camera_y", 0.03), ("camera_width", 0.11), ("camera_height", 0.11),
-    ))
-    game_rect = tuple(float(defaults.get(key, value)) for key, value in (
-        ("game_x", 0.22), ("game_y", 0.0), ("game_width", 0.56), ("game_height", 1.0),
-    ))
+    requested_rectangles = (camera_x, camera_y, camera_width, camera_height, game_x, game_y, game_width, game_height)
+    if any(value is None for value in requested_rectangles) and not all(value is None for value in requested_rectangles):
+        raise HTTPException(400, "Provide all camera and gameplay layout coordinates together.")
+    if all(value is None for value in requested_rectangles):
+        defaults = export_defaults() or {}
+        camera_rect = tuple(float(defaults.get(key, value)) for key, value in (
+            ("camera_x", 0.78), ("camera_y", 0.03), ("camera_width", 0.11), ("camera_height", 0.11),
+        ))
+        game_rect = tuple(float(defaults.get(key, value)) for key, value in (
+            ("game_x", 0.22), ("game_y", 0.0), ("game_width", 0.56), ("game_height", 1.0),
+        ))
+    else:
+        camera_rect = tuple(float(value) for value in requested_rectangles[:4])
+        game_rect = tuple(float(value) for value in requested_rectangles[4:])
+        for label, rect in (("Camera", camera_rect), ("Gameplay", game_rect)):
+            x, y, width, height = rect
+            if not (0 <= x <= 1 and 0 <= y <= 1 and 0.02 < width <= 1 and 0.02 < height <= 1 and x + width <= 1 and y + height <= 1):
+                raise HTTPException(400, f"{label} layout area must fit inside the source frame.")
     captions_path = None
     try:
         word_timestamps = json.loads(segment.get("word_timestamps") or "[]")
@@ -980,7 +1314,7 @@ def _export_segment(segment_id: str, lead_in_seconds: float, lead_out_seconds: f
             word_timestamps = [{**word, "start": start + float(word["start"]), "end": start + float(word["end"])} for word in remapped]
         if captions_preset != "none":
             captions_path = settings.work_dir / f"{segment_id}-{captions_preset}.ass"
-            write_caption_ass(captions_path, segment["transcript"], output_duration, captions_preset, word_timestamps, start, caption_position, base_color, active_color, censor_profanity)
+            write_caption_ass(captions_path, segment["transcript"], output_duration, captions_preset, word_timestamps, start, caption_position, base_color, active_color, censor_profanity, outline_enabled, outline_color, glow_enabled, opacity, font_family)
         export_clip(Path(segment["path"]), destination, start, end, captions_path, layout, audio_track, word_timestamps, segment["transcript"], censor_profanity, camera_rect, game_rect, pause_ranges)
     except MediaError as exc:
         raise HTTPException(500, f"Unable to export clip: {exc}") from exc
@@ -1056,6 +1390,17 @@ def create_rejection_reason(body: RejectionReasonCreate):
     with db.connection() as con:
         con.execute("INSERT OR IGNORE INTO rejection_reasons (reason, created_at) VALUES (?, ?)", (reason, db.now()))
     return {"reason": reason}
+
+
+@app.delete("/api/rejection-reasons/{reason}")
+def delete_rejection_reason(reason: str):
+    """Remove a saved suggestion without rewriting past clip decisions."""
+    normalized = " ".join(reason.split())
+    with db.connection() as con:
+        deleted = con.execute("DELETE FROM rejection_reasons WHERE reason=?", (normalized,)).rowcount
+    if not deleted:
+        not_found("Saved rejection reason not found")
+    return {"ok": True, "reason": normalized}
 
 
 @app.get("/api/caption-defaults")
@@ -1137,9 +1482,44 @@ def discovery_defaults():
 
 @app.put("/api/discovery-defaults")
 def update_discovery_defaults(body: DiscoveryDefaultsUpdate):
+    pattern_set_id = body.pattern_set_id.strip()
+    if pattern_set_id and not db.row(
+        "SELECT id FROM discovery_pattern_sets WHERE id=? AND profile=?",
+        (pattern_set_id, body.active_profile),
+    ):
+        raise HTTPException(400, "Choose a pattern set created for this discovery profile.")
     with db.connection() as con:
-        con.execute("UPDATE discovery_defaults SET active_profile=?, updated_at=? WHERE id=1", (body.active_profile, db.now()))
+        con.execute(
+            "UPDATE discovery_defaults SET active_profile=?, pattern_set_id=?, updated_at=? WHERE id=1",
+            (body.active_profile, pattern_set_id, db.now()),
+        )
     return profile_payload()
+
+
+@app.post("/api/discovery-pattern-sets", status_code=201)
+def create_discovery_pattern_set(body: DiscoveryPatternSetCreate):
+    pattern_set_id = str(uuid.uuid4())
+    name = " ".join(body.name.split())
+    try:
+        with db.connection() as con:
+            con.execute(
+                "INSERT INTO discovery_pattern_sets (id, name, profile, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (pattern_set_id, name, body.profile, db.now(), db.now()),
+            )
+    except Exception as exc:
+        raise HTTPException(409, "This profile already has a pattern set with that name.") from exc
+    return {"id": pattern_set_id, "name": name, "profile": body.profile}
+
+
+@app.delete("/api/discovery-pattern-sets/{pattern_set_id}")
+def delete_discovery_pattern_set(pattern_set_id: str):
+    pattern_set = db.row("SELECT id, name FROM discovery_pattern_sets WHERE id=?", (pattern_set_id,))
+    if not pattern_set:
+        not_found("Discovery pattern set not found")
+    with db.connection() as con:
+        con.execute("DELETE FROM discovery_pattern_sets WHERE id=?", (pattern_set_id,))
+        con.execute("UPDATE discovery_defaults SET pattern_set_id='' WHERE id=1 AND pattern_set_id=?", (pattern_set_id,))
+    return {"ok": True, "name": pattern_set["name"]}
 
 
 @app.get("/api/videos/{video_id}/top-clips")
@@ -1182,8 +1562,8 @@ def update_export_defaults(body: ExportDefaultsUpdate):
 def update_caption_defaults(body: CaptionDefaultsUpdate):
     with db.connection() as con:
         con.execute(
-            "UPDATE caption_defaults SET captions_preset=?, base_color=?, active_color=?, updated_at=? WHERE id=1",
-            (body.captions_preset, body.base_color.upper(), body.active_color.upper(), db.now()),
+            "UPDATE caption_defaults SET captions_preset=?, base_color=?, active_color=?, font_family=?, outline_enabled=?, outline_color=?, glow_enabled=?, opacity=?, updated_at=? WHERE id=1",
+            (body.captions_preset, body.base_color.upper(), body.active_color.upper(), body.font_family, int(body.outline_enabled), body.outline_color.upper(), int(body.glow_enabled), body.opacity, db.now()),
         )
     return caption_defaults()
 
@@ -1195,13 +1575,13 @@ def caption_favorites():
 
 @app.post("/api/caption-favorites", status_code=201)
 def create_caption_favorite(body: CaptionFavoriteCreate):
-    favorite = {"id": str(uuid.uuid4()), "name": body.name.strip(), "captions_preset": body.captions_preset, "base_color": body.base_color.upper(), "active_color": body.active_color.upper(), "created_at": db.now()}
+    favorite = {"id": str(uuid.uuid4()), "name": body.name.strip(), "captions_preset": body.captions_preset, "base_color": body.base_color.upper(), "active_color": body.active_color.upper(), "font_family": body.font_family, "outline_enabled": int(body.outline_enabled), "outline_color": body.outline_color.upper(), "glow_enabled": int(body.glow_enabled), "opacity": body.opacity, "created_at": db.now()}
     if not favorite["name"]:
         raise HTTPException(400, "Favorite name is required.")
     try:
         with db.connection() as con:
             con.execute(
-                "INSERT INTO caption_favorites (id, name, captions_preset, base_color, active_color, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO caption_favorites (id, name, captions_preset, base_color, active_color, font_family, outline_enabled, outline_color, glow_enabled, opacity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(favorite.values()),
             )
     except Exception as exc:
@@ -1250,6 +1630,35 @@ def create_collection(body: CollectionCreate):
     return {"id": collection_id, "name": body.name.strip()}
 
 
+@app.delete("/api/collections/{collection_id}")
+def delete_collection(collection_id: str):
+    """Delete a collection and its locally stored reference metadata/files."""
+    collection = db.row("SELECT id, name FROM collections WHERE id=?", (collection_id,))
+    if not collection:
+        not_found("Collection not found")
+    remote_sources = db.rows("SELECT source_path FROM reference_url_sources WHERE collection_id=?", (collection_id,))
+    with db.connection() as con:
+        # Older databases may have been created before foreign keys were
+        # enabled on every SQLite connection, so delete dependent rows here.
+        con.execute("DELETE FROM collection_examples WHERE collection_id=?", (collection_id,))
+        con.execute("DELETE FROM external_examples WHERE collection_id=?", (collection_id,))
+        con.execute("DELETE FROM reference_imports WHERE collection_id=?", (collection_id,))
+        con.execute("DELETE FROM reference_sources WHERE collection_id=?", (collection_id,))
+        con.execute("DELETE FROM reference_url_sources WHERE collection_id=?", (collection_id,))
+        con.execute("DELETE FROM collections WHERE id=?", (collection_id,))
+    reference_root = settings.reference_dir.resolve()
+    for source in remote_sources:
+        try:
+            path = Path(source["source_path"]).resolve()
+            if reference_root in path.parents:
+                path.unlink(missing_ok=True)
+        except OSError:
+            # The collection is already removed; a locked download can be
+            # deleted later without affecting the rest of the app.
+            pass
+    return {"ok": True, "name": collection["name"]}
+
+
 @app.post("/api/collections/{collection_id}/examples", status_code=201)
 def add_example(collection_id: str, body: ExampleCreate):
     with db.connection() as con:
@@ -1289,6 +1698,16 @@ def import_references(collection_id: str, body: ReferenceFolderImport, backgroun
     import_id = queue_reference_import(collection_id, str(folder), body.include_subfolders)
     background_tasks.add_task(run_reference_import, collection_id, import_id, str(folder), body.include_subfolders)
     return {"import_id": import_id, "source_id": source_id}
+
+
+@app.post("/api/collections/{collection_id}/imports/from-url", status_code=202)
+def import_reference_url(collection_id: str, body: ReferenceUrlImport, background_tasks: BackgroundTasks):
+    if not db.row("SELECT id FROM collections WHERE id=?", (collection_id,)):
+        not_found("Collection not found")
+    source_url = _supported_reference_url(body.source_url)
+    import_id = queue_reference_import(collection_id, source_url, False)
+    background_tasks.add_task(run_reference_url_import, collection_id, import_id, source_url)
+    return {"import_id": import_id}
 
 
 def queue_reference_import(collection_id: str, folder_path: str, include_subfolders: bool) -> str:

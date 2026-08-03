@@ -97,21 +97,48 @@ function Get-CudaProfile {
     $nvidia = Get-Command nvidia-smi -ErrorAction SilentlyContinue
     $cudaRoot = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA'
     $cudnnRoot = 'C:\Program Files\NVIDIA\CUDNN'
-    $cudaBins = @()
+    # CTranslate2 4.5+ currently uses CUDA 12 and cuDNN 9. Match cuDNN to the
+    # same CUDA minor version; finding arbitrary DLLs is not enough.
+    $cudaCandidates = @()
     if (Test-Path $cudaRoot) {
-        $cudaBins = Get-ChildItem -Path $cudaRoot -Directory -Filter 'v*' -ErrorAction SilentlyContinue |
-            ForEach-Object { Join-Path $_.FullName 'bin' } | Where-Object { Test-Path $_ }
+        $cudaCandidates = Get-ChildItem -Path $cudaRoot -Directory -Filter 'v12.*' -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                $versionText = $_.Name.TrimStart('v')
+                $version = $null
+                try { $version = [version]$versionText } catch { }
+                $bin = Join-Path $_.FullName 'bin'
+                if ($version -and $version.Minor -ge 3 -and (Test-Path (Join-Path $bin 'cublas64_12.dll'))) {
+                    [pscustomobject]@{ Version = $version; Bin = $bin }
+                }
+            } | Sort-Object Version -Descending
     }
-    $cudaBin = $cudaBins | Where-Object { Test-Path (Join-Path $_ 'cublas64_12.dll') } | Select-Object -First 1
-    $cudnnBin = $cudaBins | Where-Object { Test-Path (Join-Path $_ 'cudnn64_9.dll') } | Select-Object -First 1
-    if (-not $cudnnBin -and (Test-Path $cudnnRoot)) {
-        $cudnnFile = Get-ChildItem -Path $cudnnRoot -Recurse -Filter 'cudnn64_9.dll' -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($cudnnFile) { $cudnnBin = $cudnnFile.DirectoryName }
+
+    $cudnnCandidates = @()
+    foreach ($candidate in $cudaCandidates) {
+        if (Test-Path (Join-Path $candidate.Bin 'cudnn64_9.dll')) {
+            $cudnnCandidates += [pscustomobject]@{ Version = $candidate.Version; Bin = $candidate.Bin }
+        }
     }
-    if ($nvidia -and $cudaBin -and $cudnnBin) {
-        return [ordered]@{ whisper_device = 'cuda'; whisper_compute_type = 'float16'; whisper_model = 'large-v3'; cuda_bin_dir = $cudaBin; cudnn_bin_dir = $cudnnBin; profile_message = 'NVIDIA GPU mode enabled (CUDA 12 + cuDNN 9 detected).' }
+    if (Test-Path $cudnnRoot) {
+        Get-ChildItem -Path $cudnnRoot -Recurse -Filter 'cudnn64_9.dll' -File -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.FullName -match '[\\/]bin[\\/](12\.\d+)[\\/]') {
+                try { $cudnnCandidates += [pscustomobject]@{ Version = [version]$Matches[1]; Bin = $_.DirectoryName } } catch { }
+            }
+        }
     }
-    return [ordered]@{ whisper_device = 'cpu'; whisper_compute_type = 'int8'; whisper_model = 'small'; cuda_bin_dir = ''; cudnn_bin_dir = ''; profile_message = 'CPU test mode enabled. Install CUDA 12 and cuDNN 9 later to enable faster NVIDIA transcription.' }
+
+    $pair = $null
+    foreach ($cuda in $cudaCandidates) {
+        $matchingCudnn = $cudnnCandidates | Where-Object { $_.Version -eq $cuda.Version } | Select-Object -First 1
+        if ($matchingCudnn) {
+            $pair = [pscustomobject]@{ Version = $cuda.Version; CudaBin = $cuda.Bin; CudnnBin = $matchingCudnn.Bin }
+            break
+        }
+    }
+    if ($nvidia -and $pair) {
+        return [ordered]@{ whisper_device = 'cuda'; whisper_compute_type = 'float16'; whisper_model = 'large-v3'; cuda_bin_dir = $pair.CudaBin; cudnn_bin_dir = $pair.CudnnBin; profile_message = "NVIDIA GPU mode enabled (CUDA $($pair.Version) + matching cuDNN 9 detected)." }
+    }
+    return [ordered]@{ whisper_device = 'cpu'; whisper_compute_type = 'int8'; whisper_model = 'small'; cuda_bin_dir = ''; cudnn_bin_dir = ''; profile_message = 'CPU test mode enabled. Install matching CUDA 12.3+ and cuDNN 9 later to enable faster NVIDIA transcription.' }
 }
 
 Write-Setup 'ClipFinder post-install setup started.' 'Cyan'

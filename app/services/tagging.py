@@ -13,7 +13,6 @@ TAG_DEFINITIONS = (
     ("zaskoczenie", "surprise, shock, unexpected discovery or reaction", ("niemożli", "serio", "co jest", "o kur", "niespodz")),
     ("humor", "joke, funny situation, laughter, comedy or amusement", ("śmiesz", "żart", "bek", "haha", "lol")),
     ("wyrażanie opinii", "expressing an opinion, evaluation, judgement, personal point of view", ("moim zdaniem", "uważam", "według mnie", "myślę", "dla mnie", "sądzę")),
-    ("pytanie", "asking a question, seeking an answer or clarification", ("dlaczego", "jak", "czy ", "kto", "gdzie", "kiedy")),
     ("rekomendacja", "recommendation, advice, suggestion or endorsement", ("polecam", "warto", "radzę", "powinien", "najlepsz")),
 )
 
@@ -21,7 +20,6 @@ TAG_DEFINITIONS = (
 # every candidate as a story, punchline, or criticism.
 DETAILED_TAG_DEFINITIONS = (
     ("forma: opinia", ("moim zdaniem", "uważam", "według mnie", "dla mnie", "sądzę", "myślę że", "wydaje mi się")),
-    ("forma: pytanie", ("dlaczego", "po co", "co to jest", "jak to", "czy to", "kto to", "gdzie to", "kiedy to", "?")),
     ("forma: rada", ("polecam", "warto", "radzę", "powinieneś", "powinniście", "trzeba", "najlepiej")),
     ("forma: krytyka", ("beznadziejn", "słabe", "kiepskie", "najgors", "głupie", "nie podoba", "absurd")),
     ("forma: porównanie", ("lepsze niż", "gorsze niż", "tak jak", "w porównaniu", "bardziej niż", "mniej niż")),
@@ -59,6 +57,10 @@ _DOCUMENT_CUE_STEMS = {
     "filozof", "doktryn", "ideologi", "antyrzadow", "przepisy", "postanowien",
 }
 GAME_REACTION_TAG = "reakcja na grę"
+# This tag is deliberately *not* inferred from the streamer's wording. It is
+# assigned by chat.py only when a viewer question is followed by an answer.
+CHAT_QUESTION_TAG = "pytanie"
+CHAT_QUESTION_ANSWER_TAG = "forma: odpowiedź na pytanie czatu"
 
 _tag_vectors: list[list[float]] | None = None
 
@@ -220,6 +222,37 @@ def assess_self_containment(text: str, before: str = "", after: str = "") -> int
         score -= 12
     if complete_end and logical >= 68:
         score += 8
+    return max(1, min(99, round(score)))
+
+
+def assess_extended_completeness(text: str, before: str = "", after: str = "", boundary_signals: list[str] | None = None) -> int:
+    """A stricter full-thought check used by Extended analysis.
+
+    The regular context score is intentionally forgiving so it can surface
+    potential moments. This score is conservative: it rewards a complete,
+    independently understandable sentence and penalizes clipped speech.
+    """
+    current = " ".join((text or "").split())
+    tokens = re.findall(r"[^\W_]+", current.lower())
+    context_score, _ = assess_context(current, before, after)
+    self_contained = assess_self_containment(current, before, after)
+    score = round((context_score * 0.46) + (self_contained * 0.46))
+    if 6 <= len(tokens) <= 60:
+        score += 5
+    elif len(tokens) < 5:
+        score -= 14
+    elif len(tokens) > 90:
+        score -= 8
+    if current.endswith((".", "!", "?")):
+        score += 6
+    else:
+        score -= 13
+    if any(signal in {"start aligned to sentence", "end aligned to sentence", "extended to punchline"} for signal in (boundary_signals or [])):
+        score += 4
+    if re.match(r"^(a|ale|bo|więc|i|że|żeby|to|jak|który|która|które)\b", current, re.I) and before:
+        score -= 12
+    if after and not current.endswith((".", "!", "?")):
+        score -= 10
     return max(1, min(99, round(score)))
 
 

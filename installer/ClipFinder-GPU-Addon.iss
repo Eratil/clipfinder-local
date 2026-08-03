@@ -101,9 +101,20 @@ begin
   end;
 end;
 
-function HasCuda12(): Boolean;
+function HasSupportedCuda12(): Boolean;
+var
+  MinorVersion: Integer;
 begin
-  Result := HasCudaRuntimeFile('cublas64_12.dll');
+  ; Current CTranslate2 wheels link against CUDA 12. CUDA 12.1 is too old for
+  ; the cuDNN 9 package used by this add-on; accept an existing CUDA 12.3+
+  ; toolkit and let the configuration step verify the matching cuDNN folder.
+  Result := False;
+  for MinorVersion := 3 to 9 do begin
+    if FileExists(ExpandConstant('{autopf}\NVIDIA GPU Computing Toolkit\CUDA\v12.' + IntToStr(MinorVersion) + '\bin\cublas64_12.dll')) then begin
+      Result := True;
+      exit;
+    end;
+  end;
 end;
 
 function HasCudnn9(): Boolean;
@@ -129,7 +140,7 @@ end;
 
 function NeedCudaInstall(): Boolean;
 begin
-  Result := (not HasCuda12()) and CanRunGpuInstaller('cuda_12.9.2_576.57_windows.exe');
+  Result := (not HasSupportedCuda12()) and CanRunGpuInstaller('cuda_12.9.2_576.57_windows.exe');
 end;
 
 function NeedCudnnInstall(): Boolean;
@@ -140,14 +151,14 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
-  if HasCuda12() and HasCudnn9() then begin
+  if HasSupportedCuda12() and HasCudnn9() then begin
     MsgBox(
-      'CUDA 12 and cuDNN 9 are already installed. The GPU add-on will skip their installers and only verify ClipFinder GPU mode.',
+      'A compatible CUDA 12.x and cuDNN 9 installation was detected. The GPU add-on will verify that their versions match before enabling ClipFinder GPU mode.',
       mbInformation, MB_OK);
   end
-  else if HasCuda12() then begin
+  else if HasSupportedCuda12() then begin
     MsgBox(
-      'CUDA 12 is already installed, but cuDNN 9 was not detected. The add-on will install only cuDNN and then verify ClipFinder GPU mode.',
+      'A compatible CUDA 12.x installation was detected, but cuDNN 9 was not detected. The add-on will install cuDNN and then verify ClipFinder GPU mode.',
       mbInformation, MB_OK);
   end;
 end;

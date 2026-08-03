@@ -46,6 +46,10 @@ def update_status() -> dict:
         **base,
         "latest_version": latest,
         "update_available": _version_parts(latest) > _version_parts(__version__),
+        "release_name": str(release.get("name") or f"ClipFinder {latest}").strip(),
+        # GitHub release descriptions are shown as plain text in the local UI,
+        # never injected as HTML.
+        "release_notes": str(release.get("body") or "").strip(),
         "download_url": installer.get("browser_download_url"),
         "release_url": release.get("html_url"),
         "published_at": release.get("published_at"),

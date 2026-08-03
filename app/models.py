@@ -60,6 +60,25 @@ class ReferenceFolderImport(BaseModel):
     include_subfolders: bool = True
 
 
+class ReferenceUrlImport(BaseModel):
+    source_url: str = Field(min_length=10, max_length=2000)
+
+
+class RemotePreviewCreate(BaseModel):
+    """One-off analysis of a public short without retaining the source media."""
+
+    source_url: str = Field(min_length=10, max_length=2000)
+
+
+class RemotePreviewSave(BaseModel):
+    pattern_set_id: str = Field(min_length=1, max_length=80)
+
+
+class DiscoveryPatternSetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    profile: str = Field(default="general", pattern="^(general|soulslike|conversation|horror|game_quote_reaction)$")
+
+
 class SavedPromptCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     prompt: str = Field(min_length=3, max_length=1000)
@@ -67,24 +86,43 @@ class SavedPromptCreate(BaseModel):
 
 class RemoteVideoCreate(BaseModel):
     source_url: str = Field(min_length=10, max_length=2000)
+    analysis_mode: str = Field(default="default", pattern="^(fast|default|extended)$")
 
 
 class ExportRequest(BaseModel):
     lead_in_seconds: float = Field(default=0, ge=0, le=10)
     lead_out_seconds: float = Field(default=0, ge=0, le=10)
-    captions_preset: str = Field(default="none", pattern="^(none|clean|highlight|minimal)$")
-    caption_position: str = Field(default="bottom", pattern="^(top|middle|bottom)$")
+    captions_preset: str = Field(default="none", pattern="^(none|clean|highlight|minimal|boxed_pop|neon_gaming|cinematic|karaoke_punch|minimal_center)$")
+    caption_position: str = Field(default="bottom", pattern="^(top|two_fifths|middle|four_fifths|bottom)$")
     base_color: str = Field(default="#FFFFFF", pattern="^#[0-9A-Fa-f]{6}$")
     active_color: str = Field(default="#FFFF00", pattern="^#[0-9A-Fa-f]{6}$")
+    font_family: str = Field(default="Inter", pattern="^(Inter|Montserrat|Poppins|Lato|Roboto Condensed|Oswald|Nunito|Noto Sans|Bungee|Cinzel|Pixelify Sans)$")
+    outline_enabled: bool = True
+    outline_color: str = Field(default="#000000", pattern="^#[0-9A-Fa-f]{6}$")
+    glow_enabled: bool = False
+    opacity: int = Field(default=100, ge=20, le=100)
     layout: str = Field(default="original", pattern="^(original|portrait_camera|portrait_game|portrait_split)$")
     audio_track: int = Field(default=1, ge=1, le=4)
+    camera_x: float = Field(default=0.78, ge=0, le=1)
+    camera_y: float = Field(default=0.03, ge=0, le=1)
+    camera_width: float = Field(default=0.11, gt=0.02, le=1)
+    camera_height: float = Field(default=0.11, gt=0.02, le=1)
+    game_x: float = Field(default=0.22, ge=0, le=1)
+    game_y: float = Field(default=0.0, ge=0, le=1)
+    game_width: float = Field(default=0.56, gt=0.02, le=1)
+    game_height: float = Field(default=1.0, gt=0.02, le=1)
     filename: str = Field(default="", max_length=120)
 
 
 class CaptionDefaultsUpdate(BaseModel):
-    captions_preset: str = Field(default="highlight", pattern="^(none|clean|highlight|minimal)$")
+    captions_preset: str = Field(default="highlight", pattern="^(none|clean|highlight|minimal|boxed_pop|neon_gaming|cinematic|karaoke_punch|minimal_center)$")
     base_color: str = Field(default="#FFFFFF", pattern="^#[0-9A-Fa-f]{6}$")
     active_color: str = Field(default="#FFFF00", pattern="^#[0-9A-Fa-f]{6}$")
+    font_family: str = Field(default="Inter", pattern="^(Inter|Montserrat|Poppins|Lato|Roboto Condensed|Oswald|Nunito|Noto Sans|Bungee|Cinzel|Pixelify Sans)$")
+    outline_enabled: bool = True
+    outline_color: str = Field(default="#000000", pattern="^#[0-9A-Fa-f]{6}$")
+    glow_enabled: bool = False
+    opacity: int = Field(default=100, ge=20, le=100)
 
 
 class ExportDefaultsUpdate(BaseModel):
@@ -115,7 +153,8 @@ class AnalysisAudioDefaultsUpdate(BaseModel):
 
 
 class DiscoveryDefaultsUpdate(BaseModel):
-    active_profile: str = Field(default="general", pattern="^(general|soulslike|conversation|horror)$")
+    active_profile: str = Field(default="general", pattern="^(general|soulslike|conversation|horror|game_quote_reaction)$")
+    pattern_set_id: str = Field(default="", max_length=80)
 
 
 class CaptionFavoriteCreate(CaptionDefaultsUpdate):

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ClipFinder Local</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260801-tag-feedback" />
+    <link rel="stylesheet" href="/static/style.css?v=20260803-discovery-patterns" />
   </head>
   <body class="clip-editor-closed">
     <main>
@@ -15,32 +15,34 @@
 
       <button id="setup-toggle" class="quiet setup-toggle" aria-controls="setup-sidebar" aria-expanded="false">Saved setup</button>
       <aside id="setup-sidebar" class="setup-sidebar" aria-label="Saved setup" aria-hidden="true">
-        <div class="section-title setup-sidebar-head"><div><h2>Saved setup</h2><p class="hint">Prompts, reference collections, captions, and text search - available at any time.</p></div><button id="setup-close" class="quiet" aria-label="Hide saved setup">Hide</button></div>
-        <div class="sidebar-search">
-          <label>Exact text search<input id="search" placeholder="e.g. giveaway, important announcement" /></label>
-          <button class="quiet" id="search-button">Find text</button>
+        <div class="section-title setup-sidebar-head"><div><h2>Saved setup</h2><p class="hint">Search tools and global settings - available at any time.</p></div><button id="setup-close" class="quiet" aria-label="Hide saved setup">Hide</button></div>
+        <div class="setup-tabs" role="tablist" aria-label="Saved setup sections">
+          <button type="button" class="quiet setup-tab active" data-setup-tab="search" role="tab" aria-selected="true">Search</button>
+          <button type="button" class="quiet setup-tab" data-setup-tab="global" role="tab" aria-selected="false">Global</button>
         </div>
-        <div class="library-grid">
-          <article class="library-card">
-            <h3>Discovery profile</h3>
-            <p class="hint">Changes how candidates are ranked. It uses your approvals and rejection reasons too.</p>
-            <form id="discovery-defaults-form">
-              <label>Content type<select id="discovery-profile"></select></label>
-              <button>Save discovery profile</button>
-            </form>
-            <p id="discovery-feedback" class="hint"></p>
-          </article>
-          <article class="library-card">
+        <div class="setup-tab-panel active" data-setup-panel="search" role="tabpanel">
+          <div class="sidebar-search">
+            <label>Exact text search<input id="search" placeholder="e.g. giveaway, important announcement" /></label>
+            <button class="quiet" id="search-button">Find text</button>
+          </div>
+          <div class="library-grid">
+            <article class="library-card">
             <h3>Saved prompts</h3>
             <form id="prompt-form"><input id="prompt-name" placeholder="Name, e.g. funny reactions" required /><textarea id="prompt-text" placeholder="Description, e.g. funny and emotional reactions to unexpected events" required></textarea><button>Save prompt</button></form>
             <label>Active description prompt<textarea id="active-prompt" placeholder="Choose a saved prompt or write a temporary description"></textarea></label>
             <button id="description-button">Search active prompt</button>
-            <div id="prompts" class="saved-list"></div>
+            <details class="saved-details">
+              <summary>Saved prompts <span id="prompts-count" class="saved-count">0</span></summary>
+              <div id="prompts" class="saved-list"></div>
+            </details>
           </article>
           <article class="library-card">
             <h3>Reference collections</h3>
             <form id="collection-form"><input id="collection-name" placeholder="e.g. best reactions" required /><button>Create collection</button></form>
-            <div id="collections" class="saved-list"></div>
+            <details class="saved-details">
+              <summary>Clip collections <span id="collections-count" class="saved-count">0</span></summary>
+              <div id="collections" class="saved-list"></div>
+            </details>
             <button id="similar-button" disabled>Find similar to active collection</button>
             <button id="generate-prompt-button" class="quiet" disabled>Generate prompt from active collection</button>
             <div class="reference-import">
@@ -48,40 +50,120 @@
               <label class="check"><input id="subfolders" type="checkbox" checked /> Include subfolders</label>
               <button id="import-folder-button" class="quiet" disabled>Save folder and import</button>
             </div>
+            <div class="reference-import">
+              <label>YouTube Short/video or TikTok reference URL<input id="reference-url" type="url" placeholder="https://www.youtube.com/shorts/... or https://www.tiktok.com/..." /></label>
+              <label>Destination collection<select id="reference-url-collection"></select></label>
+              <button id="import-url-button" class="quiet" disabled>Import link as reference</button>
+              <p class="hint">Imports one public short/video into the selected collection. Use only content you are allowed to download.</p>
+            </div>
+            <div class="reference-import remote-preview-import">
+              <h4>Single Short/video preview</h4>
+              <label>YouTube Short/video or TikTok URL<input id="remote-preview-url" type="url" placeholder="https://www.youtube.com/shorts/... or https://www.tiktok.com/..." /></label>
+              <button id="remote-preview-button" class="quiet">Analyze temporary preview</button>
+              <p class="hint">Streams only temporary audio and one preview frame. The source video is not saved. After review, its analytical fingerprint can be added to a discovery pattern set.</p>
+              <div id="remote-preview-status" class="import-status" aria-live="polite"></div>
+              <article id="remote-preview-result" class="remote-preview-result" hidden></article>
+            </div>
             <div id="import-status" class="import-status"></div>
             <div id="reference-sources" class="saved-list"></div>
+          </article>
+          </div>
+        </div>
+        <div class="setup-tab-panel" data-setup-panel="global" role="tabpanel" hidden>
+          <div class="library-grid">
+          <article class="library-card">
+            <h3>Discovery profile</h3>
+            <p class="hint">Changes how candidates are ranked. It uses your approvals and rejection reasons too.</p>
+            <form id="discovery-defaults-form">
+              <label>Content type<select id="discovery-profile"></select></label>
+              <label>Pattern add-on<select id="discovery-pattern-set"><option value="">Default - no additional patterns</option></select></label>
+              <p class="hint">A pattern set stores only conclusions from reviewed Shorts: semantic vector, tags and scores. It never stores the source video, audio or frame.</p>
+              <button>Save discovery profile</button>
+            </form>
+            <form id="discovery-pattern-set-form" class="prompt-row"><input id="discovery-pattern-set-name" maxlength="80" placeholder="New pattern set, e.g. viral game reactions" required /><button class="quiet">Create pattern set</button></form>
+            <details class="saved-details">
+              <summary>Saved pattern sets <span id="discovery-pattern-sets-count" class="saved-count">0</span></summary>
+              <div id="discovery-pattern-sets" class="saved-list"></div>
+            </details>
+            <p id="discovery-feedback" class="hint"></p>
           </article>
           <article class="library-card">
             <h3>Custom rejection reasons</h3>
             <p class="hint">Saved reasons appear in the rejection list on every clip.</p>
             <form id="rejection-reason-form" class="prompt-row"><input id="new-rejection-reason" maxlength="80" placeholder="e.g. too much background music" required /><button class="quiet" id="save-rejection-reason">Save reason</button></form>
-            <div id="saved-rejection-reasons" class="saved-list"></div>
+            <details class="saved-details">
+              <summary>Saved rejection reasons <span id="rejection-reasons-count" class="saved-count">0</span></summary>
+              <div id="saved-rejection-reasons" class="saved-list"></div>
+            </details>
           </article>
           <article class="library-card">
             <h3>Caption defaults</h3>
-            <p class="hint">Used for every exported clip. Set only the caption position on an individual clip.</p>
+            <p class="hint">Used for exports in the current session and restored when ClipFinder is reopened. Save a named favorite below to keep a reusable preset.</p>
             <form id="caption-defaults-form">
               <label>Caption type
                 <select id="global-caption-preset">
                   <option value="none">No captions</option>
-                  <option value="clean">Clean - white with outline</option>
+                  <option value="clean">Clean - outlined</option>
                   <option value="highlight">Word highlight - large yellow</option>
-                  <option value="minimal">Minimal - small white</option>
+                  <option value="minimal">Minimal - compact</option>
+                  <option value="boxed_pop">Boxed Pop - bold caption card</option>
+                  <option value="neon_gaming">Neon Gaming - colourful gaming glow</option>
+                  <option value="cinematic">Cinematic - dark subtitle band</option>
+                  <option value="karaoke_punch">Karaoke Punch - stronger word bounce</option>
+                  <option value="minimal_center">Minimal Center - quiet centered text</option>
+                </select>
+              </label>
+              <label>Caption font
+                <select id="global-caption-font-family">
+                  <option value="Bungee" style="font-family:'ClipFinder Bungee'">Bungee - graffiti/display</option>
+                  <option value="Cinzel" style="font-family:'ClipFinder Cinzel'">Cinzel - old book</option>
+                  <option value="Pixelify Sans" style="font-family:'ClipFinder Pixelify Sans'">Pixelify Sans - pixel art</option>
+                  <option value="Inter" style="font-family:'ClipFinder Inter'">Inter</option>
+                  <option value="Montserrat" style="font-family:'ClipFinder Montserrat'">Montserrat</option>
+                  <option value="Poppins" style="font-family:'ClipFinder Poppins'">Poppins</option>
+                  <option value="Lato" style="font-family:'ClipFinder Lato'">Lato</option>
+                  <option value="Roboto Condensed" style="font-family:'ClipFinder Roboto Condensed'">Roboto Condensed</option>
+                  <option value="Oswald" style="font-family:'ClipFinder Oswald'">Oswald</option>
+                  <option value="Nunito" style="font-family:'ClipFinder Nunito'">Nunito</option>
+                  <option value="Noto Sans" style="font-family:'ClipFinder Noto Sans'">Noto Sans</option>
                 </select>
               </label>
               <label>Sentence colour<input id="global-caption-base-color" type="color" value="#ffffff" /></label>
               <label>Spoken word colour<input id="global-caption-active-color" type="color" value="#ffff00" /></label>
-              <button>Save global caption settings</button>
+              <div class="caption-effect-controls">
+                <label class="check switch"><input id="global-caption-outline-enabled" type="checkbox" checked /> Add outline</label>
+                <label>Outline colour<input id="global-caption-outline-color" type="color" value="#000000" /></label>
+                <label class="check switch"><input id="global-caption-glow-enabled" type="checkbox" /> Add light glow</label>
+                <label>Text opacity <span id="global-caption-opacity-value">100%</span><input id="global-caption-opacity" type="range" min="20" max="100" step="1" value="100" /></label>
+              </div>
+              <div class="caption-preview-controls">
+                <label>Preview background
+                  <select id="caption-preview-background">
+                    <option value="#000000">Black</option>
+                    <option value="#ffffff">White</option>
+                    <option value="custom">Custom colour</option>
+                  </select>
+                </label>
+                <label id="caption-preview-custom-wrap" hidden>Custom background colour<input id="caption-preview-custom-color" type="color" value="#243146" /></label>
+              </div>
             </form>
+            <div id="caption-preview" class="caption-preview" data-preset="highlight" aria-label="Caption preview">
+              <p class="caption-preview-text">These are test <span>captions</span></p>
+              <p class="caption-preview-off" hidden>Captions are turned off.</p>
+            </div>
+            <p id="caption-preview-hint" class="hint caption-preview-hint">The highlighted word shows the active-word style.</p>
             <form id="caption-favorite-form">
               <input id="caption-favorite-name" placeholder="Favourite name, e.g. yellow gaming" required />
               <button class="quiet">Save current colours as favorite</button>
             </form>
-            <div id="caption-favorites" class="saved-list"></div>
+            <details class="saved-details">
+              <summary>Saved caption colours and fonts <span id="caption-favorites-count" class="saved-count">0</span></summary>
+              <div id="caption-favorites" class="saved-list"></div>
+            </details>
           </article>
           <article class="library-card">
             <h3>Export defaults</h3>
-            <p class="hint">Applied to every exported clip. Calibrate once on a recording when your camera or gameplay differs from the default OBS scene.</p>
+            <p class="hint">Used for exports in the current session and restored when ClipFinder is reopened. Save a named layout below to keep a reusable preset.</p>
             <form id="export-defaults-form">
               <label>Clip layout
                 <select id="global-layout">
@@ -99,7 +181,6 @@
                   <option value="4">Track 4</option>
                 </select>
               </label>
-              <button>Save export settings</button>
             </form>
             <div class="layout-calibration">
               <div class="section-title"><div><h3>Layout calibration and preview</h3><p class="hint">Select a recording, pause on a representative frame, choose an area and drag a rectangle. The preview is shown before export.</p></div></div>
@@ -108,7 +189,10 @@
               <div id="layout-source-wrap" class="layout-source-wrap" hidden><video id="layout-source-video" controls muted playsinline></video><canvas id="layout-overlay"></canvas></div>
               <canvas id="layout-output-preview" class="layout-output-preview" width="270" height="480" aria-label="Vertical layout preview"></canvas>
               <form id="layout-preset-form" class="prompt-row"><input id="layout-preset-name" maxlength="80" placeholder="Layout name, e.g. facecam top right" required /><button class="quiet">Save current layout</button></form>
-              <div id="layout-presets" class="saved-list"></div>
+              <details class="saved-details">
+                <summary>Saved layouts <span id="layout-presets-count" class="saved-count">0</span></summary>
+                <div id="layout-presets" class="saved-list"></div>
+              </details>
             </div>
           </article>
           <article class="library-card">
@@ -140,19 +224,35 @@
               <button>Save analysis audio settings</button>
             </form>
           </article>
-        </div>
-        <article class="library-card updates-card">
-          <h3>Software updates</h3>
-          <p id="update-status" class="hint">Check manually for a newer ClipFinder release.</p>
-          <div id="update-download-progress" class="upload-progress" hidden>
-            <div class="progress-track"><div id="update-download-fill" class="progress-fill"></div></div>
+          <article class="library-card updates-card">
+            <h3>Software updates</h3>
+            <p id="update-status" class="hint">Check manually for a newer ClipFinder release.</p>
+            <div id="update-release-notes" class="update-release-notes" hidden>
+              <strong id="update-release-title"></strong>
+              <p id="update-release-body"></p>
+              <a id="update-release-link" class="quiet" target="_blank" rel="noopener">Open release on GitHub</a>
+            </div>
+            <div id="update-download-progress" class="upload-progress" hidden>
+              <div class="progress-track"><div id="update-download-fill" class="progress-fill"></div></div>
+            </div>
+            <div class="prompt-row"><button id="check-updates" class="quiet">Check for updates</button><button id="install-update" class="quiet" hidden>Download update</button><a id="download-update" class="quiet" target="_blank" rel="noopener" hidden>Download manually</a><button id="download-diagnostics" type="button" class="quiet">Open diagnostic report</button></div>
+          </article>
           </div>
-          <div class="prompt-row"><button id="check-updates" class="quiet">Check for updates</button><button id="install-update" class="quiet" hidden>Download update</button><a id="download-update" class="quiet" target="_blank" rel="noopener" hidden>Download manually</a></div>
-        </article>
+        </div>
       </aside>
 
       <section class="upload">
         <h2>New recording</h2>
+        <div class="analysis-mode-picker">
+          <label>Analysis mode
+            <select id="analysis-mode">
+              <option value="fast">Fast - text search and basic tags</option>
+              <option value="default" selected>Default - current full analysis</option>
+              <option value="extended">Extended - full analysis plus verification of strongest clips</option>
+            </select>
+          </label>
+          <p id="analysis-mode-description" class="hint">Current workflow: speech, audio/game reaction, visual checks, context, tags and ranking.</p>
+        </div>
         <form id="upload-form"><input id="video-file" type="file" accept="video/mp4,video/x-matroska,video/quicktime,video/webm" required /><button>Upload and analyze</button></form>
         <form id="remote-video-form"><input id="remote-video-url" type="url" placeholder="YouTube video or Twitch VOD URL" required /><button class="quiet">Download link and analyze</button></form>
         <div id="upload-progress" class="upload-progress" hidden>
@@ -262,7 +362,7 @@
 
     <template id="segment-template">
       <article class="segment">
-        <div class="time"></div><div class="ranking hint"></div><div class="tags"></div><p class="transcript"></p><div class="context-reaction hint" hidden></div><details class="clip-context" hidden><summary>Context before and after</summary><p class="context-before"></p><p class="context-after"></p></details><div class="chat-reaction hint" hidden></div><p class="chat-messages hint" hidden></p>
+        <div class="time"></div><div class="ranking hint"></div><div class="tags"></div><p class="transcript"></p><div class="context-reaction hint" hidden></div><details class="clip-context" hidden><summary>Context before and after</summary><p class="context-before"></p><p class="context-after"></p></details><div class="chat-question hint" hidden></div><div class="chat-reaction hint" hidden></div><p class="chat-messages hint" hidden></p>
         <p class="hint clip-select-hint">Click this clip to edit it in the right panel.</p>
         <div class="actions"><button data-open>Open in full recording</button><button data-rating="accepted">Approve clip</button><button class="quiet" data-rating="rejected">Reject</button><button class="quiet" data-preview>Listen</button><button class="quiet" data-example>Add as reference</button></div>
       </article>
@@ -282,8 +382,9 @@
             <label>End (seconds)<input id="editor-end" type="number" min="0" step="0.1" /></label>
             <button id="editor-save-range" class="quiet">Save range</button>
             <label>Caption position
-              <select id="editor-caption-position"><option value="bottom">Bottom</option><option value="middle">Middle</option><option value="top">Top</option></select>
+              <select id="editor-caption-position"><option value="bottom">Bottom</option><option value="four_fifths">4/5 height</option><option value="middle">Middle</option><option value="two_fifths">2/5 height</option><option value="top">Top</option></select>
             </label>
+            <div id="editor-caption-position-preview" class="caption-position-preview" data-position="bottom" aria-label="Caption height preview"><span>Test captions</span></div>
             <label>Clip status
               <select id="editor-rating-select"><option value="unrated">Not reviewed</option><option value="accepted">Approved</option><option value="rejected">Rejected</option></select>
             </label>
@@ -324,6 +425,11 @@
       <video id="full-video" controls preload="metadata"></video>
       <p id="dialog-transcript" class="hint"></p>
     </dialog>
+    <dialog id="diagnostics-dialog">
+      <div class="dialog-head"><div><strong>Diagnostic report</strong><p class="hint">Contains technical state and recent errors, without recordings or transcripts.</p></div><button id="close-diagnostics" class="quiet">Close</button></div>
+      <textarea id="diagnostics-report-content" class="diagnostics-report" readonly spellcheck="false"></textarea>
+      <div class="actions"><button id="copy-diagnostics" class="quiet" type="button">Copy report</button><a id="save-diagnostics" class="quiet" href="/api/diagnostics/report">Save .txt file</a></div>
+    </dialog>
     <dialog id="quick-review-dialog" class="quick-review-dialog">
       <div class="dialog-head"><div><strong>Quick selection</strong><p id="quick-review-progress" class="hint"></p></div><button id="quick-review-close" class="quiet">Close</button></div>
       <div class="quick-review-content">
@@ -342,6 +448,6 @@
       <p class="hint quick-review-shortcuts"><kbd>A</kbd> approve &nbsp; <kbd>R</kbd> reject &nbsp; <kbd>←</kbd><kbd>→</kbd> previous / next</p>
       <div class="actions quick-review-actions"><button id="quick-review-approve">Approve</button><button id="quick-review-reject" class="quiet">Reject</button><button id="quick-review-previous" class="quiet">Previous</button><button id="quick-review-next" class="quiet">Next</button></div>
     </dialog>
-    <script src="/static/app.js?v=20260801-pause-trim"></script>
+    <script src="/static/app.js?v=20260803-caption-positions"></script>
   </body>
 </html>

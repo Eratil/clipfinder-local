@@ -11,10 +11,11 @@ from app import database as db
 
 
 PROFILE_DEFINITIONS = {
-    "general": {"name": "General - best mixed clips", "tag_weights": {"humor": 5, "zaskoczenie": 5, "gniew": 4, "wyrażanie opinii": 4, "radość": 3, "złość": 3}},
+    "general": {"name": "General - best mixed clips", "tag_weights": {"humor": 5, "zaskoczenie": 5, "gniew": 4, "wyrażanie opinii": 4, "pytanie": 3, "radość": 3, "złość": 3}},
     "soulslike": {"name": "Soulslike - reactions, fails and wins", "tag_weights": {"gniew": 8, "złość": 7, "zaskoczenie": 7, "humor": 5, "radość": 5}},
-    "conversation": {"name": "Conversation - stories and opinions", "tag_weights": {"wyrażanie opinii": 9, "rekomendacja": 7, "humor": 5, "pytanie": 3}},
+    "conversation": {"name": "Conversation - stories and opinions", "tag_weights": {"wyrażanie opinii": 9, "rekomendacja": 7, "pytanie": 8, "humor": 5}},
     "horror": {"name": "Horror - surprise and tension", "tag_weights": {"zaskoczenie": 10, "gniew": 5, "złość": 5, "humor": 3}},
+    "game_quote_reaction": {"name": "Game quote/event -> your reaction", "tag_weights": {"reakcja na grę": 16, "zaskoczenie": 7, "humor": 5, "radość": 4}},
 }
 
 PREFERENCE_FEATURES = (
@@ -29,8 +30,29 @@ def active_profile() -> str:
     return profile if profile in PROFILE_DEFINITIONS else "general"
 
 
+def active_pattern_set(profile: str | None = None) -> dict | None:
+    """Return the optional analytical pattern set for the active discovery profile."""
+    selected_profile = profile if profile in PROFILE_DEFINITIONS else active_profile()
+    saved = db.row("SELECT pattern_set_id FROM discovery_defaults WHERE id=1") or {}
+    pattern_set_id = str(saved.get("pattern_set_id") or "").strip()
+    if not pattern_set_id:
+        return None
+    return db.row(
+        "SELECT id, name, profile FROM discovery_pattern_sets WHERE id=? AND profile=?",
+        (pattern_set_id, selected_profile),
+    )
+
+
+def _pattern_rows(pattern_set_id: str) -> list[dict]:
+    return db.rows(
+        "SELECT tags, quality_score, logical_sense_score, reading_likelihood, embedding FROM discovery_pattern_examples WHERE pattern_set_id=?",
+        (pattern_set_id,),
+    )
+
+
 def profile_payload() -> dict:
     profile = active_profile()
+    pattern_set = active_pattern_set(profile)
     counts = {item["profile"]: item for item in db.rows(
         "SELECT profile, SUM(decision='accepted') AS accepted, SUM(decision='rejected') AS rejected FROM preference_feedback GROUP BY profile"
     )}
@@ -38,7 +60,17 @@ def profile_payload() -> dict:
     for key, value in PROFILE_DEFINITIONS.items():
         feedback = counts.get(key, {})
         profiles.append({"id": key, "name": value["name"], "accepted": int(feedback.get("accepted") or 0), "rejected": int(feedback.get("rejected") or 0)})
-    return {"active_profile": profile, "profiles": profiles}
+    return {
+        "active_profile": profile,
+        "pattern_set_id": pattern_set["id"] if pattern_set else "",
+        "pattern_set_name": pattern_set["name"] if pattern_set else "",
+        "profiles": profiles,
+        "pattern_sets": db.rows(
+            """SELECT s.id, s.name, s.profile, COUNT(e.id) AS examples
+               FROM discovery_pattern_sets s LEFT JOIN discovery_pattern_examples e ON e.pattern_set_id=s.id
+               GROUP BY s.id, s.name, s.profile ORDER BY lower(s.name)"""
+        ),
+    }
 
 
 def preference_features(segment: dict) -> dict:
@@ -55,6 +87,8 @@ def preference_features(segment: dict) -> dict:
         "logical_sense": min(1.0, max(0.0, float(segment.get("logical_sense_score") or 50) / 100)),
         "context": min(1.0, max(0.0, float(segment.get("context_score") or 50) / 100)),
         "self_contained": min(1.0, max(0.0, float(segment.get("self_contained_score") or 50) / 100)),
+        "extended_completeness": min(1.0, max(0.0, float(segment.get("extended_completeness_score") or 50) / 100)),
+        "chat_question_match": min(1.0, max(0.0, float(segment.get("chat_question_match_score") or 0) / 100)),
         "moment_reaction": min(1.0, max(0.0, float(segment.get("moment_reaction_score") or 0) / 30)),
         "reading": min(1.0, max(0.0, float(segment.get("reading_likelihood") or 0))),
     }
@@ -154,6 +188,14 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
     if not candidates:
         return []
     profile = profile if profile in PROFILE_DEFINITIONS else active_profile()
+    pattern_rows: list[dict] = []
+    pattern_label = ""
+    if reference is None:
+        pattern_set = active_pattern_set(profile)
+        if pattern_set:
+            pattern_rows = _pattern_rows(pattern_set["id"])
+            reference = [json.loads(item["embedding"]) for item in pattern_rows]
+            pattern_label = pattern_set["name"]
     definition = PROFILE_DEFINITIONS[profile]
     accepted, rejected_by_reason = _legacy_preference_vectors()
     profile_accepted, profile_rejected, profile_rejected_by_reason, profile_accepted_rows, profile_rejected_rows = _profile_feedback(profile)
@@ -188,6 +230,10 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
         self_contained = int(candidate.get("self_contained_score") or 0)
         if self_contained <= 0:
             self_contained = 50
+        completeness = int(candidate.get("extended_completeness_score") or 0)
+        if completeness <= 0:
+            completeness = context
+        question_match = int(candidate.get("chat_question_match_score") or 0)
         moment_reaction = int(candidate.get("moment_reaction_score") or 0)
         moment_stage = candidate.get("moment_reaction_stage") or ""
         tags = json.loads(candidate.get("tags") or "[]")
@@ -198,7 +244,7 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
         excluded_reading = is_disallowed_reading(candidate)
         duration_adjustment, duration_reason = _duration_adjustment(candidate, tags, chat)
         reading_penalty = reading * (52 if excluded_reading else 10)
-        score = 22 + quality * 0.46 + audio * 0.75 + visual * 0.65 + chat * 0.85 + moment_reaction * 0.45 + (context - 50) * 0.10 + (self_contained - 50) * 0.12 + tag_bonus + duration_adjustment - reading_penalty
+        score = 22 + quality * 0.46 + audio * 0.75 + visual * 0.65 + chat * 0.85 + moment_reaction * 0.45 + (context - 50) * 0.10 + (self_contained - 50) * 0.12 + (completeness - 50) * 0.14 + question_match * 0.14 + tag_bonus + duration_adjustment - reading_penalty
         strong_emotion = bool({"humor", "gniew", "zaskoczenie", "radość", "złość"}.intersection(tags)) or game_reaction >= 7 or voice_expression >= 9
         happy_chat = chat_joy >= 4 and chat >= 5
         context_penalty = 0
@@ -214,8 +260,20 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
             if (context <= 38 or self_contained <= 35) and not happy_chat:
                 context_penalty += 5
         score += context_bonus - context_penalty
+        if profile == "game_quote_reaction":
+            # The current local analysis identifies a game-audio cue followed
+            # by speech on the microphone track. Downrank clips without that
+            # order, so unconnected loud game audio does not dominate here.
+            if moment_stage in {"game -> voice", "game -> voice -> chat"}:
+                score += 18 + min(8, game_reaction)
+            else:
+                score -= 16
         if reference:
             score += prompt_match * 27
+        if pattern_rows:
+            pattern_tags = {tag for item in pattern_rows for tag in json.loads(item.get("tags") or "[]")}
+            overlap = len(set(tags).intersection(pattern_tags))
+            score += min(7, overlap * 2)
         if len(accepted):
             score += approval_match * 13
         if strongest_rejection >= 0.42:
@@ -245,7 +303,8 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
         reasons = [f"quality {quality}/99"]
         reasons.append(duration_reason)
         if reference:
-            reasons.insert(0, f"prompt match {round(max(0, prompt_match) * 100)}%")
+            source = f"discovery patterns: {pattern_label}" if pattern_label else "prompt"
+            reasons.insert(0, f"matches {source} {round(max(0, prompt_match) * 100)}%")
         if len(accepted) >= 4 and approval_match >= 0.30:
             reasons.append("matches your approvals")
         if len(profile_accepted) >= 3 and profile_approval_match >= 0.30:
@@ -264,10 +323,16 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
         if chat >= 7:
             people = f" / {chat_authors} viewers" if chat_authors else ""
             reasons.append(f"chat reacted: {chat_messages} messages{people}")
+        if "pytanie" in tags:
+            reasons.append("answers a viewer question")
+        if question_match >= 40:
+            reasons.append(f"viewer question matched {question_match}/99")
         if moment_stage == "game -> voice -> chat":
             reasons.append(f"game moment -> voice -> chat {moment_reaction}/30")
         elif moment_reaction >= 7:
             reasons.append(f"game moment -> voice {moment_reaction}/30")
+        if profile == "game_quote_reaction":
+            reasons.append("game cue before microphone reaction" if moment_stage in {"game -> voice", "game -> voice -> chat"} else "no game cue -> microphone reaction sequence")
         if context >= 72:
             reasons.append("context confirms a complete thought")
         elif context <= 38 and not happy_chat:
@@ -276,6 +341,8 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
             reasons.append("works without prior context")
         elif self_contained <= 35 and not happy_chat:
             reasons.append("needs surrounding conversation to make sense")
+        if int(candidate.get("extended_completeness_score") or -1) >= 0:
+            reasons.append(f"extended completeness {completeness}/99")
         boundary_signals = [signal for signal in quality_signals if signal in {"start aligned to sentence", "end aligned to sentence", "extended to punchline"}]
         if boundary_signals:
             reasons.append("smart boundaries: " + ", ".join(boundary_signals))
