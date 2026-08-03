@@ -212,3 +212,5 @@ button.collection-delete,.collection-delete { margin-left:auto; color:var(--dang
 .remote-preview-result img { display:block; width:min(100%,360px); max-height:230px; object-fit:contain; justify-self:center; background:#000; border-radius:6px; }
 .remote-preview-result .preview-transcript { max-height:150px; overflow:auto; color:var(--text); white-space:pre-wrap; }
 .remote-preview-meta { color:var(--muted); font-size:12px; }
+.startup-update-notice { padding:6px 10px; color:#fff2c1; background:#3c2c10; border:1px solid #a97925; border-radius:999px; font-size:12px; white-space:nowrap; }
+.startup-update-notice:hover { color:#181005; background:#f4c766; border-color:#f4c766; }

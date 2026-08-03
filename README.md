@@ -49,14 +49,17 @@ The GPU add-on is intentionally split by Inno Setup into a setup executable plus
 
 You do **not** need to uninstall ClipFinder or remove its local data before an update. Each installer uses the same Windows application identity and install directory. Close ClipFinder, then run the newer `ClipFinder-Setup-x.y.z.exe`; it updates the program in place and keeps recordings, results, settings and exports in `%LOCALAPPDATA%\ClipFinder\data`.
 
-The **Saved setup** panel has a manual **Check for updates** button. It only checks the latest public GitHub Release and opens its installer download link; it never downloads or runs software automatically. This is intentionally safer for a local desktop tool.
+The **Saved setup** panel has a manual **Check for updates** button. After the user confirms an update, ClipFinder downloads it, closes itself and restarts after the verified update has completed. Data in `%LOCALAPPDATA%\ClipFinder\data` is never part of an update.
 
 To publish an update:
 
 1. Change the version in `app/version.py`, for example to `0.1.1`.
 2. Commit and push the code.
 3. Build the matching installer: `./Build-Installer.ps1 -Version 0.1.1`.
-4. Create a GitHub Release with tag `v0.1.1` and upload `ClipFinder-Setup-0.1.1.exe` as its asset.
+4. Create a GitHub Release with tag `v0.1.1` and upload `ClipFinder-Setup-0.1.1.exe` **and** `ClipFinder-manifest-0.1.1.json` from `installer-output`.
+5. After the first release that contains the compact-update client, the build also creates `ClipFinder-patch-previous-to-0.1.1.zip`. Upload it too. A matching installed version downloads this smaller patch; every other version safely falls back to the full setup EXE.
+
+The build keeps one compressed local baseline in `release-cache/` (ignored by Git) so it can generate the next patch. It replaces the older baseline after a successful build, keeping disk use bounded. Do not upload this cache to GitHub.
 
 The app can check releases only when the repository and release are public. A private repository would require a separate authenticated update service; do not embed a GitHub access token in the installed application.
 

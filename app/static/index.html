@@ -4,13 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ClipFinder Local</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260803-discovery-patterns" />
+    <link rel="stylesheet" href="/static/style.css?v=20260804-startup-update" />
   </head>
   <body class="clip-editor-closed">
     <main>
       <header>
         <div><p id="runtime-headline" class="eyebrow">LOCAL / CHECKING RUNTIME</p><div class="app-title-row"><h1>ClipFinder</h1><span id="app-version" class="app-version">Version --</span></div><p id="runtime-detail" class="hint runtime-detail">Checking GPU and CUDA...</p></div>
-        <div class="header-actions"><a href="/docs" target="_blank" class="quiet">API docs</a><p id="status">Connecting...</p></div>
+        <div class="header-actions"><button id="startup-update-notice" type="button" class="startup-update-notice" hidden>Update available</button><a href="/docs" target="_blank" class="quiet">API docs</a><p id="status">Connecting...</p></div>
       </header>
 
       <button id="setup-toggle" class="quiet setup-toggle" aria-controls="setup-sidebar" aria-expanded="false">Saved setup</button>
@@ -448,6 +448,6 @@
       <p class="hint quick-review-shortcuts"><kbd>A</kbd> approve &nbsp; <kbd>R</kbd> reject &nbsp; <kbd>←</kbd><kbd>→</kbd> previous / next</p>
       <div class="actions quick-review-actions"><button id="quick-review-approve">Approve</button><button id="quick-review-reject" class="quiet">Reject</button><button id="quick-review-previous" class="quiet">Previous</button><button id="quick-review-next" class="quiet">Next</button></div>
     </dialog>
-    <script src="/static/app.js?v=20260803-caption-positions"></script>
+    <script src="/static/app.js?v=20260804-startup-update"></script>
   </body>
 </html>

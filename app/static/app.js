@@ -1,4 +1,4 @@
-const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', pattern_set_id:'', pattern_sets:[], profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, listeningSegment: null, listenAudioTrack: 1, quickReview: { clips: [], index: 0, saving: false }, remotePreview: { jobId:null, completedJobId:null, poll:null }, editingSegment: null, clipEditorOpen: false, editorTab: 'edit', captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00', outline_enabled: true, outline_color: '#000000', glow_enabled: false, opacity: 100 }, globalExport: { layout: 'original', layout_preset_id: '', audio_track: 1, camera_x:.78, camera_y:.03, camera_width:.11, camera_height:.11, game_x:.22, game_y:0, game_width:.56, game_height:1 }, layoutPresets: [], layoutCalibration: { mode:'camera', drawing:null }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, discoveryDirty: false, statusErrorUntil: 0, updateDownloadId: null };
+const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', pattern_set_id:'', pattern_sets:[], profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, listeningSegment: null, listenAudioTrack: 1, quickReview: { clips: [], index: 0, saving: false }, remotePreview: { jobId:null, completedJobId:null, poll:null }, editingSegment: null, clipEditorOpen: false, editorTab: 'edit', captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00', outline_enabled: true, outline_color: '#000000', glow_enabled: false, opacity: 100 }, globalExport: { layout: 'original', layout_preset_id: '', audio_track: 1, camera_x:.78, camera_y:.03, camera_width:.11, camera_height:.11, game_x:.22, game_y:0, game_width:.56, game_height:1 }, layoutPresets: [], layoutCalibration: { mode:'camera', drawing:null }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, discoveryDirty: false, statusErrorUntil: 0, updateDownloadId: null, appVersion: '' };
 // One preview definition per export preset. Add a new entry here when adding a
 // caption preset, so the settings preview stays in sync without a new CSS rule.
 const captionPreviewPresets = {
@@ -97,11 +97,49 @@ function analysisModeDescription() {
 }
 async function loadRuntimeStatus() {
   const runtime = await api('/runtime-status');
+  state.appVersion = String(runtime.version || 'unknown');
   $('#runtime-headline').textContent = runtime.headline;
   $('#app-version').textContent = `Version ${runtime.version || '--'}`;
   const gpu = runtime.gpu ? `${runtime.gpu.name} / ${runtime.gpu.memory_mb} MB VRAM` : 'No NVIDIA GPU detected';
   $('#runtime-detail').textContent = `Transcription: ${runtime.transcription.label}. Similarity search: ${runtime.embeddings.label}. ${gpu}.`;
   $('#runtime-headline').classList.toggle('runtime-warning', runtime.transcription.mode === 'unavailable');
+}
+function startupUpdateStorageKey(version = state.appVersion) { return `clipfinder-update-available:${version || 'unknown'}`; }
+function showStartupUpdateNotice(latestVersion) {
+  const notice = $('#startup-update-notice');
+  notice.textContent = latestVersion ? `Update available: ${latestVersion}` : 'Update available';
+  notice.hidden = false;
+}
+function rememberStartupUpdate(update) {
+  const currentVersion = String(update.current_version || state.appVersion || 'unknown');
+  state.appVersion = currentVersion;
+  if (update.update_available && update.latest_version) {
+    try { localStorage.setItem(startupUpdateStorageKey(currentVersion), String(update.latest_version)); } catch { /* Optional local notice only. */ }
+    showStartupUpdateNotice(update.latest_version);
+  } else if (!update.update_available) {
+    try { localStorage.removeItem(startupUpdateStorageKey(currentVersion)); } catch { /* Optional local notice only. */ }
+    $('#startup-update-notice').hidden = true;
+  }
+}
+async function checkForStartupUpdate() {
+  const currentVersion = state.appVersion;
+  if (!currentVersion) return;
+  try {
+    const knownVersion = localStorage.getItem(startupUpdateStorageKey(currentVersion));
+    if (knownVersion) { showStartupUpdateNotice(knownVersion); return; }
+  } catch { /* Local storage can be unavailable in an embedded browser. */ }
+  try {
+    const update = await api('/update-status');
+    if (!update.error) rememberStartupUpdate(update);
+  } catch { /* A startup update check must never interrupt ClipFinder. */ }
+}
+function openStartupUpdateNotice() {
+  setSetupSidebar(true);
+  setSetupTab('global');
+  let knownVersion = '';
+  try { knownVersion = localStorage.getItem(startupUpdateStorageKey()) || ''; } catch { /* Optional local notice only. */ }
+  $('#update-status').textContent = knownVersion ? `Update available: ${knownVersion}. Click Check for updates for details.` : 'Update available. Click Check for updates for details.';
+  requestAnimationFrame(() => document.querySelector('.updates-card')?.scrollIntoView({ behavior:'smooth', block:'start' }));
 }
 function setUploadProgress(percent, label, error = false) {
   const block = $('#upload-progress'); block.hidden = false; block.classList.toggle('error', error);
@@ -562,6 +600,7 @@ async function checkForUpdates() {
   try {
     const update = await api('/update-status');
     if (update.error) { status.textContent = `Version ${update.current_version}: ${update.error}`; return; }
+    rememberStartupUpdate(update);
     if (update.release_notes || update.release_url) {
       notesTitle.textContent = update.release_name || `ClipFinder ${update.latest_version}`;
       notesBody.textContent = update.release_notes || 'No release notes were provided.';
@@ -570,12 +609,15 @@ async function checkForUpdates() {
     }
     if (!update.update_available) { status.textContent = `ClipFinder ${update.current_version} is up to date (latest: ${update.latest_version}).`; return; }
     const size = update.asset_size ? ` (${bytes(update.asset_size)})` : '';
-    download.href = update.download_url; download.hidden = !update.download_url;
+    const compact = update.update_kind === 'patch';
+    const manualUrl = update.manual_download_url || update.download_url || '';
+    download.href = manualUrl || '#'; download.hidden = !manualUrl;
+    download.textContent = 'Download full installer';
     if (update.automatic_install_available) {
-      status.textContent = `Update available: ${update.current_version} -> ${update.latest_version}${size}.`;
-      install.textContent = 'Download update'; install.onclick = startAutomaticUpdate; install.hidden = false;
+      status.textContent = `${compact ? 'Compact update' : 'Full update'} available: ${update.current_version} -> ${update.latest_version}${size}.`;
+      install.textContent = compact ? 'Download compact update' : 'Download update'; install.onclick = startAutomaticUpdate; install.hidden = false;
     } else {
-      status.textContent = `Update available: ${update.current_version} -> ${update.latest_version}${size}. Download the installer, close ClipFinder, then run it to update in place.`;
+      status.textContent = `Update available: ${update.current_version} -> ${update.latest_version}. Download the full installer, close ClipFinder, then run it to update in place.`;
     }
   } catch (error) { status.textContent = `Could not check for updates: ${error.message}`; }
   finally { button.disabled = false; }
@@ -593,8 +635,8 @@ async function startAutomaticUpdate() {
         const amount = current.total_bytes ? ` ${bytes(current.downloaded_bytes)} / ${bytes(current.total_bytes)}` : '';
         status.textContent = `${current.message || 'Downloading update'}${amount}${percent ? ` (${percent}%)` : ''}`;
         if (current.state === 'completed') {
-          fill.style.width = '100%'; status.textContent = 'Update is ready. ClipFinder will close, install the update, then reopen.';
-          install.disabled = false; install.textContent = 'Restart and install update'; install.onclick = installAutomaticUpdate; return;
+          fill.style.width = '100%'; const compact = current.update_kind === 'patch'; status.textContent = compact ? 'Compact update is ready. ClipFinder will close, verify changed files and reopen.' : 'Update is ready. ClipFinder will close, install the update, then reopen.';
+          install.disabled = false; install.textContent = compact ? 'Restart and apply update' : 'Restart and install update'; install.onclick = installAutomaticUpdate; return;
         }
         if (current.state === 'failed') { install.disabled = false; status.textContent = `Update download failed: ${current.message}`; return; }
         window.setTimeout(poll, 700);
@@ -1235,6 +1277,7 @@ $('#description-button').onclick = async () => { const description = $('#active-
 $('#similar-button').onclick = async () => { if (!state.videoId || !state.collectionId) return message('Choose a recording and a collection first.', true); try { const results = await api(`/collections/${state.collectionId}/search`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({video_id:state.videoId})}); state.resultMode = 'similar'; state.activeResults = results; await loadSegments(results); } catch (error) { message(error.message, true); } };
 $('#active-prompt').oninput = updateSelectionSummary; $('#refresh').onclick = refreshDashboard;
 $('#check-updates').onclick = checkForUpdates;
+$('#startup-update-notice').onclick = openStartupUpdateNotice;
 $('#download-diagnostics').onclick = openDiagnosticReport;
 $('#close-diagnostics').onclick = () => $('#diagnostics-dialog').close();
 $('#copy-diagnostics').onclick = async () => {
@@ -1292,4 +1335,4 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') setSetupSidebar(false);
 });
 $('#close-dialog').onclick = () => { $('#full-video').pause(); $('#video-dialog').close(); };
-api('/health').then(async () => { await Promise.all([refreshDashboard(), loadRuntimeStatus()]); }).catch(() => message('Local API unavailable', true)); setInterval(refreshDashboard, 4000); setInterval(() => loadRuntimeStatus().catch(() => {}), 30000);
+api('/health').then(async () => { await Promise.all([refreshDashboard(), loadRuntimeStatus()]); void checkForStartupUpdate(); }).catch(() => message('Local API unavailable', true)); setInterval(refreshDashboard, 4000); setInterval(() => loadRuntimeStatus().catch(() => {}), 30000);

@@ -146,3 +146,45 @@ Write-Host "`nReady: installer-output\$installerName" -ForegroundColor Green
 if ($GpuAddon) {
     Write-Host 'Keep every generated .bin file next to the GPU add-on executable. Send the whole GPU add-on folder or put all of its files into one ZIP.' -ForegroundColor Yellow
 }
+else {
+    # Keep one compressed copy of the current application folder.  On the
+    # next release it lets us create a compact, verified file-level patch
+    # instead of making existing users download the full setup EXE again.
+    $cacheRoot = Join-Path $projectRoot 'release-cache'
+    New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
+    $cacheName = "ClipFinder-files-$Version.zip"
+    $previousCache = Get-ChildItem -Path $cacheRoot -Filter 'ClipFinder-files-*.zip' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne $cacheName } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    $manifestPath = Join-Path $projectRoot "installer-output\ClipFinder-manifest-$Version.json"
+    # The first app containing the compact-update client will be 0.1.18.
+    # Older clients understand only full setup EXEs, so do not publish a
+    # misleading patch for them even if we still have their cached build.
+    if ($previousCache -and $previousCache.Name -match '^ClipFinder-files-(\d+\.\d+\.\d+)\.zip$' -and ([version]$Matches[1]) -ge [version]'0.1.18') {
+        $previousVersion = $Matches[1]
+        Write-Host "Building a compact update patch from $previousVersion to $Version..." -ForegroundColor Cyan
+        try {
+            & $python 'tools\build_update_package.py' patch --from-archive $previousCache.FullName --from-version $previousVersion --to-directory 'dist\ClipFinder' --to-version $Version --output-dir 'installer-output'
+            if ($LASTEXITCODE -ne 0) { throw 'Patch generator returned a non-zero exit code.' }
+        }
+        catch {
+            Write-Warning "Could not build an update patch. The full installer remains ready: $($_.Exception.Message)"
+            & $python 'tools\build_update_package.py' manifest --source 'dist\ClipFinder' --version $Version --output $manifestPath
+            if ($LASTEXITCODE -ne 0) { throw 'Could not build the release manifest.' }
+        }
+    }
+    else {
+        & $python 'tools\build_update_package.py' manifest --source 'dist\ClipFinder' --version $Version --output $manifestPath
+        if ($LASTEXITCODE -ne 0) { throw 'Could not build the release manifest.' }
+    }
+    $cachePath = Join-Path $cacheRoot $cacheName
+    & $python 'tools\build_update_package.py' cache --source 'dist\ClipFinder' --version $Version --output $cachePath
+    if ($LASTEXITCODE -ne 0) { throw 'Could not cache this release for the next update patch.' }
+    # The updater needs only the direct predecessor. Older caches would use a
+    # lot of disk space and still fall back safely to the full installer.
+    Get-ChildItem -Path $cacheRoot -Filter 'ClipFinder-files-*.zip' -File |
+        Where-Object { $_.Name -ne $cacheName } |
+        Remove-Item -Force
+    Write-Host 'Add the setup EXE and ClipFinder-manifest JSON to the GitHub Release. If present, add the generated ClipFinder-patch ZIP too.' -ForegroundColor Yellow
+}
