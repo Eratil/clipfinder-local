@@ -15,7 +15,7 @@ from app.services import diagnostics
 from app.services.discovery import assign_duplicate_groups
 from app.services.media import audio_track_count, duration_seconds, extract_audio, extract_audio_range
 from app.services.scenes import detect_boundaries
-from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_context, assess_extended_completeness, assess_logical_sense, assess_self_containment, enrich_tags, infer_tags, score_moment_reaction
+from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_context, assess_extended_completeness, assess_logical_sense, assess_self_containment, assess_short_potential, enrich_tags, infer_tags, score_moment_reaction
 from app.services.chat import apply_chat_reactions
 
 Progress = Callable[[int, str], None]
@@ -691,12 +691,20 @@ def analyse(video_id: str, report: Progress) -> None:
             moment_reaction_score=record["moment_reaction_score"],
             moment_reaction_stage=record["moment_reaction_stage"],
         )
+        record["short_potential_score"], record["short_potential_signals"] = assess_short_potential(
+            record["text"], record["start"], record["end"], record["tags"],
+            quality_score=record["quality_score"], reading_likelihood=record["reading_likelihood"],
+            logical_sense_score=record["logical_sense_score"], context_score=record["context_score"],
+            self_contained_score=record["self_contained_score"], extended_completeness_score=record["extended_completeness_score"],
+            game_reaction_score=record["game_reaction_score"], voice_expression_score=record["voice_expression_score"],
+            moment_reaction_score=record["moment_reaction_score"],
+        )
     with db.connection() as con:
         con.execute("DELETE FROM segments WHERE video_id = ?", (video_id,))
         for record in records:
             con.execute(
-                "INSERT INTO segments (id, video_id, start_seconds, end_seconds, transcript, keywords, tags, word_timestamps, embedding, quality_score, quality_signals, logical_sense_score, context_score, self_contained_score, extended_completeness_score, context_before, context_after, reading_likelihood, audio_event_score, game_reaction_score, voice_expression_score, moment_reaction_score, moment_reaction_stage, vision_score, duplicate_group, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record["id"], video_id, record["start"], record["end"], record["text"], json.dumps(record["keywords"], ensure_ascii=False), json.dumps(record["tags"], ensure_ascii=False), json.dumps(record["words"], ensure_ascii=False), json.dumps(record["vector"]), record["quality_score"], json.dumps(record["quality_signals"]), record["logical_sense_score"], record["context_score"], record["self_contained_score"], record["extended_completeness_score"], record["context_before"], record["context_after"], record["reading_likelihood"], record["audio_event_score"], record["game_reaction_score"], record["voice_expression_score"], record["moment_reaction_score"], record["moment_reaction_stage"], record["vision_score"], record["duplicate_group"], db.now()),
+                "INSERT INTO segments (id, video_id, start_seconds, end_seconds, transcript, keywords, tags, word_timestamps, embedding, quality_score, quality_signals, short_potential_score, short_potential_signals, logical_sense_score, context_score, self_contained_score, extended_completeness_score, context_before, context_after, reading_likelihood, audio_event_score, game_reaction_score, voice_expression_score, moment_reaction_score, moment_reaction_stage, vision_score, duplicate_group, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (record["id"], video_id, record["start"], record["end"], record["text"], json.dumps(record["keywords"], ensure_ascii=False), json.dumps(record["tags"], ensure_ascii=False), json.dumps(record["words"], ensure_ascii=False), json.dumps(record["vector"]), record["quality_score"], json.dumps(record["quality_signals"]), record["short_potential_score"], json.dumps(record["short_potential_signals"]), record["logical_sense_score"], record["context_score"], record["self_contained_score"], record["extended_completeness_score"], record["context_before"], record["context_after"], record["reading_likelihood"], record["audio_event_score"], record["game_reaction_score"], record["voice_expression_score"], record["moment_reaction_score"], record["moment_reaction_stage"], record["vision_score"], record["duplicate_group"], db.now()),
             )
         con.execute("UPDATE videos SET status='ready', updated_at=? WHERE id=?", (db.now(), video_id))
     # A chat transcript may have been imported before a reanalysis. Reapply it

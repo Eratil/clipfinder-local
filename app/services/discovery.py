@@ -8,6 +8,7 @@ from collections import defaultdict
 import numpy as np
 
 from app import database as db
+from app.services.media import is_profanity
 
 
 PROFILE_DEFINITIONS = {
@@ -28,6 +29,37 @@ def active_profile() -> str:
     saved = db.row("SELECT active_profile FROM discovery_defaults WHERE id=1")
     profile = (saved or {}).get("active_profile", "general")
     return profile if profile in PROFILE_DEFINITIONS else "general"
+
+
+PROFANITY_FILTERS = {"allow", "one", "none"}
+
+
+def active_profanity_filter() -> str:
+    saved = db.row("SELECT profanity_filter FROM discovery_defaults WHERE id=1") or {}
+    value = str(saved.get("profanity_filter") or "allow")
+    return value if value in PROFANITY_FILTERS else "allow"
+
+
+def profanity_count(segment: dict) -> int:
+    """Count profane words once, preferring the timestamped transcript tokens."""
+    raw_words = segment.get("word_timestamps") or "[]"
+    try:
+        words = json.loads(raw_words) if isinstance(raw_words, str) else raw_words
+    except (TypeError, ValueError):
+        words = []
+    if isinstance(words, list) and words:
+        tokens = [str(item.get("word", "")) for item in words if isinstance(item, dict)]
+    else:
+        tokens = str(segment.get("transcript") or "").split()
+    return sum(1 for token in tokens if is_profanity(token))
+
+
+def filter_profanity(candidates: list[dict], profanity_filter: str | None = None) -> list[dict]:
+    selected = profanity_filter or active_profanity_filter()
+    if selected == "allow":
+        return candidates
+    maximum = 1 if selected == "one" else 0
+    return [candidate for candidate in candidates if profanity_count(candidate) <= maximum]
 
 
 def active_pattern_set(profile: str | None = None) -> dict | None:
@@ -62,6 +94,7 @@ def profile_payload() -> dict:
         profiles.append({"id": key, "name": value["name"], "accepted": int(feedback.get("accepted") or 0), "rejected": int(feedback.get("rejected") or 0)})
     return {
         "active_profile": profile,
+        "profanity_filter": active_profanity_filter(),
         "pattern_set_id": pattern_set["id"] if pattern_set else "",
         "pattern_set_name": pattern_set["name"] if pattern_set else "",
         "profiles": profiles,
@@ -241,10 +274,23 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
         tag_bonus = sum(weight for tag, weight in definition["tag_weights"].items() if tag in tags)
         if "reakcja na grę" in tags:
             tag_bonus += {"general": 6, "soulslike": 10, "horror": 8}.get(profile, 4)
+        # Tags are useful labels, not independent proof of quality.  Several
+        # overlapping labels previously pushed ordinary clips to the 99 cap.
+        tag_bonus = min(8.0, float(tag_bonus))
         excluded_reading = is_disallowed_reading(candidate)
         duration_adjustment, duration_reason = _duration_adjustment(candidate, tags, chat)
         reading_penalty = reading * (52 if excluded_reading else 10)
-        score = 22 + quality * 0.46 + audio * 0.75 + visual * 0.65 + chat * 0.85 + moment_reaction * 0.45 + (context - 50) * 0.10 + (self_contained - 50) * 0.12 + (completeness - 50) * 0.14 + question_match * 0.14 + tag_bonus + duration_adjustment - reading_penalty
+        # Suggested score is deliberately calibrated in bounded groups rather
+        # than as an open-ended sum.  A score of 99 should be exceptional, not
+        # the result of a normal clip collecting several correlated bonuses.
+        quality_component = quality * 0.28                         # 0..27.7
+        reaction_component = min(15.0, audio * 0.20 + visual * 0.22 + chat * 0.30 + moment_reaction * 0.20 + max(game_reaction, voice_expression) * 0.20)
+        logic_component = max(-6.0, min(4.0, (logical_sense - 50) * 0.09))
+        context_component = max(-4.0, min(4.0, (context - 50) * 0.08))
+        standalone_component = max(-6.0, min(6.0, (self_contained - 50) * 0.12))
+        completeness_component = max(-4.0, min(3.0, (completeness - 50) * 0.06))
+        question_component = min(4.0, question_match * 0.04)
+        score = 10 + quality_component + reaction_component + logic_component + context_component + standalone_component + completeness_component + question_component + tag_bonus + duration_adjustment - reading_penalty
         strong_emotion = bool({"humor", "gniew", "zaskoczenie", "radość", "złość"}.intersection(tags)) or game_reaction >= 7 or voice_expression >= 9
         happy_chat = chat_joy >= 4 and chat >= 5
         context_penalty = 0
@@ -265,30 +311,31 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
             # by speech on the microphone track. Downrank clips without that
             # order, so unconnected loud game audio does not dominate here.
             if moment_stage in {"game -> voice", "game -> voice -> chat"}:
-                score += 18 + min(8, game_reaction)
+                score += 7 + min(4, game_reaction * 0.25)
             else:
-                score -= 16
+                score -= 12
         if reference:
-            score += prompt_match * 27
+            score += prompt_match * 10
         if pattern_rows:
             pattern_tags = {tag for item in pattern_rows for tag in json.loads(item.get("tags") or "[]")}
             overlap = len(set(tags).intersection(pattern_tags))
-            score += min(7, overlap * 2)
+            score += min(3, overlap)
         if len(accepted):
-            score += approval_match * 13
+            score += approval_match * 4
         if strongest_rejection >= 0.42:
             score -= strongest_rejection * 18
         feedback_bonus = 0.0
         if len(profile_accepted) >= 3:
-            feedback_bonus += profile_approval_match * 12
+            feedback_bonus += profile_approval_match * 5
         if len(profile_rejected) >= 3 and profile_rejection_match >= 0.38:
-            feedback_bonus -= profile_rejection_match * 15
+            feedback_bonus -= profile_rejection_match * 7
         accepted_distance = _feature_distance(candidate, profile_accepted_rows) if len(profile_accepted_rows) >= 4 else None
         rejected_distance = _feature_distance(candidate, profile_rejected_rows) if len(profile_rejected_rows) >= 4 else None
         if accepted_distance is not None and rejected_distance is not None:
-            feedback_bonus += max(-6.0, min(6.0, (rejected_distance - accepted_distance) * 18))
+            feedback_bonus += max(-4.0, min(4.0, (rejected_distance - accepted_distance) * 12))
         tag_feedback = _tag_preference(candidate, profile_accepted_rows, profile_rejected_rows)
         feedback_bonus += tag_feedback
+        feedback_bonus = max(-9.0, min(7.0, feedback_bonus))
         score += feedback_bonus
         if excluded_reading:
             # It remains accessible under the reading tag for manual checking,
@@ -378,6 +425,58 @@ def suppress_duplicate_groups(candidates: list[dict], keep_alternatives: bool = 
         if keep_alternatives or not item["duplicate_alternative"]:
             result.append(item)
     return result
+
+
+def _best_of_tags(candidate: dict) -> set[str]:
+    """Return the meaningful tag types used to keep a Best of list varied."""
+    try:
+        tags = json.loads(candidate.get("tags") or "[]")
+    except (TypeError, ValueError):
+        tags = []
+    return {
+        str(tag) for tag in tags
+        if str(tag).startswith(("forma:", "emocja:", "reakcja:", "kontekst:", "moment:"))
+        or str(tag) in {"humor", "zaskoczenie", "radość", "złość", "gniew", "smutek", "pytanie", "wyrażanie opinii", "rekomendacja", "reakcja na grę"}
+    }
+
+
+def _same_best_of_moment(left: dict, right: dict, padding_seconds: float = 35.0) -> bool:
+    """Treat nearby candidates as one stream moment, even if their text differs."""
+    left_start, left_end = float(left.get("start_seconds", 0)), float(left.get("end_seconds", 0))
+    right_start, right_end = float(right.get("start_seconds", 0)), float(right.get("end_seconds", 0))
+    return left_start <= right_end + padding_seconds and right_start <= left_end + padding_seconds
+
+
+def best_of_stream(candidates: list[dict], limit: int = 10) -> list[dict]:
+    """Pick strong but varied moments from one stream for fast review.
+
+    Duplicate groups remove near-identical text.  This second pass also keeps a
+    time buffer around each chosen moment and lightly prefers fresh content
+    tags, so a single long conversation, fail or game reaction cannot fill the
+    whole Best of list.
+    """
+    remaining = suppress_duplicate_groups(candidates)
+    selected: list[dict] = []
+    used_tags: set[str] = set()
+    while remaining and len(selected) < max(1, limit):
+        eligible = [item for item in remaining if not any(_same_best_of_moment(item, chosen) for chosen in selected)]
+        if not eligible:
+            break
+        def diversity_score(item: dict) -> tuple[float, float, float]:
+            overlap = len(_best_of_tags(item) & used_tags)
+            ranking = float(item.get("ranking_score") or 0)
+            short_potential = max(0.0, float(item.get("short_potential_score") or 0))
+            # Best of stream is meant for producing short-form material, so
+            # keep the user's discovery preference as the main signal while
+            # giving a meaningful boost to a concise, standalone candidate.
+            score = (ranking * 0.65) + (short_potential * 0.35) - min(12.0, overlap * 3.0)
+            return score, short_potential, ranking
+        chosen = max(eligible, key=diversity_score)
+        chosen["ranking_reason"] = f"{chosen.get('ranking_reason', '')}; Best of stream: distinct moment, short potential {int(chosen.get('short_potential_score') or 0)}/99".strip("; ")
+        selected.append(chosen)
+        used_tags.update(_best_of_tags(chosen))
+        remaining = [item for item in remaining if item.get("id") != chosen.get("id")]
+    return selected
 
 
 def assign_duplicate_groups(records: list[dict], threshold: float = 0.88) -> None:

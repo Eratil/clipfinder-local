@@ -178,6 +178,18 @@ button.collection-delete,.collection-delete { margin-left:auto; color:var(--dang
 .editor-tab { flex:1; white-space:nowrap; }
 .editor-tab.active { color:#07231b; background:var(--accent); border-color:var(--accent); }
 .editor-tab-pane h3 { margin:0 0 6px; }
+.segment-score-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:7px; margin:10px 0 8px; }
+.segment-score-item { display:flex; align-items:center; justify-content:space-between; gap:7px; min-width:0; padding:7px 8px; background:#111722; border:1px solid var(--line); border-radius:8px; }
+.segment-score-label { min-width:0; color:var(--muted); font-size:11px; font-weight:700; line-height:1.15; overflow-wrap:anywhere; }
+.segment-score-value { display:grid; flex:0 0 31px; width:31px; height:31px; place-items:center; color:#08251c; background:var(--accent); border-radius:50%; font-size:12px; line-height:1; }
+.score-signals { display:grid; gap:5px; margin:0 0 14px; padding:10px; background:#111722; border:1px solid var(--line); border-radius:8px; }
+.score-signals p { margin:0; overflow-wrap:anywhere; }
+.score-legend { margin:14px 0 18px; padding-top:14px; border-top:1px solid var(--line); }
+.score-legend h4 { margin:0 0 9px; }
+.score-legend dl { display:grid; gap:8px; margin:0; }
+.score-legend dl > div { display:grid; gap:2px; }
+.score-legend dt { color:var(--text); font-size:12px; font-weight:700; }
+.score-legend dd { margin:0; color:var(--muted); font-size:12px; line-height:1.35; }
 .tag-feedback-list { display:grid; gap:8px; margin-top:14px; }
 .tag-feedback-row { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; padding:9px; background:#111722; border:1px solid var(--line); border-radius:8px; }
 .tag-feedback-row .tag { margin-right:auto; overflow-wrap:anywhere; }
@@ -214,3 +226,7 @@ button.collection-delete,.collection-delete { margin-left:auto; color:var(--dang
 .remote-preview-meta { color:var(--muted); font-size:12px; }
 .startup-update-notice { padding:6px 10px; color:#fff2c1; background:#3c2c10; border:1px solid #a97925; border-radius:999px; font-size:12px; white-space:nowrap; }
 .startup-update-notice:hover { color:#181005; background:#f4c766; border-color:#f4c766; }
+
+/* Center the compact version badge against the lowercase ClipFinder letters. */
+.app-title-row { align-items:flex-start; }
+.app-version { align-self:flex-start; margin:25px 0 0; padding:2px 6px; font-size:11px; line-height:1; }

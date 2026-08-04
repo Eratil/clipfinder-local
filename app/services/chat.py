@@ -12,7 +12,7 @@ from typing import Any
 
 from app import database as db
 from app.services.embeddings import cosine, embed_texts
-from app.services.tagging import CHAT_QUESTION_ANSWER_TAG, CHAT_QUESTION_TAG, enrich_tags, score_moment_reaction
+from app.services.tagging import CHAT_QUESTION_ANSWER_TAG, CHAT_QUESTION_TAG, assess_short_potential, enrich_tags, score_moment_reaction
 
 
 TIME_PATTERN = re.compile(r"^\s*\[?(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?\]?\s*$")
@@ -363,10 +363,22 @@ def apply_chat_reactions(video_id: str) -> int:
             moment_reaction_score=moment_score,
             moment_reaction_stage=moment_stage,
         )
-        updates.append((json.dumps(tags, ensure_ascii=False), score, joy_score, count, unique, round(surge, 2), json.dumps(previews, ensure_ascii=False), moment_score, moment_stage, question_match_score if is_answer else 0, question_text if is_answer else "", segment["id"]))
+        short_potential_score, short_potential_signals = assess_short_potential(
+            segment.get("transcript") or "", segment["start_seconds"], segment["end_seconds"], tags,
+            quality_score=int(segment.get("quality_score") or 0),
+            reading_likelihood=float(segment.get("reading_likelihood") or 0),
+            logical_sense_score=int(segment.get("logical_sense_score") or -1),
+            context_score=int(segment.get("context_score") or -1),
+            self_contained_score=int(segment.get("self_contained_score") or -1),
+            extended_completeness_score=int(segment.get("extended_completeness_score") or -1),
+            game_reaction_score=int(segment.get("game_reaction_score") or 0),
+            voice_expression_score=int(segment.get("voice_expression_score") or 0),
+            moment_reaction_score=moment_score, chat_reaction_score=score, chat_joy_score=joy_score,
+        )
+        updates.append((json.dumps(tags, ensure_ascii=False), score, joy_score, count, unique, round(surge, 2), json.dumps(previews, ensure_ascii=False), moment_score, moment_stage, question_match_score if is_answer else 0, question_text if is_answer else "", short_potential_score, json.dumps(short_potential_signals, ensure_ascii=False), segment["id"]))
     with db.connection() as con:
         con.executemany(
-            "UPDATE segments SET tags=?, chat_reaction_score=?, chat_joy_score=?, chat_message_count=?, chat_unique_authors=?, chat_surge=?, chat_messages=?, moment_reaction_score=?, moment_reaction_stage=?, chat_question_match_score=?, chat_question_text=? WHERE id=?",
+            "UPDATE segments SET tags=?, chat_reaction_score=?, chat_joy_score=?, chat_message_count=?, chat_unique_authors=?, chat_surge=?, chat_messages=?, moment_reaction_score=?, moment_reaction_stage=?, chat_question_match_score=?, chat_question_text=?, short_potential_score=?, short_potential_signals=? WHERE id=?",
             updates,
         )
     return len(updates)

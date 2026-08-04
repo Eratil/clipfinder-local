@@ -155,6 +155,7 @@ class AnalysisAudioDefaultsUpdate(BaseModel):
 class DiscoveryDefaultsUpdate(BaseModel):
     active_profile: str = Field(default="general", pattern="^(general|soulslike|conversation|horror|game_quote_reaction)$")
     pattern_set_id: str = Field(default="", max_length=80)
+    profanity_filter: str = Field(default="allow", pattern="^(allow|one|none)$")
 
 
 class CaptionFavoriteCreate(CaptionDefaultsUpdate):

@@ -65,6 +65,8 @@ def initialize() -> None:
                 review_reason TEXT NOT NULL DEFAULT '',
                 quality_score INTEGER NOT NULL DEFAULT 0,
                 quality_signals TEXT NOT NULL DEFAULT '[]',
+                short_potential_score INTEGER NOT NULL DEFAULT -1,
+                short_potential_signals TEXT NOT NULL DEFAULT '[]',
                 reading_likelihood REAL NOT NULL DEFAULT 0,
                 audio_event_score INTEGER NOT NULL DEFAULT 0,
                 game_reaction_score INTEGER NOT NULL DEFAULT 0,
@@ -237,6 +239,7 @@ def initialize() -> None:
                 active_profile TEXT NOT NULL DEFAULT 'general',
                 reference_collection_id TEXT NOT NULL DEFAULT '',
                 pattern_set_id TEXT NOT NULL DEFAULT '',
+                profanity_filter TEXT NOT NULL DEFAULT 'allow',
                 updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS discovery_pattern_sets (
@@ -301,6 +304,10 @@ def initialize() -> None:
             con.execute("ALTER TABLE segments ADD COLUMN quality_score INTEGER NOT NULL DEFAULT 0")
         if "quality_signals" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN quality_signals TEXT NOT NULL DEFAULT '[]'")
+        if "short_potential_score" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN short_potential_score INTEGER NOT NULL DEFAULT -1")
+        if "short_potential_signals" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN short_potential_signals TEXT NOT NULL DEFAULT '[]'")
         if "reading_likelihood" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN reading_likelihood REAL NOT NULL DEFAULT 0")
         if "audio_event_score" not in columns:
@@ -361,6 +368,8 @@ def initialize() -> None:
             con.execute("ALTER TABLE discovery_defaults ADD COLUMN reference_collection_id TEXT NOT NULL DEFAULT ''")
         if "pattern_set_id" not in discovery_columns:
             con.execute("ALTER TABLE discovery_defaults ADD COLUMN pattern_set_id TEXT NOT NULL DEFAULT ''")
+        if "profanity_filter" not in discovery_columns:
+            con.execute("ALTER TABLE discovery_defaults ADD COLUMN profanity_filter TEXT NOT NULL DEFAULT 'allow'")
         for table in ("caption_defaults", "caption_favorites"):
             caption_columns = {item["name"] for item in con.execute(f"PRAGMA table_info({table})").fetchall()}
             for name, declaration in {
@@ -438,6 +447,7 @@ def serialize_segment(segment: dict, tag_feedback: dict[str, str] | None = None)
     segment["keywords"] = json.loads(segment["keywords"])
     segment["tags"] = json.loads(segment.get("tags") or "[]")
     segment["word_timestamps"] = json.loads(segment.get("word_timestamps") or "[]")
+    segment["short_potential_signals"] = json.loads(segment.get("short_potential_signals") or "[]")
     segment["quality_signals"] = json.loads(segment.get("quality_signals") or "[]")
     segment["chat_messages"] = json.loads(segment.get("chat_messages") or "[]")
     segment["tag_feedback"] = tag_feedback if tag_feedback is not None else _tag_feedback_by_segment([segment["id"]]).get(segment["id"], {})

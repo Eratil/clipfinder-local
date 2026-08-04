@@ -329,6 +329,127 @@ def assess_clip_quality(text: str, words: list[dict], start: float, end: float, 
     return max(1, min(99, round(score))), signals[:3], round(reading, 3)
 
 
+def assess_short_potential(
+    text: str,
+    start: float,
+    end: float,
+    tags: list[str],
+    *,
+    quality_score: int = 0,
+    reading_likelihood: float = 0.0,
+    logical_sense_score: int = -1,
+    context_score: int = -1,
+    self_contained_score: int = -1,
+    extended_completeness_score: int = -1,
+    game_reaction_score: int = 0,
+    voice_expression_score: int = 0,
+    moment_reaction_score: int = 0,
+    chat_reaction_score: int = 0,
+    chat_joy_score: int = 0,
+) -> tuple[int, list[str]]:
+    """Estimate whether a candidate works as a concise standalone short.
+
+    This is intentionally independent from the discovery ranking.  The latter
+    learns the user's preferences; this score answers a more practical
+    question: does the clip have a compact shape, a clear thought and a reason
+    to keep watching?
+    """
+    current = " ".join((text or "").split())
+    tokens = re.findall(r"[^\W_]+", current.lower())
+    duration = max(0.1, float(end) - float(start))
+    tag_set = set(tags or [])
+    signals: list[str] = []
+    score = 18
+
+    if 8 <= duration <= 28:
+        score += 18
+        signals.append("short-friendly length")
+    elif 5 <= duration <= 38:
+        score += 10
+        signals.append("usable short length")
+    elif duration > 50:
+        score -= 18
+        signals.append("too long for a short")
+    elif duration > 38:
+        score -= 7
+        signals.append("long for a short")
+    elif duration < 4:
+        score -= 10
+        signals.append("very brief clip")
+
+    if self_contained_score >= 78:
+        score += 23
+        signals.append("stands on its own")
+    elif self_contained_score >= 58:
+        score += 11
+        signals.append("mostly self-contained")
+    elif 0 <= self_contained_score <= 38:
+        score -= 18
+        signals.append("needs surrounding context")
+
+    if logical_sense_score >= 74:
+        score += 14
+        signals.append("complete thought")
+    elif logical_sense_score >= 55:
+        score += 6
+    elif 0 <= logical_sense_score <= 38:
+        score -= 15
+        signals.append("unclear thought")
+
+    if context_score >= 72:
+        score += 7
+    elif 0 <= context_score <= 35:
+        score -= 8
+
+    if extended_completeness_score >= 76:
+        score += 9
+        signals.append("verified complete ending")
+    elif 0 <= extended_completeness_score <= 43:
+        score -= 13
+        signals.append("incomplete ending")
+
+    hook_tags = {"humor", "forma: puenta", "forma: opinia", "forma: historia", "forma: krytyka", "forma: decyzja"}
+    emotional_tags = {tag for tag in tag_set if tag.startswith("emocja:")} | (tag_set & EMOTION_OR_OPINION_TAGS)
+    if tag_set & hook_tags:
+        score += 8
+        signals.append("clear content hook")
+    if emotional_tags:
+        score += 6
+    if "forma: odpowied" in " ".join(tag_set).lower():
+        score += 7
+        signals.append("answer with context")
+
+    if game_reaction_score >= 7 or moment_reaction_score >= 7:
+        score += 10
+        signals.append("game moment to reaction")
+    elif voice_expression_score >= 7:
+        score += 8
+        signals.append("expressive voice")
+    if chat_reaction_score >= 10:
+        score += 7
+        signals.append("chat reacted")
+    if chat_joy_score >= 8:
+        score += 5
+        signals.append("chat amusement")
+    if quality_score >= 78:
+        score += 5
+
+    if len(tokens) < 5:
+        score -= 12
+        signals.append("not enough spoken content")
+    elif len(tokens) > 92:
+        score -= 10
+        signals.append("too much spoken content")
+    if reading_likelihood >= 0.48 or "reading" in tag_set:
+        score -= 42
+        signals.append("likely reading aloud")
+    elif reading_likelihood >= 0.30:
+        score -= 14
+        signals.append("reading cues")
+
+    return max(1, min(99, round(score))), list(dict.fromkeys(signals))[:4]
+
+
 def build_reference_prompt(transcripts: list[str], embeddings: list[list[float]]) -> str:
     tags = Counter(tag for text, vector in zip(transcripts, embeddings) for tag in infer_tags(text, vector))
     tags_text = ", ".join(name for name, _count in tags.most_common(4)) or "similar tone and context"

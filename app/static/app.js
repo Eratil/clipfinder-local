@@ -1,4 +1,4 @@
-const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', pattern_set_id:'', pattern_sets:[], profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, listeningSegment: null, listenAudioTrack: 1, quickReview: { clips: [], index: 0, saving: false }, remotePreview: { jobId:null, completedJobId:null, poll:null }, editingSegment: null, clipEditorOpen: false, editorTab: 'edit', captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00', outline_enabled: true, outline_color: '#000000', glow_enabled: false, opacity: 100 }, globalExport: { layout: 'original', layout_preset_id: '', audio_track: 1, camera_x:.78, camera_y:.03, camera_width:.11, camera_height:.11, game_x:.22, game_y:0, game_width:.56, game_height:1 }, layoutPresets: [], layoutCalibration: { mode:'camera', drawing:null }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, discoveryDirty: false, statusErrorUntil: 0, updateDownloadId: null, appVersion: '' };
+const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', pattern_set_id:'', profanity_filter:'allow', pattern_sets:[], profiles:[] }, chat: null, resultMode: 'all', activeResults: null, previewAudio: null, listeningSegment: null, listenAudioTrack: 1, quickReview: { clips: [], index: 0, saving: false }, remotePreview: { jobId:null, completedJobId:null, poll:null }, editingSegment: null, clipEditorOpen: false, editorTab: 'edit', captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00', outline_enabled: true, outline_color: '#000000', glow_enabled: false, opacity: 100 }, globalExport: { layout: 'original', layout_preset_id: '', audio_track: 1, camera_x:.78, camera_y:.03, camera_width:.11, camera_height:.11, game_x:.22, game_y:0, game_width:.56, game_height:1 }, layoutPresets: [], layoutCalibration: { mode:'camera', drawing:null }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, discoveryDirty: false, statusErrorUntil: 0, updateDownloadId: null, appVersion: '' };
 // One preview definition per export preset. Add a new entry here when adding a
 // caption preset, so the settings preview stays in sync without a new CSS rule.
 const captionPreviewPresets = {
@@ -30,6 +30,7 @@ function rememberGlobalSession() {
       analysisAudio: state.analysisAudio,
       discoveryProfile: $('#discovery-profile')?.value || state.globalSession.discoveryProfile || state.discovery.active_profile || 'general',
       discoveryPatternSet: $('#discovery-pattern-set')?.value || state.globalSession.discoveryPatternSet || state.discovery.pattern_set_id || '',
+      discoveryProfanityFilter: $('#discovery-profanity-filter')?.value || state.globalSession.discoveryProfanityFilter || state.discovery.profanity_filter || 'allow',
     };
     localStorage.setItem(GLOBAL_SESSION_KEY, JSON.stringify(state.globalSession));
   } catch { /* Local session restore is optional. */ }
@@ -230,7 +231,7 @@ async function legacyLoadSegments(custom = null) {
     const node = template.content.cloneNode(true); const article = node.querySelector('article'); article.onclick = null; article.classList.add(segment.rating);
     const score = segment.similarity !== undefined ? ` / prompt ${Math.round(segment.similarity * 100)}%` : '';
     node.querySelector('.time').textContent = `${fmt(segment.start_seconds)} - ${fmt(segment.end_seconds)}${score}`;
-    node.querySelector('.ranking').textContent = segment.ranking_score ? `Suggested score ${segment.ranking_score}/99 - ${segment.ranking_reason}` : `Clip quality ${segment.quality_score || 0}/99${(segment.quality_signals || []).length ? ` - ${(segment.quality_signals || []).join(', ')}` : ''}`;
+    renderCardScoreGrid(node, segment);
     const tags = node.querySelector('.tags');
     for (const tag of segment.tags || []) tags.append(makeTagPill(tag, segment.tag_feedback));
     node.querySelector('.transcript').textContent = segment.transcript || 'No recognized speech';
@@ -354,6 +355,50 @@ function renderTagFeedback(segment) {
   }
 }
 
+function renderCardScoreGrid(node, segment) {
+  const grid = node.querySelector('.segment-score-grid'); grid.replaceChildren();
+  const values = [
+    ['Suggested score', segment.ranking_score], ['Quality', segment.quality_score], ['Short potential', segment.short_potential_score],
+    ['Context', segment.context_score], ['Self-contained', segment.self_contained_score], ['Extended completeness', segment.extended_completeness_score],
+  ];
+  for (const [label, raw] of values) {
+    const value = Number(raw); const available = Number.isFinite(value) && value >= 0;
+    const item = make('div', 'segment-score-item');
+    item.append(make('span', 'segment-score-label', label), make('strong', 'segment-score-value', available ? String(Math.round(value)) : '—'));
+    grid.append(item);
+  }
+}
+
+function renderDetailedScoring(segment) {
+  const grid = document.querySelector('#editor-score-grid'); grid?.replaceChildren();
+  const values = [
+    ['Suggested score', segment.ranking_score, '99'],
+    ['Quality', segment.quality_score, '99'],
+    ['Short potential', segment.short_potential_score, '99'],
+    ['Context', segment.context_score, '99'],
+    ['Self-contained', segment.self_contained_score, '99'],
+    ['Extended completeness', segment.extended_completeness_score, '99'],
+  ];
+  for (const [label, raw, max] of values) {
+    const value = Number(raw);
+    const available = Number.isFinite(value) && value >= 0;
+    const card = make('div', 'score-card');
+    card.append(make('span', 'score-card-label', label), make('strong', 'score-card-value', available ? `${Math.round(value)}/${max}` : '—'));
+    grid?.append(card);
+  }
+  const signals = [];
+  if ((segment.quality_signals || []).length) signals.push(`Quality signals: ${(segment.quality_signals || []).join(', ')}`);
+  if ((segment.short_potential_signals || []).length) signals.push(`Short signals: ${(segment.short_potential_signals || []).join(', ')}`);
+  const moment = Number(segment.moment_reaction_score || 0); const chat = Number(segment.chat_reaction_score || 0);
+  if (moment) signals.push(`Moment → reaction: ${moment}/30${segment.moment_reaction_stage ? ` (${segment.moment_reaction_stage})` : ''}`);
+  if (chat) signals.push(`Chat reaction: ${chat}/20 from ${Number(segment.chat_message_count || 0)} messages`);
+  if (Number(segment.chat_question_match_score || 0) >= 40) signals.push(`Viewer question match: ${Math.round(Number(segment.chat_question_match_score))}/99`);
+  const box = $('#editor-score-signals'); box.replaceChildren();
+  if (!signals.length) { box.hidden = true; return; }
+  signals.forEach((text) => box.append(make('p', '', text)));
+  box.hidden = false;
+}
+
 function selectClipForEditor(segment, openPanel = true) {
   if (openPanel) setClipEditorOpen(true);
   state.editingSegment = segment;
@@ -372,6 +417,7 @@ function selectClipForEditor(segment, openPanel = true) {
   $('#editor-remove-pauses').checked = Boolean(segment.remove_pauses);
   $('#editor-export-name').value = state.exportNames[segment.id] || '';
   const exportButton = $('#editor-export'); exportButton.disabled = segment.rating !== 'accepted'; exportButton.textContent = segment.rating === 'accepted' ? 'Export MP4' : 'Approve before export';
+  renderDetailedScoring(segment);
   renderTagFeedback(segment);
   setEditorTab(state.editorTab);
   document.querySelectorAll('.segment').forEach((article) => article.classList.toggle('editing', article.dataset.segmentId === segment.id));
@@ -443,11 +489,10 @@ function renderQuickReview() {
   const reviewed = state.quickReview.clips.filter((item) => item.rating !== 'unrated').length;
   $('#quick-review-progress').textContent = `${state.quickReview.index + 1} / ${total}  |  reviewed: ${reviewed}`;
   $('#quick-review-time').textContent = `${fmt(clip.start_seconds)} - ${fmt(clip.end_seconds)}`;
-  $('#quick-review-ranking').textContent = clip.ranking_score ? `Suggested score ${clip.ranking_score}/99 - ${clip.ranking_reason}` : `Clip quality ${clip.quality_score || 0}/99`;
+  $('#quick-review-ranking').textContent = clip.ranking_score ? `Suggested score ${clip.ranking_score}/99` : `Quality ${clip.quality_score || 0}/99`;
   const tags = $('#quick-review-tags'); tags.replaceChildren(); for (const tag of clip.tags || []) tags.append(make('span', 'tag', tag));
   $('#quick-review-transcript').textContent = clip.transcript || 'No recognized speech';
-  const context = Number(clip.context_score || 0); const selfContained = Number(clip.self_contained_score || 0); const moment = Number(clip.moment_reaction_score || 0);
-  $('#quick-review-context').textContent = `${context ? `Context ${context}/99` : ''}${context && selfContained ? ' / ' : ''}${selfContained ? `Self-contained ${selfContained}/99` : ''}${moment ? ` / Moment -> reaction ${moment}/30` : ''}${selfContained && selfContained <= 35 ? ' - may need surrounding speech.' : selfContained >= 75 ? ' - complete thought.' : ''}`;
+  $('#quick-review-context').textContent = '';
   $('#quick-review-approve').disabled = state.quickReview.saving;
   $('#quick-review-reject').disabled = state.quickReview.saving;
   $('#quick-review-previous').disabled = state.quickReview.saving || state.quickReview.index === 0;
@@ -515,7 +560,7 @@ async function loadSegments(custom = null) {
     const node = template.content.cloneNode(true); const article = node.querySelector('article'); article.dataset.segmentId = segment.id; article.classList.add(segment.rating);
     const score = segment.similarity !== undefined ? ` / prompt ${Math.round(segment.similarity * 100)}%` : '';
     node.querySelector('.time').textContent = `${fmt(segment.start_seconds)} - ${fmt(segment.end_seconds)}${score}`;
-    node.querySelector('.ranking').textContent = segment.ranking_score ? `Suggested score ${segment.ranking_score}/99 - ${segment.ranking_reason}` : `Clip quality ${segment.quality_score || 0}/99${(segment.quality_signals || []).length ? ` - ${(segment.quality_signals || []).join(', ')}` : ''}`;
+    renderCardScoreGrid(node, segment);
     const tags = node.querySelector('.tags');
     for (const tag of segment.tags || []) tags.append(makeTagPill(tag, segment.tag_feedback));
     node.querySelector('.transcript').textContent = segment.transcript || 'No recognized speech';
@@ -538,6 +583,7 @@ function sortSegments(segments) {
   const fields = {
     suggested_desc: ['ranking_score', -1], suggested_asc: ['ranking_score', 1],
     quality_desc: ['quality_score', -1], quality_asc: ['quality_score', 1],
+    short_potential_desc: ['short_potential_score', -1], short_potential_asc: ['short_potential_score', 1],
     self_contained_desc: ['self_contained_score', -1], self_contained_asc: ['self_contained_score', 1],
   };
   const [field, direction] = fields[mode] || fields.suggested_desc;
@@ -550,12 +596,7 @@ async function reloadActiveSegments() {
 
 function renderClipContext(node, segment) {
   const summary = node.querySelector('.context-reaction'); const details = node.querySelector('.clip-context');
-  const score = Number(segment.context_score || 0); const selfContained = Number(segment.self_contained_score || 0); const moment = Number(segment.moment_reaction_score || 0);
-  const completeness = Number(segment.extended_completeness_score || -1);
-  if (!score && !selfContained && !moment && completeness < 0) { summary.hidden = true; details.hidden = true; return; }
-  const description = selfContained >= 75 ? 'works without surrounding conversation' : selfContained && selfContained <= 35 ? 'may need the surrounding conversation to make sense' : 'nearby speech was checked';
-  summary.textContent = `${score ? `Context ${score}/99` : ''}${score && selfContained ? ' / ' : ''}${selfContained ? `Self-contained ${selfContained}/99` : ''}${completeness >= 0 ? ` / Extended completeness ${completeness}/99` : ''}${moment ? ` / Moment -> reaction ${moment}/30` : ''} - ${description}`;
-  summary.hidden = false;
+  summary.hidden = true;
   const before = String(segment.context_before || '').trim(); const after = String(segment.context_after || '').trim();
   if (!before && !after) { details.hidden = true; return; }
   node.querySelector('.context-before').textContent = before ? `Before: ${before}` : 'Before: no recognised speech in the preceding 12 seconds.';
@@ -565,15 +606,12 @@ function renderClipContext(node, segment) {
 
 function renderChatReaction(node, segment) {
   const reaction = node.querySelector('.chat-reaction'); const messages = node.querySelector('.chat-messages'); const question = node.querySelector('.chat-question');
-  const score = Number(segment.chat_reaction_score || 0); const joy = Number(segment.chat_joy_score || 0); const count = Number(segment.chat_message_count || 0); const people = Number(segment.chat_unique_authors || 0); const surge = Number(segment.chat_surge || 0);
-  const questionScore = Number(segment.chat_question_match_score || 0); const questionText = String(segment.chat_question_text || '').trim();
-  question.textContent = questionScore >= 40 && questionText ? `Viewer question match ${questionScore}/99: ${questionText}` : '';
-  question.hidden = !question.textContent;
+  const score = Number(segment.chat_reaction_score || 0); const count = Number(segment.chat_message_count || 0);
+  question.textContent = '';
+  question.hidden = true;
+  reaction.textContent = '';
+  reaction.hidden = true;
   if (!score || !count) { reaction.hidden = true; messages.hidden = true; return; }
-  const multiplier = surge >= 1.2 ? ` / ${surge.toFixed(1)}x normal activity` : '';
-  const positive = joy >= 4 ? ` / positive-funny reaction ${joy}/14` : '';
-  reaction.textContent = `Chat reaction ${score}/20 - ${count} messages${people ? ` from ${people} people` : ''}${multiplier}${positive}`;
-  reaction.hidden = false;
   const previews = (segment.chat_messages || []).slice(0, 3).map((item) => `${item.author ? `${item.author}: ` : ''}${item.message}`).filter(Boolean);
   messages.textContent = previews.join('  |  '); messages.hidden = !previews.length;
 }
@@ -903,6 +941,9 @@ async function loadDiscoverySettings() {
   const savedProfile = state.globalSession.discoveryProfile;
   select.value = defaults.profiles.some((profile) => profile.id === savedProfile) ? savedProfile : (defaults.active_profile || previous || 'general');
   if (savedProfile && select.value === savedProfile) state.discoveryDirty = true;
+  const profanityFilter = $('#discovery-profanity-filter'); const savedProfanityFilter = state.globalSession.discoveryProfanityFilter;
+  profanityFilter.value = ['allow', 'one', 'none'].includes(savedProfanityFilter) ? savedProfanityFilter : (defaults.profanity_filter || 'allow');
+  if (savedProfanityFilter && profanityFilter.value === savedProfanityFilter) state.discoveryDirty = true;
   renderDiscoveryPatternSets();
   const active = defaults.profiles.find((profile) => profile.id === select.value) || {accepted:0, rejected:0};
   const activePattern = (defaults.pattern_sets || []).find((item) => item.id === $('#discovery-pattern-set').value);
@@ -1190,7 +1231,8 @@ window.addEventListener('resize', () => { resizeLayoutCanvas(); drawLayoutOverla
 $('#analysis-audio-form').onsubmit = async (event) => { event.preventDefault(); const body = { mode:$('#analysis-audio-mode').value, single_track:Number($('#analysis-single-track').value), microphone_track:Number($('#analysis-microphone-track').value), all_sounds_track:Number($('#analysis-all-sounds-track').value), game_track:Number($('#analysis-game-track').value), use_all_sounds:$('#analysis-use-all-sounds').checked, use_game:$('#analysis-use-game').checked }; try { state.analysisAudio = await api('/analysis-audio-defaults', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }); state.analysisAudioDirty = false; rememberGlobalSession(); await loadAnalysisAudioSettings(); message('Analysis audio settings saved. They apply to the next analysis or reanalysis.'); } catch (error) { message(error.message, true); } };
 $('#discovery-profile').onchange = () => { state.discoveryDirty = true; renderDiscoveryPatternSets(); updateDiscoveryPatternFeedback(); rememberGlobalSession(); };
 $('#discovery-pattern-set').onchange = () => { state.discoveryDirty = true; updateDiscoveryPatternFeedback(); rememberGlobalSession(); };
-$('#discovery-defaults-form').onsubmit = async (event) => { event.preventDefault(); try { state.discovery = await api('/discovery-defaults', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({active_profile:$('#discovery-profile').value, pattern_set_id:$('#discovery-pattern-set').value}) }); state.discoveryDirty = false; rememberGlobalSession(); await loadDiscoverySettings(); if (state.videoId) await showAllSegments(); message('Discovery profile and pattern add-on saved. Candidate ranking was refreshed.'); } catch (error) { message(error.message, true); } };
+$('#discovery-profanity-filter').onchange = () => { state.discoveryDirty = true; rememberGlobalSession(); };
+$('#discovery-defaults-form').onsubmit = async (event) => { event.preventDefault(); try { state.discovery = await api('/discovery-defaults', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({active_profile:$('#discovery-profile').value, pattern_set_id:$('#discovery-pattern-set').value, profanity_filter:$('#discovery-profanity-filter').value}) }); state.discoveryDirty = false; rememberGlobalSession(); await loadDiscoverySettings(); if (state.videoId) await showAllSegments(); message('Discovery profile, pattern add-on and profanity filter saved. Candidate ranking was refreshed.'); } catch (error) { message(error.message, true); } };
 $('#discovery-pattern-set-form').onsubmit = async (event) => { event.preventDefault(); const name = $('#discovery-pattern-set-name').value.trim(); if (!name) return; try { const created = await api('/discovery-pattern-sets', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, profile:$('#discovery-profile').value})}); $('#discovery-pattern-set-name').value = ''; state.discoveryDirty = false; state.discovery = await api('/discovery-defaults'); renderDiscoveryPatternSets(); $('#discovery-pattern-set').value = created.id; state.discoveryDirty = true; rememberGlobalSession(); updateDiscoveryPatternFeedback(); message(`Pattern set "${created.name}" created. Select Save discovery profile to activate it.`); } catch (error) { message(error.message, true); } };
 $('#generate-prompt-button').onclick = async () => { if (!state.collectionId) return; try { const suggested = await api(`/collections/${state.collectionId}/prompt-suggestion`, { method:'POST' }); $('#prompt-name').value = suggested.name; $('#prompt-text').value = suggested.prompt; $('#active-prompt').value = suggested.prompt; updateSelectionSummary(); message('Prompt generated from reference clips. Review it and click Save prompt.'); } catch (error) { message(error.message, true); } };
 $('#import-folder-button').onclick = async () => { const folder_path = $('#reference-folder').value.trim(); if (!state.collectionId || !folder_path) return message('Choose a collection and enter the folder path.', true); try { await api(`/collections/${state.collectionId}/imports`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({folder_path, include_subfolders:$('#subfolders').checked}) }); message('Folder saved and queued for import.'); await loadReferenceSources(); await loadImportStatus(); } catch (error) { message(error.message, true); } };
@@ -1256,7 +1298,7 @@ $('#remote-preview-button').onclick = async () => {
     button.disabled = false; message(`Could not start preview: ${error.message}`, true);
   }
 };
-function showAllSegments() { state.resultMode = 'all'; state.activeResults = null; loadSegments(); }
+function showAllSegments() { state.resultMode = 'all'; state.activeResults = null; const video = state.videos.find((item) => item.id === state.videoId); if (video) $('#selected-title').textContent = `Candidates: ${video.original_name}`; loadSegments(); }
 $('#search-button').onclick = showAllSegments;
 $('#tag-search-button').onclick = showAllSegments;
 $('#rating-search-button').onclick = showAllSegments;
@@ -1265,7 +1307,7 @@ $('#rating-search').onchange = showAllSegments;
 $('#hide-reading').onchange = showAllSegments;
 $('#show-duplicates').onchange = showAllSegments;
 $('#score-sort').onchange = () => reloadActiveSegments();
-$('#top-clips-button').onclick = async () => { if (!state.videoId) return message('Choose a recording first.', true); try { const results = await api(`/videos/${state.videoId}/top-clips?limit=10`); state.resultMode = 'top'; state.activeResults = results; await loadSegments(results); message('Showing the 10 strongest different candidates.'); } catch (error) { message(error.message, true); } };
+$('#top-clips-button').onclick = async () => { if (!state.videoId) return message('Choose a recording first.', true); const limit = Number($('#best-of-limit').value) || 10; try { const results = await api(`/videos/${state.videoId}/top-clips?limit=${encodeURIComponent(limit)}`); state.resultMode = 'top'; state.activeResults = results; $('#selected-title').textContent = `Best of stream: ${state.videos.find((video) => video.id === state.videoId)?.original_name || ''}`; await loadSegments(results); message(`Showing ${results.length} strong, distinct moments from this stream.`); } catch (error) { message(error.message, true); } };
 $('#quick-review-button').onclick = openQuickReview;
 $('#quick-review-close').onclick = closeQuickReview;
 $('#quick-review-approve').onclick = () => rateQuickClip('accepted');

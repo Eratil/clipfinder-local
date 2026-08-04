@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ClipFinder Local</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260804-startup-update" />
+    <link rel="stylesheet" href="/static/style.css?v=20260804-card-score-row" />
   </head>
   <body class="clip-editor-closed">
     <main>
@@ -77,6 +77,7 @@
             <form id="discovery-defaults-form">
               <label>Content type<select id="discovery-profile"></select></label>
               <label>Pattern add-on<select id="discovery-pattern-set"><option value="">Default - no additional patterns</option></select></label>
+              <label>Profanity in search<select id="discovery-profanity-filter"><option value="allow">Allow all</option><option value="one">Allow up to one per clip</option><option value="none">Hide all clips with profanity</option></select></label>
               <p class="hint">A pattern set stores only conclusions from reviewed Shorts: semantic vector, tags and scores. It never stores the source video, audio or frame.</p>
               <button>Save discovery profile</button>
             </form>
@@ -348,11 +349,14 @@
               <option value="suggested_asc">Suggested score: low to high</option>
               <option value="quality_desc">Quality: high to low</option>
               <option value="quality_asc">Quality: low to high</option>
+              <option value="short_potential_desc">Short potential: high to low</option>
+              <option value="short_potential_asc">Short potential: low to high</option>
               <option value="self_contained_desc">Self-contained: high to low</option>
               <option value="self_contained_asc">Self-contained: low to high</option>
             </select>
           </label>
-          <button id="top-clips-button">Show Top 10</button>
+          <label>Best of stream<select id="best-of-limit"><option value="10">10 clips</option><option value="20">20 clips</option></select></label>
+          <button id="top-clips-button">Show Best of stream</button>
           <button class="quiet" id="quick-review-button">Quick selection</button>
         </div>
         <p id="selection-summary" class="hint"></p>
@@ -362,7 +366,7 @@
 
     <template id="segment-template">
       <article class="segment">
-        <div class="time"></div><div class="ranking hint"></div><div class="tags"></div><p class="transcript"></p><div class="context-reaction hint" hidden></div><details class="clip-context" hidden><summary>Context before and after</summary><p class="context-before"></p><p class="context-after"></p></details><div class="chat-question hint" hidden></div><div class="chat-reaction hint" hidden></div><p class="chat-messages hint" hidden></p>
+        <div class="time"></div><div class="segment-score-grid" aria-label="Clip scores"></div><div class="tags"></div><p class="transcript"></p><div class="context-reaction hint" hidden></div><details class="clip-context" hidden><summary>Context before and after</summary><p class="context-before"></p><p class="context-after"></p></details><div class="chat-question hint" hidden></div><div class="chat-reaction hint" hidden></div><p class="chat-messages hint" hidden></p>
         <p class="hint clip-select-hint">Click this clip to edit it in the right panel.</p>
         <div class="actions"><button data-open>Open in full recording</button><button data-rating="accepted">Approve clip</button><button class="quiet" data-rating="rejected">Reject</button><button class="quiet" data-preview>Listen</button><button class="quiet" data-example>Add as reference</button></div>
       </article>
@@ -372,7 +376,7 @@
       <div class="section-title clip-editor-head"><div><h2>Clip editor</h2><p id="clip-editor-title" class="hint">Select a clip to edit it.</p></div><button id="clip-editor-close" class="quiet" aria-label="Hide clip editor">Hide</button></div>
       <div class="editor-tabs" role="tablist" aria-label="Clip panel tabs">
         <button type="button" class="quiet editor-tab active" data-editor-tab="edit" role="tab" aria-selected="true">Clip editor</button>
-        <button type="button" class="quiet editor-tab" data-editor-tab="analysis" role="tab" aria-selected="false">Extended analysis</button>
+        <button type="button" class="quiet editor-tab" data-editor-tab="analysis" role="tab" aria-selected="false">Detailed scoring</button>
       </div>
       <div id="clip-editor-empty" class="hint">Click any candidate card to edit its range, captions, review status and export.</div>
       <div id="clip-editor-form" hidden>
@@ -408,6 +412,20 @@
           <button id="editor-export" class="quiet">Approve before export</button>
         </div>
         <div id="clip-editor-analysis-tab" class="editor-tab-pane" role="tabpanel" hidden>
+          <h3>Detailed scoring</h3>
+          <p class="hint">These scores explain the selected clip. They do not replace your approval decision.</p>
+          <div id="editor-score-signals" class="score-signals hint" hidden></div>
+          <section class="score-legend" aria-label="Scoring legend">
+            <h4>Legend</h4>
+            <dl>
+              <div><dt>Suggested score</dt><dd>Based on your active discovery profile, prompt/reference similarity, previous approvals and rejections, and relevant reactions from game, voice and chat.</dd></div>
+              <div><dt>Quality</dt><dd>Rewards natural speaking pace, usable clip length, emotion or a verified game-to-voice reaction. Reading cues, static text-heavy game screens and incomplete speech lower it.</dd></div>
+              <div><dt>Short potential</dt><dd>Rewards a short-friendly length, a clear standalone thought, a hook, payoff, emotion and chat engagement. It is strongly reduced by reading aloud, very long clips or missing context.</dd></div>
+              <div><dt>Context</dt><dd>Compares the surrounding speech before and after the fragment. A score falls when the clip begins or ends in the middle of a thought.</dd></div>
+              <div><dt>Self-contained</dt><dd>Measures whether a new viewer can understand the clip without previous conversation. Complete sentences and an understandable point increase it.</dd></div>
+              <div><dt>Extended completeness</dt><dd>Available after Extended analysis. It performs an extra check of sentence boundaries, a complete ending and whether the clip reaches its point or punchline.</dd></div>
+            </dl>
+          </section>
           <h3>Tag feedback</h3>
           <p id="editor-analysis-summary" class="hint">Mark each assigned tag as correct or incorrect. This is stored locally and helps audit future improvements.</p>
           <div id="editor-tag-feedback-list" class="tag-feedback-list"></div>
@@ -448,6 +466,6 @@
       <p class="hint quick-review-shortcuts"><kbd>A</kbd> approve &nbsp; <kbd>R</kbd> reject &nbsp; <kbd>←</kbd><kbd>→</kbd> previous / next</p>
       <div class="actions quick-review-actions"><button id="quick-review-approve">Approve</button><button id="quick-review-reject" class="quiet">Reject</button><button id="quick-review-previous" class="quiet">Previous</button><button id="quick-review-next" class="quiet">Next</button></div>
     </dialog>
-    <script src="/static/app.js?v=20260804-startup-update"></script>
+    <script src="/static/app.js?v=20260804-card-score-grid"></script>
   </body>
 </html>

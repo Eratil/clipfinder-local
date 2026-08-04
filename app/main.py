@@ -59,6 +59,8 @@ from app.services.chat import apply_chat_reactions, chat_summary, import_chat, u
 from app.services.discovery import (
     active_profile,
     assign_duplicate_groups,
+    best_of_stream,
+    filter_profanity,
     is_disallowed_reading,
     profile_payload,
     preference_features,
@@ -67,7 +69,7 @@ from app.services.discovery import (
 )
 from app.services.media import MediaError, audio_track_count, export_audio_preview, export_clip, pause_trim_ranges, remap_words_for_kept_ranges, run as run_media_command, write_caption_ass
 from app.services.pipeline import analyse, import_reference_files, import_reference_folder, transcribe, transcribe_clip_range
-from app.services.tagging import CHAT_QUESTION_ANSWER_TAG, CHAT_QUESTION_TAG, GAME_REACTION_TAG, assess_clip_quality, assess_context, assess_logical_sense, assess_self_containment, build_reference_prompt, detailed_lexical_tags, enrich_tags, infer_tags, score_moment_reaction
+from app.services.tagging import CHAT_QUESTION_ANSWER_TAG, CHAT_QUESTION_TAG, GAME_REACTION_TAG, assess_clip_quality, assess_context, assess_logical_sense, assess_self_containment, assess_short_potential, build_reference_prompt, detailed_lexical_tags, enrich_tags, infer_tags, score_moment_reaction
 from app.services.updater import automatic_updates_available, install_downloaded_update, job_status as update_download_status, start_download as start_update_download
 from app.services.updates import update_status
 from app.services.runtime_status import runtime_status
@@ -229,6 +231,26 @@ def backfill_detailed_tags() -> None:
             con.executemany("UPDATE segments SET tags=? WHERE id=?", updates)
 
 
+def backfill_short_potential() -> None:
+    """Give older candidates the separate short-format suitability score."""
+    items = db.rows("SELECT * FROM segments WHERE short_potential_score < 0")
+    updates = []
+    for item in items:
+        score, signals = assess_short_potential(
+            item.get("transcript") or "", item["start_seconds"], item["end_seconds"], json.loads(item.get("tags") or "[]"),
+            quality_score=int(item.get("quality_score") or 0), reading_likelihood=float(item.get("reading_likelihood") or 0),
+            logical_sense_score=int(item.get("logical_sense_score") or -1), context_score=int(item.get("context_score") or -1),
+            self_contained_score=int(item.get("self_contained_score") or -1), extended_completeness_score=int(item.get("extended_completeness_score") or -1),
+            game_reaction_score=int(item.get("game_reaction_score") or 0), voice_expression_score=int(item.get("voice_expression_score") or 0),
+            moment_reaction_score=int(item.get("moment_reaction_score") or 0), chat_reaction_score=int(item.get("chat_reaction_score") or 0),
+            chat_joy_score=int(item.get("chat_joy_score") or 0),
+        )
+        updates.append((score, json.dumps(signals, ensure_ascii=False), item["id"]))
+    if updates:
+        with db.connection() as con:
+            con.executemany("UPDATE segments SET short_potential_score=?, short_potential_signals=? WHERE id=?", updates)
+
+
 def remove_legacy_game_audio_bonus() -> None:
     """Do not keep old scores where a loud game sound was treated as a reaction."""
     items = db.rows(
@@ -297,6 +319,7 @@ def run_startup_maintenance() -> None:
         ("preference-feedback-v1", backfill_preference_feedback),
     )
     tasks = (*tasks, ("chat-reactions-v1", lambda: [apply_chat_reactions(item["video_id"]) for item in db.rows("SELECT video_id FROM chat_settings")]))
+    tasks = (*tasks, ("short-potential-v1", backfill_short_potential))
     for task_name, callback in tasks:
         if db.maintenance_task_completed(task_name):
             continue
@@ -1044,9 +1067,11 @@ def video_segments(video_id: str, q: str = "", rating: str = "", tag: str = "", 
     ranked = suppress_duplicate_groups(score_candidates(items, profile=active_profile()), keep_alternatives=show_duplicates)
     if tag.strip() != "reading":
         ranked = [item for item in ranked if not is_disallowed_reading(item)]
+    ranked = filter_profanity(ranked)
     sort_fields = {
         "suggested_desc": ("ranking_score", True), "suggested_asc": ("ranking_score", False),
         "quality_desc": ("quality_score", True), "quality_asc": ("quality_score", False),
+        "short_potential_desc": ("short_potential_score", True), "short_potential_asc": ("short_potential_score", False),
         "self_contained_desc": ("self_contained_score", True), "self_contained_asc": ("self_contained_score", False),
     }
     field, descending = sort_fields.get(sort, sort_fields["suggested_desc"])
@@ -1139,12 +1164,17 @@ def update_segment_timing(segment_id: str, body: SegmentTimingUpdate):
         if reading_likelihood >= 0.48:
             tags = list(dict.fromkeys(tags + ["reading"]))
         tags = enrich_tags(tags, logical_sense_score=logical_sense_score, reading_likelihood=reading_likelihood)
+        short_potential_score, short_potential_signals = assess_short_potential(
+            transcript, body.start_seconds, body.end_seconds, tags,
+            quality_score=quality_score, reading_likelihood=reading_likelihood,
+            logical_sense_score=logical_sense_score,
+        )
     except Exception as exc:
         raise HTTPException(500, f"Unable to update captions for the new range: {exc}") from exc
     with db.connection() as con:
         con.execute(
-            "UPDATE segments SET start_seconds=?, end_seconds=?, transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, logical_sense_score=?, context_score=-1, self_contained_score=-1, context_before='', context_after='', reading_likelihood=?, audio_event_score=0, game_reaction_score=0, voice_expression_score=0, moment_reaction_score=0, moment_reaction_stage='' WHERE id=?",
-            (body.start_seconds, body.end_seconds, transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), logical_sense_score, reading_likelihood, segment_id),
+            "UPDATE segments SET start_seconds=?, end_seconds=?, transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, short_potential_score=?, short_potential_signals=?, logical_sense_score=?, context_score=-1, self_contained_score=-1, context_before='', context_after='', reading_likelihood=?, audio_event_score=0, game_reaction_score=0, voice_expression_score=0, moment_reaction_score=0, moment_reaction_stage='' WHERE id=?",
+            (body.start_seconds, body.end_seconds, transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), short_potential_score, json.dumps(short_potential_signals, ensure_ascii=False), logical_sense_score, reading_likelihood, segment_id),
         )
     apply_chat_reactions(segment["video_id"])
     for preview in settings.previews_dir.glob(f"{segment_id}-*"):
@@ -1182,10 +1212,19 @@ def update_segment_transcript(segment_id: str, body: SegmentTranscriptUpdate):
         moment_reaction_score=int(segment.get("moment_reaction_score") or 0),
         moment_reaction_stage=segment.get("moment_reaction_stage") or "",
     )
+    short_potential_score, short_potential_signals = assess_short_potential(
+        transcript, segment["start_seconds"], segment["end_seconds"], tags,
+        quality_score=quality_score, reading_likelihood=reading_likelihood,
+        logical_sense_score=logical_sense_score, context_score=int(segment.get("context_score") or -1),
+        self_contained_score=self_contained_score, extended_completeness_score=int(segment.get("extended_completeness_score") or -1),
+        game_reaction_score=int(segment.get("game_reaction_score") or 0), voice_expression_score=int(segment.get("voice_expression_score") or 0),
+        moment_reaction_score=int(segment.get("moment_reaction_score") or 0), chat_reaction_score=int(segment.get("chat_reaction_score") or 0),
+        chat_joy_score=int(segment.get("chat_joy_score") or 0),
+    )
     with db.connection() as con:
         con.execute(
-            "UPDATE segments SET transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, logical_sense_score=?, self_contained_score=?, reading_likelihood=? WHERE id=?",
-            (transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), logical_sense_score, self_contained_score, reading_likelihood, segment_id),
+            "UPDATE segments SET transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, short_potential_score=?, short_potential_signals=?, logical_sense_score=?, self_contained_score=?, reading_likelihood=? WHERE id=?",
+            (transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), short_potential_score, json.dumps(short_potential_signals, ensure_ascii=False), logical_sense_score, self_contained_score, reading_likelihood, segment_id),
         )
     for preview in settings.previews_dir.glob(f"{segment_id}-*"):
         preview.unlink(missing_ok=True)
@@ -1490,8 +1529,8 @@ def update_discovery_defaults(body: DiscoveryDefaultsUpdate):
         raise HTTPException(400, "Choose a pattern set created for this discovery profile.")
     with db.connection() as con:
         con.execute(
-            "UPDATE discovery_defaults SET active_profile=?, pattern_set_id=?, updated_at=? WHERE id=1",
-            (body.active_profile, pattern_set_id, db.now()),
+            "UPDATE discovery_defaults SET active_profile=?, pattern_set_id=?, profanity_filter=?, updated_at=? WHERE id=1",
+            (body.active_profile, pattern_set_id, body.profanity_filter, db.now()),
         )
     return profile_payload()
 
@@ -1530,9 +1569,11 @@ def top_clips(video_id: str, limit: int = 10, unrated_only: bool = False):
     if unrated_only:
         query += " AND rating='unrated'"
     candidates = db.rows(query, (video_id,))
-    ranked = suppress_duplicate_groups(score_candidates(candidates, profile=active_profile()))
+    ranked = score_candidates(candidates, profile=active_profile())
     ranked = [item for item in ranked if not is_disallowed_reading(item)]
-    return db.serialize_segments(ranked[:max(1, min(30, limit))])
+    ranked = filter_profanity(ranked)
+    ranked = best_of_stream(ranked, limit=max(1, min(30, limit)))
+    return db.serialize_segments(ranked)
 
 
 @app.put("/api/analysis-audio-defaults")
@@ -1769,6 +1810,7 @@ def ranked_candidates(video_id: str, reference: list[float], limit: int) -> list
         raise HTTPException(400, "Selected video does not have completed analysis.")
     ranked = suppress_duplicate_groups(score_candidates(candidates, reference=reference, profile=active_profile()))
     ranked = [item for item in ranked if not is_disallowed_reading(item)]
+    ranked = filter_profanity(ranked)
     return db.serialize_segments(ranked[:limit])
 
 
