@@ -6,7 +6,12 @@ combination depends on the tester's driver and is optional because CPU mode
 keeps the application usable.
 #>
 [CmdletBinding()]
-param()
+param(
+    [string]$CompatibilityPath = '',
+    [string]$ResultPath = '',
+    [switch]$RequireGpu,
+    [switch]$PreserveDeviceChoice
+)
 
 $ErrorActionPreference = 'Continue'
 $appRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -15,6 +20,34 @@ $statusPath = Join-Path $stateRoot 'setup-status.txt'
 $runtimePath = Join-Path $stateRoot 'runtime.json'
 New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
 $messages = [System.Collections.Generic.List[string]]::new()
+
+$compatibilityCandidates = @(@(
+        $CompatibilityPath,
+        (Join-Path $appRoot '_internal\assets\runtime-compatibility.json'),
+        (Join-Path $appRoot 'runtime-compatibility.json')
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
+$compatibilityFile = $compatibilityCandidates | Select-Object -First 1
+if (-not $compatibilityFile) {
+    throw 'Missing runtime-compatibility.json. Reinstall ClipFinder before configuring its runtime.'
+}
+try {
+    $compatibility = Get-Content -Raw -LiteralPath $compatibilityFile -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+} catch {
+    throw "Invalid runtime-compatibility.json: $($_.Exception.Message)"
+}
+if ($compatibility.schema -ne 1 -or -not $compatibility.contract_id -or
+    -not $compatibility.cuda.required_dlls -or -not $compatibility.cudnn.required_dlls) {
+    throw 'runtime-compatibility.json has an unsupported or incomplete format.'
+}
+
+$previousProfile = $null
+if ($PreserveDeviceChoice -and (Test-Path -LiteralPath $runtimePath)) {
+    try {
+        $previousProfile = Get-Content -Raw -LiteralPath $runtimePath -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        $previousProfile = $null
+    }
+}
 
 function Write-Setup([string]$Message, [string]$Color = 'Gray') {
     $messages.Add($Message)
@@ -74,6 +107,14 @@ function Test-VCRedist {
     return $runtime -and $runtime.Installed -eq 1
 }
 
+function Test-RequiredDlls([string]$Directory, $Names) {
+    if (-not $Directory -or -not (Test-Path -LiteralPath $Directory -PathType Container)) { return $false }
+    foreach ($name in @($Names)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Directory ([string]$name)) -PathType Leaf)) { return $false }
+    }
+    return $true
+}
+
 function Install-VCRedist {
     $installedWithWinget = Install-WingetPackage 'Microsoft.VCRedist.2015+.x64' 'Microsoft Visual C++ Redistributable 2015-2022 (x64)'
     if ($installedWithWinget) {
@@ -94,9 +135,9 @@ function Install-VCRedist {
 }
 
 function Get-CudaProfile {
-    $nvidia = Get-Command nvidia-smi -ErrorAction SilentlyContinue
-    $cudaRoot = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA'
-    $cudnnRoot = 'C:\Program Files\NVIDIA\CUDNN'
+    $programFilesRoot = if ($env:ProgramFiles) { $env:ProgramFiles } else { 'C:\Program Files' }
+    $cudaRoot = Join-Path $programFilesRoot 'NVIDIA GPU Computing Toolkit\CUDA'
+    $cudnnRoot = Join-Path $programFilesRoot 'NVIDIA\CUDNN'
     # CTranslate2 4.5+ currently uses CUDA 12 and cuDNN 9. Match cuDNN to the
     # same CUDA minor version; finding arbitrary DLLs is not enough.
     $cudaCandidates = @()
@@ -107,7 +148,11 @@ function Get-CudaProfile {
                 $version = $null
                 try { $version = [version]$versionText } catch { }
                 $bin = Join-Path $_.FullName 'bin'
-                if ($version -and $version.Minor -ge 3 -and (Test-Path (Join-Path $bin 'cublas64_12.dll'))) {
+                if ($version -and
+                    $version.Major -eq [int]$compatibility.cuda.major -and
+                    $version.Minor -ge [int]$compatibility.cuda.minimum_minor -and
+                    $version.Minor -le [int]$compatibility.cuda.maximum_tested_minor -and
+                    (Test-RequiredDlls $bin $compatibility.cuda.required_dlls)) {
                     [pscustomobject]@{ Version = $version; Bin = $bin }
                 }
             } | Sort-Object Version -Descending
@@ -115,13 +160,14 @@ function Get-CudaProfile {
 
     $cudnnCandidates = @()
     foreach ($candidate in $cudaCandidates) {
-        if (Test-Path (Join-Path $candidate.Bin 'cudnn64_9.dll')) {
+        if (Test-RequiredDlls $candidate.Bin $compatibility.cudnn.required_dlls) {
             $cudnnCandidates += [pscustomobject]@{ Version = $candidate.Version; Bin = $candidate.Bin }
         }
     }
     if (Test-Path $cudnnRoot) {
         Get-ChildItem -Path $cudnnRoot -Recurse -Filter 'cudnn64_9.dll' -File -ErrorAction SilentlyContinue | ForEach-Object {
-            if ($_.FullName -match '[\\/]bin[\\/](12\.\d+)[\\/]') {
+            if ($_.FullName -match '[\\/]bin[\\/](12\.\d+)[\\/]' -and
+                (Test-RequiredDlls $_.DirectoryName $compatibility.cudnn.required_dlls)) {
                 try { $cudnnCandidates += [pscustomobject]@{ Version = [version]$Matches[1]; Bin = $_.DirectoryName } } catch { }
             }
         }
@@ -129,16 +175,77 @@ function Get-CudaProfile {
 
     $pair = $null
     foreach ($cuda in $cudaCandidates) {
-        $matchingCudnn = $cudnnCandidates | Where-Object { $_.Version -eq $cuda.Version } | Select-Object -First 1
+        $matchingCudnn = $cudnnCandidates | Where-Object {
+            $_.Version.Major -eq $cuda.Version.Major -and $_.Version.Minor -eq $cuda.Version.Minor
+        } | Sort-Object Version -Descending | Select-Object -First 1
         if ($matchingCudnn) {
             $pair = [pscustomobject]@{ Version = $cuda.Version; CudaBin = $cuda.Bin; CudnnBin = $matchingCudnn.Bin }
             break
         }
     }
-    if ($nvidia -and $pair) {
-        return [ordered]@{ whisper_device = 'cuda'; whisper_compute_type = 'float16'; whisper_model = 'large-v3'; cuda_bin_dir = $pair.CudaBin; cudnn_bin_dir = $pair.CudnnBin; profile_message = "NVIDIA GPU mode enabled (CUDA $($pair.Version) + matching cuDNN 9 detected)." }
+    # The packaged CTranslate2 probe is the real compatibility test. Do not
+    # reject a working runtime merely because nvidia-smi is not available on
+    # this user's PATH.
+    if ($pair -and (Test-PackagedGpuRuntime $pair)) {
+        return [ordered]@{
+            runtime_schema = 2
+            gpu_runtime_contract = [string]$compatibility.contract_id
+            whisper_device = 'cuda'
+            whisper_compute_type = 'float16'
+            whisper_model = 'large-v3'
+            cuda_bin_dir = $pair.CudaBin
+            cudnn_bin_dir = $pair.CudnnBin
+            profile_message = "NVIDIA GPU mode enabled (CUDA $($pair.Version) + matching cuDNN 9 verified by CTranslate2)."
+        }
     }
-    return [ordered]@{ whisper_device = 'cpu'; whisper_compute_type = 'int8'; whisper_model = 'small'; cuda_bin_dir = ''; cudnn_bin_dir = ''; profile_message = 'CPU test mode enabled. Install matching CUDA 12.3+ and cuDNN 9 later to enable faster NVIDIA transcription.' }
+    return [ordered]@{
+        runtime_schema = 2
+        gpu_runtime_contract = [string]$compatibility.contract_id
+        whisper_device = 'cpu'
+        whisper_compute_type = 'int8'
+        whisper_model = 'small'
+        cuda_bin_dir = ''
+        cudnn_bin_dir = ''
+        profile_message = 'CPU mode enabled. Install a matching supported CUDA 12 and cuDNN 9 pair, then run Configure ClipFinder runtime again.'
+    }
+}
+
+function Test-PackagedGpuRuntime($Pair) {
+    $appCandidates = [System.Collections.Generic.List[string]]::new()
+    $appCandidates.Add((Join-Path $appRoot 'ClipFinder.exe'))
+    $uninstallRoots = @(
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+    )
+    foreach ($root in $uninstallRoots) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object {
+            $entry = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue
+            if ($entry.DisplayName -eq 'ClipFinder' -and $entry.InstallLocation) {
+                $appCandidates.Add((Join-Path ([string]$entry.InstallLocation) 'ClipFinder.exe'))
+            }
+        }
+    }
+    $appCandidates.Add((Join-Path $env:LOCALAPPDATA 'Programs\ClipFinder\ClipFinder.exe'))
+    $appCandidates = @($appCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique)
+    if (-not $appCandidates) {
+        Write-Setup '[warning] ClipFinder.exe is not installed, so the CUDA pair could not be tested with CTranslate2.' 'Yellow'
+        return $false
+    }
+    try {
+        $probeArguments = "--gpu-runtime-probe `"$($Pair.CudaBin)`" `"$($Pair.CudnnBin)`""
+        $probe = Start-Process -FilePath $appCandidates[0] -ArgumentList $probeArguments -Wait -PassThru -WindowStyle Hidden
+        if ($probe.ExitCode -eq 0) {
+            Write-Setup "[ok] CTranslate2 loaded CUDA $($Pair.Version) and matching cuDNN successfully." 'Green'
+            return $true
+        }
+        Write-Setup "[warning] CUDA files were found, but the packaged CTranslate2 probe failed (exit code $($probe.ExitCode))." 'Yellow'
+    }
+    catch {
+        Write-Setup "[warning] Could not run the packaged CTranslate2 GPU probe: $($_.Exception.Message)" 'Yellow'
+    }
+    return $false
 }
 
 Write-Setup 'ClipFinder post-install setup started.' 'Cyan'
@@ -164,10 +271,26 @@ if (Test-VCRedist) { Write-Setup '[ok] Microsoft Visual C++ Redistributable is a
 else { Write-Setup '[warning] Visual C++ Redistributable could not be verified.' 'Yellow' }
 
 $profile = Get-CudaProfile
+if ($previousProfile -and ([string]$previousProfile.whisper_device).ToLowerInvariant() -eq 'cpu') {
+    $profile['whisper_device'] = 'cpu'
+    $profile['whisper_compute_type'] = if ($previousProfile.whisper_compute_type) { [string]$previousProfile.whisper_compute_type } else { 'int8' }
+    $profile['whisper_model'] = if ($previousProfile.whisper_model) { [string]$previousProfile.whisper_model } else { 'small' }
+    $profile['cuda_bin_dir'] = ''
+    $profile['cudnn_bin_dir'] = ''
+    $profile['profile_message'] = 'CPU mode preserved from the existing ClipFinder configuration.'
+}
 if ($null -eq $ffmpegDirectory) { $ffmpegDirectory = '' }
 $profile['ffmpeg_bin_dir'] = $ffmpegDirectory
 $profile | ConvertTo-Json | Set-Content -Path $runtimePath -Encoding UTF8
 Write-Setup "[ok] $($profile.profile_message)" $(if ($profile.whisper_device -eq 'cuda') { 'Green' } else { 'Yellow' })
 Write-Setup 'The transcription model downloads on the first analysis, so the tester needs an internet connection for that first run.' 'Gray'
+if ($ResultPath) {
+    Set-Content -LiteralPath $ResultPath -Value ([string]$profile.whisper_device) -Encoding ASCII
+}
+if ($RequireGpu -and $profile.whisper_device -ne 'cuda') {
+    Write-Setup '[error] The GPU add-on could not verify a working CUDA transcription runtime. ClipFinder remains usable in CPU mode.' 'Red'
+    $messages | Set-Content -Path $statusPath -Encoding UTF8
+    exit 2
+}
 $messages | Set-Content -Path $statusPath -Encoding UTF8
 Write-Setup "Setup report saved to: $statusPath" 'Gray'

@@ -1,0 +1,45 @@
+name: Windows package smoke test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pyinstaller-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            constraints-win-py311.txt
+      - name: Install pinned release dependencies
+        run: |
+          python -m pip install --upgrade pip==26.1.2
+          python -m pip install setuptools==83.0.0 wheel==0.45.1
+          python -m pip install --no-build-isolation --only-binary=:all: --no-binary=proxy-tools -r requirements-dev.txt
+          python -m pip check
+      - name: Verify release environment
+        run: python tools/verify_release.py preflight --version "$(python -c 'from app.version import __version__; print(__version__)')"
+      - name: Build both frozen executables
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean ClipFinder.spec
+          python -m PyInstaller --noconfirm --clean ClipFinderUpdateHelper.spec
+          Copy-Item dist\ClipFinderUpdateHelper.exe dist\ClipFinder\ClipFinderUpdateHelper.exe -Force
+          $version = python -c "from app.version import __version__; print(__version__)"
+          $sha = git rev-parse HEAD
+          python tools\verify_release.py write-build-info --dist dist\ClipFinder --version $version --git-sha $sha
+          python tools\verify_release.py verify-dist --dist dist\ClipFinder
+      - name: Run frozen import smoke check
+        shell: pwsh
+        run: |
+          $process = Start-Process dist\ClipFinder\ClipFinder.exe -ArgumentList '--packaged-smoke-check' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Frozen smoke check failed: $($process.ExitCode)" }

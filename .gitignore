@@ -1,5 +1,6 @@
 .env
 .venv/
+.build-venv/
 __pycache__/
 *.py[cod]
 data/
@@ -8,12 +9,13 @@ analysis_frames/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+tools/python/
 build/
 dist/
 installer-output/
 release-cache/
 installer/third_party/vc_redist.x64.exe
-*.spec
 *.log
 *.sqlite
 *.sqlite3

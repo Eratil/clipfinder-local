@@ -19,7 +19,9 @@ function Write-Step([string]$text) {
 function Get-Python311 {
     $py = Get-Command py -ErrorAction SilentlyContinue
     if ($py) {
-        $candidate = (& py -3.11 -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1).Trim()
+        $candidateOutput = @(& py -3.11 -c "import sys; print(sys.executable)" 2>$null)
+        $candidate = [string]($candidateOutput | Select-Object -Last 1)
+        $candidate = $candidate.Trim()
         if ($LASTEXITCODE -eq 0 -and $candidate -and (Test-Path $candidate)) { return $candidate }
     }
     $candidate = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python311\python.exe'

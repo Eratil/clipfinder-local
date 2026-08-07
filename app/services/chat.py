@@ -8,11 +8,14 @@ import json
 import re
 from bisect import bisect_left, bisect_right
 from collections import Counter
-from typing import Any
+from typing import Any, Iterable
 
 from app import database as db
 from app.services.embeddings import cosine, embed_texts
-from app.services.tagging import CHAT_QUESTION_ANSWER_TAG, CHAT_QUESTION_TAG, assess_short_potential, enrich_tags, score_moment_reaction
+from app.services.analysis_store import update_current_segment_and_revision
+from app.services.feedback import refresh_training_snapshot_if_current
+from app.services.feature_graph import SOURCE_CHAT, recompute_segment_features
+from app.services.tagging import CHAT_QUESTION_ANSWER_TAG, CHAT_QUESTION_TAG
 
 
 TIME_PATTERN = re.compile(r"^\s*\[?(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?\]?\s*$")
@@ -44,8 +47,10 @@ def _viewer_questions_before_answer(messages: list[dict], clip_start: float, cli
     delay-adjusted time window. A small allowance at the end handles a message
     appearing on screen while the streamer starts replying to it.
     """
-    window_start = max(0.0, clip_start + delay - 75.0)
-    window_end = clip_end + delay + 3.0
+    # Do not search the full clip duration.  That made an unrelated question
+    # from an active chat look like the reason for a later answer.
+    window_start = max(0.0, clip_start + delay - 45.0)
+    window_end = clip_start + delay + 5.0
     candidates = [
         message for message in messages
         if window_start <= float(message["seconds"]) <= window_end
@@ -83,6 +88,12 @@ def _question_answer_match_score(question: str, answer: str, question_vector: li
     overlap = len(question_words.intersection(answer_words))
     semantic = max(0.0, float(cosine(answer_vector, question_vector)))
     direct_answer = bool(_ANSWER_OPENING_PATTERN.search(answer or ""))
+    normalized_question = question.lower()
+    normalized_answer = answer.lower()
+    yes_no_question = bool(re.search(r"\b(?:czy|podoba\s+ci|masz\s+zamiar|bedziesz|zrobisz)\b", normalized_question))
+    opinion_question = bool(re.search(r"\b(?:co\s+sadzisz|co\s+myslisz|jak\s+(?:oceniasz|uwazasz|sadzisz))\b", normalized_question))
+    direct_yes_no = bool(re.match(r"^\s*(?:tak|nie|chyba|zalezy)\b", normalized_answer))
+    direct_opinion = bool(re.match(r"^\s*(?:moim\s+zdaniem|uwazam|mysle|wydaje\s+mi\s+sie|dla\s+mnie)\b", normalized_answer))
     score = semantic * 55.0
     score += min(20.0, overlap * 10.0)
     if direct_answer:
@@ -91,7 +102,13 @@ def _question_answer_match_score(question: str, answer: str, question_vector: li
         score += 6.0
     # A direct yes/no answer can be brief and share no nouns with the prompt;
     # otherwise require stronger semantic or lexical evidence.
-    supported = overlap >= 1 or semantic >= 0.42 or (direct_answer and semantic >= 0.20)
+    # A clear yes/no or opinion opening is meaningful only for the matching
+    # question type.  Every other case needs lexical overlap or a considerably
+    # stronger embedding match, which prevents coincidental chat questions.
+    typed_direct_answer = (yes_no_question and direct_yes_no) or (opinion_question and direct_opinion)
+    supported = overlap >= 1 or semantic >= 0.48 or typed_direct_answer
+    if typed_direct_answer:
+        score = max(score, 46.0)
     return max(0, min(99, round(score))) if supported else 0
 
 
@@ -249,8 +266,13 @@ def chat_summary(video_id: str) -> dict[str, Any]:
     return result
 
 
-def apply_chat_reactions(video_id: str) -> int:
-    """Score chat activity and, in Extended mode, verified viewer Q&A pairs."""
+def apply_chat_reactions(video_id: str, segment_ids: Iterable[str] | None = None) -> int:
+    """Score chat activity and verified viewer Q&A pairs.
+
+    A chat import or delay change intentionally refreshes the whole recording.
+    Manual timing/transcript edits can pass their stable segment id so the
+    unrelated clips are not re-derived and written again.
+    """
     settings = db.row("SELECT delay_seconds FROM chat_settings WHERE video_id=?", (video_id,))
     messages = db.rows("SELECT seconds, author, message FROM chat_messages WHERE video_id=? ORDER BY seconds", (video_id,))
     if not settings or not messages:
@@ -258,11 +280,21 @@ def apply_chat_reactions(video_id: str) -> int:
     delay = float(settings["delay_seconds"])
     video = db.row("SELECT analysis_mode FROM videos WHERE id=?", (video_id,)) or {}
     extended_mode = str(video.get("analysis_mode") or "default") == "extended"
+    scoped_ids = None if segment_ids is None else tuple(dict.fromkeys(
+        str(segment_id).strip() for segment_id in segment_ids if str(segment_id).strip()
+    ))
+    if scoped_ids is not None and not scoped_ids:
+        return 0
+    id_clause = ""
+    parameters: tuple[Any, ...] = (video_id,)
+    if scoped_ids is not None:
+        id_clause = f" AND s.id IN ({','.join('?' for _item in scoped_ids)})"
+        parameters += scoped_ids
     segments = db.rows(
-        """SELECT id, start_seconds, end_seconds, transcript, embedding, tags, logical_sense_score, context_score, self_contained_score, reading_likelihood,
-                  game_reaction_score, voice_expression_score, vision_score
-           FROM segments WHERE video_id=?""",
-        (video_id,),
+        f"""SELECT s.*, v.analysis_mode
+            FROM segments s JOIN videos v ON v.id=s.video_id
+            WHERE s.video_id=? AND s.lifecycle_state='current'{id_clause}""",
+        parameters,
     )
     message_times = [float(message["seconds"]) for message in messages]
     question_vectors: dict[str, list[float]] = {}
@@ -315,7 +347,6 @@ def apply_chat_reactions(video_id: str) -> int:
         if active_chat and joy and count >= max(3, expected * 1.5):
             joy_score += min(4, round(max(0.0, surge - 1) * 2.5))
         joy_score = max(0, min(14, joy_score))
-        moment_score, moment_stage = score_moment_reaction(int(segment.get("game_reaction_score") or 0), score, joy_score)
         previews = [{"author": message["author"], "message": message["message"], "seconds": message["seconds"]} for message in reaction[:4]]
         answer_text = str(segment.get("transcript") or "")
         question_match_score = 0
@@ -347,40 +378,51 @@ def apply_chat_reactions(video_id: str) -> int:
             tag for tag in json.loads(segment.get("tags") or "[]")
             if tag not in {CHAT_QUESTION_TAG, "forma: pytanie", CHAT_QUESTION_ANSWER_TAG}
         ]
-        if is_answer:
-            base_tags.extend((CHAT_QUESTION_TAG, CHAT_QUESTION_ANSWER_TAG))
-        tags = enrich_tags(
-            base_tags,
-            logical_sense_score=int(segment.get("logical_sense_score") or -1),
-            reading_likelihood=float(segment.get("reading_likelihood") or 0),
-            game_reaction_score=int(segment.get("game_reaction_score") or 0),
-            voice_expression_score=int(segment.get("voice_expression_score") or 0),
-            chat_reaction_score=score,
-            chat_joy_score=joy_score,
-            vision_score=int(segment.get("vision_score") or 0),
-            context_score=int(segment.get("context_score") or -1),
-            self_contained_score=int(segment.get("self_contained_score") or -1),
-            moment_reaction_score=moment_score,
-            moment_reaction_stage=moment_stage,
-        )
-        short_potential_score, short_potential_signals = assess_short_potential(
-            segment.get("transcript") or "", segment["start_seconds"], segment["end_seconds"], tags,
-            quality_score=int(segment.get("quality_score") or 0),
-            reading_likelihood=float(segment.get("reading_likelihood") or 0),
-            logical_sense_score=int(segment.get("logical_sense_score") or -1),
-            context_score=int(segment.get("context_score") or -1),
-            self_contained_score=int(segment.get("self_contained_score") or -1),
-            extended_completeness_score=int(segment.get("extended_completeness_score") or -1),
-            game_reaction_score=int(segment.get("game_reaction_score") or 0),
-            voice_expression_score=int(segment.get("voice_expression_score") or 0),
-            moment_reaction_score=moment_score, chat_reaction_score=score, chat_joy_score=joy_score,
-        )
-        updates.append((json.dumps(tags, ensure_ascii=False), score, joy_score, count, unique, round(surge, 2), json.dumps(previews, ensure_ascii=False), moment_score, moment_stage, question_match_score if is_answer else 0, question_text if is_answer else "", short_potential_score, json.dumps(short_potential_signals, ensure_ascii=False), segment["id"]))
+        graph_state = {
+            **segment,
+            "tags": base_tags,
+            "chat_reaction_score": score,
+            "chat_joy_score": joy_score,
+            "chat_message_count": count,
+            "chat_unique_authors": unique,
+            "chat_surge": round(surge, 2),
+            "chat_messages": previews,
+            "chat_question_match_score": question_match_score if is_answer else 0,
+            "chat_question_text": question_text if is_answer else "",
+        }
+        derived = recompute_segment_features(graph_state, {SOURCE_CHAT}).updates
+        values = {
+            **derived,
+            "chat_reaction_score": score,
+            "chat_joy_score": joy_score,
+            "chat_message_count": count,
+            "chat_unique_authors": unique,
+            "chat_surge": round(surge, 2),
+            "chat_messages": previews,
+            "chat_question_match_score": question_match_score if is_answer else 0,
+            "chat_question_text": question_text if is_answer else "",
+        }
+        for field in (
+            "tags", "quality_signals", "short_potential_signals",
+            "boundary_signals", "context_signals", "extended_story_signals",
+            "chat_messages",
+        ):
+            if field in values and not isinstance(values[field], str):
+                values[field] = json.dumps(values[field], ensure_ascii=False)
+        updates.append((segment["id"], int(segment.get("revision_number") or 1), values))
     with db.connection() as con:
-        con.executemany(
-            "UPDATE segments SET tags=?, chat_reaction_score=?, chat_joy_score=?, chat_message_count=?, chat_unique_authors=?, chat_surge=?, chat_messages=?, moment_reaction_score=?, moment_reaction_stage=?, chat_question_match_score=?, chat_question_text=?, short_potential_score=?, short_potential_signals=? WHERE id=?",
-            updates,
-        )
+        for segment_id, revision_number, values in updates:
+            update_current_segment_and_revision(
+                segment_id,
+                values,
+                con=con,
+                expected_revision_number=revision_number,
+            )
+    # Refresh only after the graph updates commit. The feedback service checks
+    # that the human decision and every profile snapshot refer to this exact
+    # revision, so chat import cannot relabel stale training data.
+    for segment_id, _revision_number, _values in updates:
+        refresh_training_snapshot_if_current(segment_id)
     return len(updates)
 
 

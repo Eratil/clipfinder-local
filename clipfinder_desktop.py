@@ -13,6 +13,8 @@ import sys
 import threading
 import time
 import json
+import tempfile
+import html
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -163,7 +165,7 @@ def start_local_server() -> tuple[uvicorn.Server | None, threading.Thread | None
     if port_is_in_use():
         raise RuntimeError(
             "Port 8000 is occupied by another application. Close that application "
-            "or start ClipFinder's existing launcher first."
+            "or close the other ClipFinder instance, then try again."
         )
 
     configure_frozen_data_directory()
@@ -191,7 +193,8 @@ def start_local_server() -> tuple[uvicorn.Server | None, threading.Thread | None
     server.should_exit = True
     raise RuntimeError(
         f"ClipFinder's local server did not start within {startup_timeout_seconds} seconds. "
-        "Run Start-ClipFinder.cmd to see its diagnostic output."
+        r"Check %LOCALAPPDATA%\ClipFinder\data\logs\clipfinder.log and "
+        r"%LOCALAPPDATA%\ClipFinder\setup-status.txt for diagnostic details."
     )
 
 
@@ -203,14 +206,108 @@ def stop_server(server: uvicorn.Server | None, thread: threading.Thread | None) 
         thread.join(timeout=8)
 
 
+def run_packaged_smoke_check() -> int:
+    """Import the frozen runtime without opening a window or touching user data."""
+    if not getattr(sys, "frozen", False):
+        print("The packaged smoke check must be run through ClipFinder.exe.", file=sys.stderr)
+        return 2
+    try:
+        # The base artifact is intentionally CPU-only. Do not read a user's
+        # runtime.json here because an installed CUDA toolkit would hide a bad
+        # or accidentally GPU-linked base package.
+        os.environ["WHISPER_DEVICE"] = "cpu"
+        os.environ["WHISPER_COMPUTE_TYPE"] = "int8"
+        # Importing app.main creates the settings singleton. Point it at a
+        # disposable directory before that import so the release smoke test
+        # can never migrate or create files in the user's real library.
+        with tempfile.TemporaryDirectory(prefix="clipfinder-smoke-") as smoke_data:
+            os.environ["CLIPFINDER_DATA_DIR"] = smoke_data
+            configure_bundled_dll_directories()
+            import certifi  # noqa: F401
+            import ctranslate2
+            import cv2  # noqa: F401
+            import fastapi  # noqa: F401
+            import faster_whisper  # noqa: F401
+            import numpy  # noqa: F401
+            import scipy  # noqa: F401
+            import sentence_transformers  # noqa: F401
+            import torch
+            import truststore  # noqa: F401
+            import webview  # noqa: F401
+            import yt_dlp  # noqa: F401
+            from app.main import app as packaged_app
+            from app.services.model_catalog import model_identity, runtime_compatibility
+
+            compatibility = runtime_compatibility()
+            if ctranslate2.__version__ != str(compatibility.get("ctranslate2") or ""):
+                raise RuntimeError(
+                    "Packaged CTranslate2 version does not match runtime-compatibility.json: "
+                    f"{ctranslate2.__version__}."
+                )
+            for model_kind in ("transcription_default", "transcription_fast", "similarity"):
+                model_identity(model_kind)
+            if packaged_app is None:
+                raise RuntimeError("The packaged FastAPI application was not created.")
+            if torch.version.cuda is not None:
+                raise RuntimeError(f"Base package contains CUDA-enabled PyTorch ({torch.version.cuda}).")
+            for relative in (
+                "app/static/index.html",
+                "assets/clipfinder.ico",
+                "assets/close-pop.wav",
+                "assets/runtime-compatibility.json",
+            ):
+                if not bundled_asset_path(relative).is_file():
+                    raise RuntimeError(f"Bundled asset is missing: {relative}")
+            if not Path(sys.executable).with_name("ClipFinderUpdateHelper.exe").is_file():
+                raise RuntimeError("ClipFinderUpdateHelper.exe is missing.")
+    except Exception as exc:
+        print(f"Packaged smoke check failed: {exc}", file=sys.stderr)
+        return 1
+    print("Packaged ClipFinder smoke check passed.")
+    return 0
+
+
+def run_gpu_runtime_probe(cuda_bin: str, cudnn_bin: str) -> int:
+    """Verify the exact CUDA/cuDNN pair with the packaged CTranslate2 build."""
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return 2
+    handles: list[object] = []
+    try:
+        import ctypes
+
+        for value in (cuda_bin, cudnn_bin):
+            directory = Path(value).resolve()
+            if not directory.is_dir():
+                raise RuntimeError(f"Runtime directory is missing: {directory}")
+            handles.append(os.add_dll_directory(str(directory)))
+            os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
+        from app.services.model_catalog import runtime_compatibility
+
+        compatibility = runtime_compatibility()
+        for component, directory in (("cuda", Path(cuda_bin)), ("cudnn", Path(cudnn_bin))):
+            for name in compatibility[component]["required_dlls"]:
+                ctypes.WinDLL(str(directory / name))
+        import ctranslate2
+
+        if ctranslate2.get_cuda_device_count() < 1:
+            raise RuntimeError("CTranslate2 did not detect a CUDA device.")
+    except Exception as exc:
+        print(f"GPU runtime probe failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        # Keep handles alive through the CTranslate2 check, then release them.
+        handles.clear()
+    return 0
+
+
 def run() -> None:
     try:
         import webview
     except ImportError:
         show_error(
             "ClipFinder desktop window",
-            "The desktop window component is missing. Run Install-ClipFinder.cmd again "
-            "or install the project requirements, then reopen ClipFinder.",
+            "The desktop window component is missing. Repair the installed application "
+            "or install the source-project requirements, then reopen ClipFinder.",
         )
         return
 
@@ -236,7 +333,13 @@ def run() -> None:
                 window.load_url(APP_URL)
             except Exception as exc:
                 show_error("ClipFinder desktop window", str(exc))
-                window.load_html(f"<html><body style='background:#0e121a;color:#edf2fa;font:16px Segoe UI;padding:40px'><h2>ClipFinder could not start</h2><p>{exc}</p><p>Run Start-ClipFinder.cmd to see diagnostic output.</p></body></html>")
+                safe_error = html.escape(str(exc))
+                window.load_html(
+                    "<html><body style='background:#0e121a;color:#edf2fa;font:16px Segoe UI;padding:40px'>"
+                    f"<h2>ClipFinder could not start</h2><p>{safe_error}</p>"
+                    r"<p>Check %LOCALAPPDATA%\ClipFinder\data\logs\clipfinder.log and "
+                    r"%LOCALAPPDATA%\ClipFinder\setup-status.txt.</p></body></html>"
+                )
 
         webview.start(start_backend, icon=str(bundled_asset_path("assets/clipfinder.ico")))
     except Exception as exc:
@@ -245,4 +348,12 @@ def run() -> None:
 
 
 if __name__ == "__main__":
+    if "--packaged-smoke-check" in sys.argv[1:]:
+        raise SystemExit(run_packaged_smoke_check())
+    if "--gpu-runtime-probe" in sys.argv[1:]:
+        try:
+            probe_index = sys.argv.index("--gpu-runtime-probe")
+            raise SystemExit(run_gpu_runtime_probe(sys.argv[probe_index + 1], sys.argv[probe_index + 2]))
+        except (ValueError, IndexError):
+            raise SystemExit(2)
     run()

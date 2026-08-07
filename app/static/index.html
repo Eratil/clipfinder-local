@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ClipFinder Local</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260804-card-score-row" />
+    <link rel="stylesheet" href="/static/style.css?v=20260804-statistics" />
   </head>
   <body class="clip-editor-closed">
     <main>
@@ -14,11 +14,13 @@
       </header>
 
       <button id="setup-toggle" class="quiet setup-toggle" aria-controls="setup-sidebar" aria-expanded="false">Saved setup</button>
-      <aside id="setup-sidebar" class="setup-sidebar" aria-label="Saved setup" aria-hidden="true">
+      <aside id="setup-sidebar" class="setup-sidebar" aria-label="Saved setup" aria-hidden="true" inert>
         <div class="section-title setup-sidebar-head"><div><h2>Saved setup</h2><p class="hint">Search tools and global settings - available at any time.</p></div><button id="setup-close" class="quiet" aria-label="Hide saved setup">Hide</button></div>
         <div class="setup-tabs" role="tablist" aria-label="Saved setup sections">
           <button type="button" class="quiet setup-tab active" data-setup-tab="search" role="tab" aria-selected="true">Search</button>
           <button type="button" class="quiet setup-tab" data-setup-tab="global" role="tab" aria-selected="false">Global</button>
+          <button type="button" class="quiet setup-tab" data-setup-tab="statistics" role="tab" aria-selected="false">Statistics</button>
+          <button type="button" class="quiet setup-tab" data-setup-tab="options" role="tab" aria-selected="false">Options</button>
         </div>
         <div class="setup-tab-panel active" data-setup-panel="search" role="tabpanel">
           <div class="sidebar-search">
@@ -225,8 +227,28 @@
               <button>Save analysis audio settings</button>
             </form>
           </article>
+          </div>
+        </div>
+        <div class="setup-tab-panel" data-setup-panel="statistics" role="tabpanel" hidden>
+          <article class="library-card statistics-card">
+            <div class="section-title"><div><h3>Review statistics</h3><p class="hint">All locally analysed recordings. Use this to see what the ranking gets right or wrong.</p></div><button id="refresh-statistics" type="button" class="quiet">Refresh</button></div>
+            <div id="statistics-overview" class="statistics-overview" aria-live="polite"></div>
+          </article>
+          <article class="library-card statistics-card"><h3>Why clips are rejected</h3><div id="statistics-reasons" class="statistics-list"></div></article>
+          <article class="library-card statistics-card"><h3>Approved vs rejected scores</h3><p class="hint">A large gap means this score helps selection. A small or reversed gap is a signal that it needs tuning.</p><div id="statistics-scores" class="statistics-list"></div></article>
+          <article class="library-card statistics-card"><h3>Tags and decisions</h3><p class="hint">Shows the most frequent tags and how often clips with that tag are approved or rejected.</p><div id="statistics-tags" class="statistics-list"></div></article>
+          <article class="library-card statistics-card"><h3>Analysis modes and reading filter</h3><div id="statistics-diagnostics" class="statistics-list"></div></article>
+        </div>
+        <div class="setup-tab-panel" data-setup-panel="options" role="tabpanel" hidden>
+          <article class="library-card">
+            <h3 id="language-options-title">Application language</h3>
+            <p id="language-options-hint" class="hint">Changes the ClipFinder interface only. Analysis models, tags and saved data stay unchanged.</p>
+            <label><span id="language-options-label">Interface language</span>
+              <select id="application-language"><option value="en">English</option><option value="pl">Polski</option></select>
+            </label>
+          </article>
           <article class="library-card updates-card">
-            <h3>Software updates</h3>
+            <h3 id="software-updates-title">Software updates</h3>
             <p id="update-status" class="hint">Check manually for a newer ClipFinder release.</p>
             <div id="update-release-notes" class="update-release-notes" hidden>
               <strong id="update-release-title"></strong>
@@ -238,12 +260,11 @@
             </div>
             <div class="prompt-row"><button id="check-updates" class="quiet">Check for updates</button><button id="install-update" class="quiet" hidden>Download update</button><a id="download-update" class="quiet" target="_blank" rel="noopener" hidden>Download manually</a><button id="download-diagnostics" type="button" class="quiet">Open diagnostic report</button></div>
           </article>
-          </div>
         </div>
       </aside>
 
       <section class="upload">
-        <h2>New recording</h2>
+        <h2 id="upload-heading">New recording</h2>
         <div class="analysis-mode-picker">
           <label>Analysis mode
             <select id="analysis-mode">
@@ -264,7 +285,7 @@
       </section>
 
       <section>
-        <div class="section-title"><div><h2>Recordings</h2><p id="storage-summary" class="hint">Calculating disk usage...</p></div><button class="quiet" id="refresh">Refresh now</button></div>
+        <div class="section-title"><div><h2 id="recordings-heading">Recordings</h2><p id="storage-summary" class="hint">Calculating disk usage...</p></div><button class="quiet" id="refresh">Refresh now</button></div>
         <div id="videos" class="videos"></div>
       </section>
 
@@ -273,7 +294,7 @@
         <section class="chat-panel">
           <div><h3>Chat reaction analysis</h3><p class="hint">Import a chat transcript with timestamps from the start of the recording. Messages are scored after your clip, using the delay below.</p></div>
           <form id="chat-import-form">
-            <label>Chat transcript (.json, .csv, .tsv or .txt)<input id="chat-file" type="file" accept=".json,.csv,.tsv,.txt,application/json,text/csv,text/plain" required /></label>
+            <label>Chat transcript (.json, .jsonl, .ndjson, .csv, .tsv or .txt)<input id="chat-file" type="file" accept=".json,.jsonl,.ndjson,.csv,.tsv,.txt,application/json,application/x-ndjson,text/csv,text/plain" required /></label>
             <label>Expected chat delay (seconds)<input id="chat-delay" type="number" min="0" max="60" step="0.5" value="6" /></label>
             <button>Import chat and score clips</button>
           </form>
@@ -296,7 +317,7 @@
               <option value="pytanie">Pytanie</option>
               <option value="rekomendacja">Rekomendacja</option>
               <option value="reakcja na grę">Reakcja na grę</option>
-              <option value="reading">Possible reading</option>
+              <option value="format: czytanie">Possible reading</option>
               <optgroup label="Forma wypowiedzi">
                 <option value="forma: opinia">Opinia</option>
                 <option value="forma: pytanie">Konkretne pytanie</option>
@@ -317,7 +338,8 @@
               </optgroup>
               <optgroup label="Kontekst i reakcje">
                 <option value="reakcja: gra">Reakcja na zdarzenie w grze</option>
-                <option value="reakcja: mocny głos">Mocna reakcja głosem</option>
+                <option value="wypowiedź: ekspresyjna">Ekspresyjna wypowiedź</option>
+                <option value="wypowiedź: jednostajna">Jednostajna wypowiedź</option>
                 <option value="reakcja: czat">Reakcja czatu</option>
                 <option value="reakcja: radość czatu">Radość czatu</option>
                 <option value="moment: gra -> glos">Moment: gra → głos</option>
@@ -327,7 +349,6 @@
                 <option value="struktura: samodzielna myśl">Samodzielna myśl</option>
                 <option value="struktura: urwana wypowiedź">Urwana wypowiedź</option>
                 <option value="struktura: wymaga kontekstu">Wymaga kontekstu</option>
-                <option value="format: czytanie">Czytanie</option>
               </optgroup>
             </select>
           </label>
@@ -372,7 +393,7 @@
       </article>
     </template>
     <button id="clip-editor-toggle" class="quiet clip-editor-toggle" aria-controls="clip-editor-sidebar" aria-expanded="false" hidden>Clip editor</button>
-    <aside id="clip-editor-sidebar" class="clip-editor-sidebar" aria-label="Clip editor" aria-hidden="true">
+    <aside id="clip-editor-sidebar" class="clip-editor-sidebar" aria-label="Clip editor" aria-hidden="true" inert>
       <div class="section-title clip-editor-head"><div><h2>Clip editor</h2><p id="clip-editor-title" class="hint">Select a clip to edit it.</p></div><button id="clip-editor-close" class="quiet" aria-label="Hide clip editor">Hide</button></div>
       <div class="editor-tabs" role="tablist" aria-label="Clip panel tabs">
         <button type="button" class="quiet editor-tab active" data-editor-tab="edit" role="tab" aria-selected="true">Clip editor</button>
@@ -414,6 +435,7 @@
         <div id="clip-editor-analysis-tab" class="editor-tab-pane" role="tabpanel" hidden>
           <h3>Detailed scoring</h3>
           <p class="hint">These scores explain the selected clip. They do not replace your approval decision.</p>
+          <div id="editor-score-grid" class="segment-score-grid" aria-label="Detailed clip scores"></div>
           <div id="editor-score-signals" class="score-signals hint" hidden></div>
           <section class="score-legend" aria-label="Scoring legend">
             <h4>Legend</h4>
@@ -466,6 +488,6 @@
       <p class="hint quick-review-shortcuts"><kbd>A</kbd> approve &nbsp; <kbd>R</kbd> reject &nbsp; <kbd>←</kbd><kbd>→</kbd> previous / next</p>
       <div class="actions quick-review-actions"><button id="quick-review-approve">Approve</button><button id="quick-review-reject" class="quiet">Reject</button><button id="quick-review-previous" class="quiet">Previous</button><button id="quick-review-next" class="quiet">Next</button></div>
     </dialog>
-    <script src="/static/app.js?v=20260804-card-score-grid"></script>
+    <script src="/static/app.js?v=20260806-tag-cleanup"></script>
   </body>
 </html>

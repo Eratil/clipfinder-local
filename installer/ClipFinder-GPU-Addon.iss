@@ -3,7 +3,13 @@
 ; are large, require their own administrator prompts, and are not needed for CPU mode.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0"
+  #define MyAppVersion "1.0.0"
+#endif
+#ifndef CudaInstallerPath
+  #define CudaInstallerPath "..\..\cuda_12.9.2_576.57_windows.exe"
+#endif
+#ifndef CudnnInstallerPath
+  #define CudnnInstallerPath "..\..\cudnn_9.24.0_windows_x86_64.exe"
 #endif
 
 #define MyAppName "ClipFinder NVIDIA GPU Add-on"
@@ -36,9 +42,10 @@ SetupIconFile=..\assets\clipfinder.ico
 InfoBeforeFile=GPU-ADDON-README.txt
 
 [Files]
-Source: "..\..\cuda_12.9.2_576.57_windows.exe"; DestDir: "{tmp}\ClipFinder-GPU"; DestName: "cuda_12.9.2_576.57_windows.exe"; Flags: deleteafterinstall
-Source: "..\..\cudnn_9.24.0_windows_x86_64.exe"; DestDir: "{tmp}\ClipFinder-GPU"; DestName: "cudnn_9.24.0_windows_x86_64.exe"; Flags: deleteafterinstall
+Source: "{#CudaInstallerPath}"; DestDir: "{tmp}\ClipFinder-GPU"; DestName: "cuda_12.9.2_576.57_windows.exe"; Flags: deleteafterinstall
+Source: "{#CudnnInstallerPath}"; DestDir: "{tmp}\ClipFinder-GPU"; DestName: "cudnn_9.24.0_windows_x86_64.exe"; Flags: deleteafterinstall
 Source: "Configure-ClipFinder.ps1"; DestDir: "{tmp}\ClipFinder-GPU"; Flags: deleteafterinstall
+Source: "runtime-compatibility.json"; DestDir: "{tmp}\ClipFinder-GPU"; Flags: deleteafterinstall
 Source: "GPU-ADDON-README.txt"; DestDir: "{tmp}\ClipFinder-GPU"; Flags: deleteafterinstall
 
 [Run]
@@ -46,59 +53,33 @@ Source: "GPU-ADDON-README.txt"; DestDir: "{tmp}\ClipFinder-GPU"; Flags: deleteaf
 ; extracted temporary files are still present.
 Filename: "{tmp}\ClipFinder-GPU\cuda_12.9.2_576.57_windows.exe"; Description: "Install NVIDIA CUDA 12.9"; Flags: waituntilterminated; Check: NeedCudaInstall
 Filename: "{tmp}\ClipFinder-GPU\cudnn_9.24.0_windows_x86_64.exe"; Description: "Install NVIDIA cuDNN 9.24"; Flags: waituntilterminated; Check: NeedCudnnInstall
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\ClipFinder-GPU\Configure-ClipFinder.ps1"""; Description: "Verify NVIDIA GPU support for ClipFinder"; Flags: waituntilterminated runascurrentuser
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\ClipFinder-GPU\Configure-ClipFinder.ps1"" -CompatibilityPath ""{tmp}\ClipFinder-GPU\runtime-compatibility.json"" -ResultPath ""{tmp}\ClipFinder-GPU\gpu-result.txt"" -RequireGpu"; Description: "Verify NVIDIA GPU support for ClipFinder"; Flags: waituntilterminated runascurrentuser; AfterInstall: VerifyGpuConfiguration
 
 [Code]
 var
   MissingInstallerNoticeShown: Boolean;
 
-function HasCudaRuntimeFile(FileName: String): Boolean;
-var
-  FindRec: TFindRec;
-  ToolkitRoot: String;
-  Candidate: String;
+function CudaFilesPresent(Directory: String): Boolean;
 begin
-  Result := False;
-  ToolkitRoot := ExpandConstant('{autopf}\NVIDIA GPU Computing Toolkit\CUDA');
-  if not FindFirst(AddBackslash(ToolkitRoot) + 'v*', FindRec) then exit;
-  try
-    repeat
-      if ((FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
-         (FindRec.Name <> '.') and (FindRec.Name <> '..') then begin
-        Candidate := AddBackslash(ToolkitRoot) + FindRec.Name + '\bin\' + FileName;
-        if FileExists(Candidate) then begin
-          Result := True;
-          exit;
-        end;
-      end;
-    until not FindNext(FindRec);
-  finally
-    FindClose(FindRec);
-  end;
+  Result :=
+    FileExists(AddBackslash(Directory) + 'cudart64_12.dll') and
+    FileExists(AddBackslash(Directory) + 'cublasLt64_12.dll') and
+    FileExists(AddBackslash(Directory) + 'cublas64_12.dll');
 end;
 
-function DirectoryContainsFile(Directory, FileName: String): Boolean;
-var
-  FindRec: TFindRec;
-  Candidate: String;
+function CudnnFilesPresent(Directory: String): Boolean;
 begin
-  Result := FileExists(AddBackslash(Directory) + FileName);
-  if Result or (not DirExists(Directory)) then exit;
-  if not FindFirst(AddBackslash(Directory) + '*', FindRec) then exit;
-  try
-    repeat
-      if ((FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
-         (FindRec.Name <> '.') and (FindRec.Name <> '..') then begin
-        Candidate := AddBackslash(Directory) + FindRec.Name;
-        if DirectoryContainsFile(Candidate, FileName) then begin
-          Result := True;
-          exit;
-        end;
-      end;
-    until not FindNext(FindRec);
-  finally
-    FindClose(FindRec);
-  end;
+  Result :=
+    FileExists(AddBackslash(Directory) + 'cudnn_adv64_9.dll') and
+    FileExists(AddBackslash(Directory) + 'cudnn_cnn64_9.dll') and
+    FileExists(AddBackslash(Directory) + 'cudnn_engines_precompiled64_9.dll') and
+    FileExists(AddBackslash(Directory) + 'cudnn_engines_runtime_compiled64_9.dll') and
+    FileExists(AddBackslash(Directory) + 'cudnn_engines_tensor_ir64_9.dll') and
+    FileExists(AddBackslash(Directory) + 'cudnn_ext64_9.dll') and
+    FileExists(AddBackslash(Directory) + 'cudnn_graph64_9.dll') and
+    FileExists(AddBackslash(Directory) + 'cudnn_heuristic64_9.dll') and
+    FileExists(AddBackslash(Directory) + 'cudnn_ops64_9.dll') and
+    FileExists(AddBackslash(Directory) + 'cudnn64_9.dll');
 end;
 
 function HasSupportedCuda12(): Boolean;
@@ -110,17 +91,68 @@ begin
   ; toolkit and let the configuration step verify the matching cuDNN folder.
   Result := False;
   for MinorVersion := 3 to 9 do begin
-    if FileExists(ExpandConstant('{autopf}\NVIDIA GPU Computing Toolkit\CUDA\v12.' + IntToStr(MinorVersion) + '\bin\cublas64_12.dll')) then begin
+    if CudaFilesPresent(ExpandConstant('{autopf}\NVIDIA GPU Computing Toolkit\CUDA\v12.' + IntToStr(MinorVersion) + '\bin')) then begin
       Result := True;
       exit;
     end;
   end;
 end;
 
-function HasCudnn9(): Boolean;
+function DirectoryContainsMatchingCudnn(Directory, VersionPart: String): Boolean;
+var
+  FindRec: TFindRec;
+  Candidate: String;
 begin
-  Result := HasCudaRuntimeFile('cudnn64_9.dll') or
-    DirectoryContainsFile(ExpandConstant('{autopf}\NVIDIA\CUDNN'), 'cudnn64_9.dll');
+  Result := False;
+  if not DirExists(Directory) then exit;
+  if CudnnFilesPresent(Directory) and
+     (Pos(Lowercase('\bin\' + VersionPart + '\'), Lowercase(Directory + '\')) > 0) then begin
+    Result := True;
+    exit;
+  end;
+  if not FindFirst(AddBackslash(Directory) + '*', FindRec) then exit;
+  try
+    repeat
+      if ((FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
+         (FindRec.Name <> '.') and (FindRec.Name <> '..') then begin
+        Candidate := AddBackslash(Directory) + FindRec.Name;
+        if DirectoryContainsMatchingCudnn(Candidate, VersionPart) then begin
+          Result := True;
+          exit;
+        end;
+      end;
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+end;
+
+function HasMatchingCudnn9(MinorVersion: Integer): Boolean;
+var
+  VersionPart: String;
+begin
+  VersionPart := '12.' + IntToStr(MinorVersion);
+  Result := CudnnFilesPresent(ExpandConstant('{autopf}\NVIDIA GPU Computing Toolkit\CUDA\v' + VersionPart + '\bin')) or
+    DirectoryContainsMatchingCudnn(ExpandConstant('{autopf}\NVIDIA\CUDNN'), VersionPart);
+end;
+
+function HasCompatibleRuntimePair(): Boolean;
+var
+  MinorVersion: Integer;
+begin
+  Result := False;
+  for MinorVersion := 3 to 9 do begin
+    if CudaFilesPresent(ExpandConstant('{autopf}\NVIDIA GPU Computing Toolkit\CUDA\v12.' + IntToStr(MinorVersion) + '\bin')) and
+       HasMatchingCudnn9(MinorVersion) then begin
+      Result := True;
+      exit;
+    end;
+  end;
+end;
+
+function HasBundledCuda12_9(): Boolean;
+begin
+  Result := CudaFilesPresent(ExpandConstant('{autopf}\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin'));
 end;
 
 function CanRunGpuInstaller(FileName: String): Boolean;
@@ -140,25 +172,43 @@ end;
 
 function NeedCudaInstall(): Boolean;
 begin
-  Result := (not HasSupportedCuda12()) and CanRunGpuInstaller('cuda_12.9.2_576.57_windows.exe');
+  { A different supported CUDA minor without matching cuDNN cannot use the
+    bundled cuDNN 12.9 package. Install the bundled CUDA as well so setup
+    always creates a same-minor pair. }
+  Result := (not HasCompatibleRuntimePair()) and (not HasBundledCuda12_9()) and
+    CanRunGpuInstaller('cuda_12.9.2_576.57_windows.exe');
 end;
 
 function NeedCudnnInstall(): Boolean;
 begin
-  Result := (not HasCudnn9()) and CanRunGpuInstaller('cudnn_9.24.0_windows_x86_64.exe');
+  { This check runs after the CUDA installer entry, so a freshly installed
+    CUDA 12.9 folder can already be matched against standalone cuDNN. }
+  Result := (not HasCompatibleRuntimePair()) and CanRunGpuInstaller('cudnn_9.24.0_windows_x86_64.exe');
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
-  if HasSupportedCuda12() and HasCudnn9() then begin
+  if HasCompatibleRuntimePair() then begin
     MsgBox(
       'A compatible CUDA 12.x and cuDNN 9 installation was detected. The GPU add-on will verify that their versions match before enabling ClipFinder GPU mode.',
       mbInformation, MB_OK);
   end
   else if HasSupportedCuda12() then begin
     MsgBox(
-      'A compatible CUDA 12.x installation was detected, but cuDNN 9 was not detected. The add-on will install cuDNN and then verify ClipFinder GPU mode.',
+      'A CUDA 12.x installation was detected, but it has no matching complete cuDNN 9 runtime. The add-on will install its tested CUDA 12.9 and cuDNN 9.24 pair, then verify ClipFinder GPU mode.',
       mbInformation, MB_OK);
+  end;
+end;
+
+procedure VerifyGpuConfiguration;
+var
+  ResultText: String;
+begin
+  if (not LoadStringFromFile(ExpandConstant('{tmp}\ClipFinder-GPU\gpu-result.txt'), ResultText)) or
+     (Lowercase(Trim(ResultText)) <> 'cuda') then begin
+    RaiseException(
+      'ClipFinder could not verify GPU transcription after installing the NVIDIA components. ' +
+      'ClipFinder remains usable in CPU mode. Open the setup-status report or create a diagnostic report in the app before retrying the add-on.');
   end;
 end;

@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "contract_id": "ctranslate2-4.8-cuda12-cudnn9-x64-r1",
+  "gpu_addon_version": "1.0.0",
+  "architecture": "x64",
+  "ctranslate2": "4.8.1",
+  "cuda": {
+    "major": 12,
+    "minimum_minor": 3,
+    "maximum_tested_minor": 9,
+    "bundled_installer_version": "12.9.2",
+    "required_dlls": ["cudart64_12.dll", "cublasLt64_12.dll", "cublas64_12.dll"]
+  },
+  "cudnn": {
+    "major": 9,
+    "bundled_installer_version": "9.24.0",
+    "required_dlls": [
+      "cudnn_adv64_9.dll",
+      "cudnn_cnn64_9.dll",
+      "cudnn_engines_precompiled64_9.dll",
+      "cudnn_engines_runtime_compiled64_9.dll",
+      "cudnn_engines_tensor_ir64_9.dll",
+      "cudnn_ext64_9.dll",
+      "cudnn_graph64_9.dll",
+      "cudnn_heuristic64_9.dll",
+      "cudnn_ops64_9.dll",
+      "cudnn64_9.dll"
+    ]
+  },
+  "models": {
+    "transcription_default": {
+      "id": "Systran/faster-whisper-large-v3",
+      "revision": "edaa852ec7e145841d8ffdb056a99866b5f0a478"
+    },
+    "transcription_fast": {
+      "id": "Systran/faster-whisper-small",
+      "revision": "536b0662742c02347bc0e980a01041f333bce120"
+    },
+    "similarity": {
+      "id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+      "revision": "e8f8c211226b894fcb81acc59f3b34ba3efd5f42"
+    }
+  },
+  "capabilities": {
+    "base_installer": "CPU transcription and CPU similarity search",
+    "gpu_addon": "CUDA transcription through CTranslate2; similarity search remains CPU-only"
+  }
+}

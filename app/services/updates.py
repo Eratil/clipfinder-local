@@ -40,10 +40,7 @@ def update_status() -> dict:
         return {**base, "error": f"Could not check for updates: {exc}"}
 
     latest = str(release.get("tag_name") or release.get("name") or "").lstrip("v")
-    installer = next(
-        (asset for asset in release.get("assets", []) if str(asset.get("name", "")).lower().endswith(".exe") and "clipfinder-setup" in str(asset.get("name", "")).lower()),
-        None,
-    )
+    installer = _release_asset(release, f"ClipFinder-Setup-{latest}.exe")
     if not latest or not installer:
         return {**base, "error": "The latest release does not contain a ClipFinder setup executable."}
     # A patch is only valid for one exact predecessor.  Requiring its matching
@@ -55,6 +52,8 @@ def update_status() -> dict:
     patch_available = bool(_version_parts(latest) > _version_parts(__version__) and patch and manifest)
     selected = patch if patch_available else installer
     update_kind = "patch" if patch_available else "installer"
+    digest = str(selected.get("digest") or "")
+    asset_sha256 = digest.removeprefix("sha256:") if re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest) else None
     return {
         **base,
         "latest_version": latest,
@@ -72,5 +71,6 @@ def update_status() -> dict:
         "release_url": release.get("html_url"),
         "published_at": release.get("published_at"),
         "asset_size": int(selected.get("size") or 0),
+        "asset_sha256": asset_sha256,
         "patch_available": patch_available,
     }

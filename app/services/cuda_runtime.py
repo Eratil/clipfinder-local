@@ -7,6 +7,8 @@ from ctypes import WinDLL
 from pathlib import Path
 
 from app.services import diagnostics
+from app.services.model_catalog import runtime_compatibility
+from app.services.runtime_paths import preferred_runtime_pair
 
 _dll_handles: list[object] = []
 _added_directories: set[str] = set()
@@ -26,22 +28,14 @@ def _log_probe(outcome: str) -> None:
     diagnostics.logger().info("CUDA runtime probe: %s", outcome)
 
 
-def add_cuda_dll_directories() -> list[Path]:
+def add_cuda_dll_directories(pair=None) -> list[Path]:
     if sys.platform != "win32":
         return []
-    roots = []
-    for variable in ("CUDA_BIN_DIR", "CUDNN_BIN_DIR"):
-        roots.extend(Path(value) for value in os.environ.get(variable, "").split(";") if value)
-    toolkit_root = Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA")
-    if toolkit_root.is_dir():
-        roots.extend(sorted(toolkit_root.glob("v12*"), reverse=True))
+    pair = pair or preferred_runtime_pair()
+    roots = [pair.cuda_bin, pair.cudnn_bin] if pair else []
     added: list[Path] = []
     for item in roots:
-        # ``CUDNN_BIN_DIR`` can point at a nested folder such as
-        # ``...\bin\12.x\x64`` rather than a folder literally named ``bin``.
-        # Treat an explicit directory containing a CUDA/cuDNN DLL as final.
-        has_runtime_dll = (item / "cublas64_12.dll").is_file() or (item / "cudnn64_9.dll").is_file()
-        folder = item if item.name.lower() == "bin" or has_runtime_dll else item / "bin"
+        folder = item
         key = str(folder).lower()
         if folder.is_dir() and key not in _added_directories:
             _dll_handles.append(os.add_dll_directory(str(folder)))
@@ -53,12 +47,18 @@ def add_cuda_dll_directories() -> list[Path]:
 def cuda12_runtime_error() -> str | None:
     if sys.platform != "win32":
         return None
-    added_directories = add_cuda_dll_directories()
-    stage = "loading CUDA cuBLAS DLL"
+    added_directories: list[Path] = []
+    stage = "discovering compatible CUDA and cuDNN directories"
     try:
-        WinDLL("cublas64_12.dll")
-        stage = "loading cuDNN DLL"
-        WinDLL("cudnn64_9.dll")
+        pair = preferred_runtime_pair()
+        if pair is None:
+            raise OSError("No complete, same-minor CUDA 12 and cuDNN 9 pair was found.")
+        added_directories = add_cuda_dll_directories(pair)
+        compatibility = runtime_compatibility()
+        for component, directory in (("cuda", pair.cuda_bin), ("cudnn", pair.cudnn_bin)):
+            for name in compatibility[component]["required_dlls"]:
+                stage = f"loading {name}"
+                WinDLL(str(directory / name))
         # The DLLs may be present while the actual CTranslate2 backend still
         # cannot initialise CUDA (for example after an incomplete cuDNN copy).
         # Ask the same runtime used by Whisper before claiming GPU readiness.

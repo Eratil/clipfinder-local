@@ -3,6 +3,14 @@ import unicodedata
 from collections import Counter
 
 from app.services.embeddings import cosine, embed_texts
+from app.services.tag_taxonomy import (
+    CHAT_QUESTION_ANSWER_TAG,
+    CHAT_QUESTION_TAG,
+    CONTEXT_TAG_PREFIXES,
+    GAME_REACTION_TAG,
+    canonicalize_tags,
+    tag_category,
+)
 
 # Broad tags remain stable for saved searches created in earlier versions.
 TAG_DEFINITIONS = (
@@ -39,8 +47,6 @@ EMOTION_OR_OPINION_TAGS = {
     "emocja: śmiech", "emocja: frustracja", "emocja: zachwyt", "emocja: rozczarowanie", "emocja: szok",
     "forma: opinia", "forma: krytyka", "forma: puenta",
 }
-CONTEXT_TAG_PREFIXES = ("reakcja: ", "kontekst: ", "struktura: ", "format: ", "moment: ")
-
 _FILLERS = {"yyy", "eee", "hmm", "um", "jakby", "znaczy"}
 _TRAILING_CONNECTORS = {"a", "ale", "bo", "czy", "i", "jak", "że", "żeby", "więc", "to"}
 _COHERENCE_CONNECTORS = {"bo", "dlatego", "więc", "ale", "jednak", "potem", "teraz", "jeśli", "gdy", "ponieważ"}
@@ -56,13 +62,28 @@ _DOCUMENT_CUE_STEMS = {
     "dyrektyw", "zabran", "rozporzad", "ustaw", "paragraf", "artykul", "spoleczen", "obywatel",
     "filozof", "doktryn", "ideologi", "antyrzadow", "przepisy", "postanowien",
 }
-GAME_REACTION_TAG = "reakcja na grę"
-# This tag is deliberately *not* inferred from the streamer's wording. It is
-# assigned by chat.py only when a viewer question is followed by an answer.
-CHAT_QUESTION_TAG = "pytanie"
-CHAT_QUESTION_ANSWER_TAG = "forma: odpowiedź na pytanie czatu"
-
 _tag_vectors: list[list[float]] | None = None
+
+
+def deduplicate_content_tags(tags: list[str], limit: int = 6) -> list[str]:
+    """Keep one precise semantic tag from each content category.
+
+    The caller supplies detailed lexical tags before broad/semantic ones, so a
+    specific label wins naturally without hard-coding every Polish synonym.
+    Diagnostic tags are canonicalized too. ``enrich_tags`` removes stale
+    diagnostics before rebuilding them from current evidence.
+    """
+    selected: list[str] = []
+    used: set[str] = set()
+    for tag in canonicalize_tags(tags):
+        category = tag_category(tag)
+        if category in used:
+            continue
+        selected.append(tag)
+        used.add(category)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def infer_tags(text: str, embedding: list[float], limit: int = 6) -> list[str]:
@@ -74,12 +95,15 @@ def infer_tags(text: str, embedding: list[float], limit: int = 6) -> list[str]:
         _tag_vectors = embed_texts([item[1] for item in TAG_DEFINITIONS])
     semantic = [(cosine(embedding, vector), TAG_DEFINITIONS[index][0]) for index, vector in enumerate(_tag_vectors)]
     semantic_tags = [name for score, name in sorted(semantic, reverse=True) if score >= 0.34]
-    return list(dict.fromkeys(detailed + lexical + semantic_tags))[:limit]
+    return deduplicate_content_tags(list(dict.fromkeys(detailed + lexical + semantic_tags)), limit)
 
 
 def detailed_lexical_tags(text: str) -> list[str]:
     lowered = (text or "").lower()
-    return [name for name, markers in DETAILED_TAG_DEFINITIONS if any(marker in lowered for marker in markers)]
+    return canonicalize_tags(
+        name for name, markers in DETAILED_TAG_DEFINITIONS
+        if any(marker in lowered for marker in markers)
+    )
 
 
 def enrich_tags(
@@ -98,37 +122,32 @@ def enrich_tags(
     moment_reaction_stage: str = "",
 ) -> list[str]:
     """Attach evidence-based context tags and replace stale dynamic values."""
-    cleaned = [tag for tag in tags if not tag.startswith(CONTEXT_TAG_PREFIXES)]
+    # Rebuild diagnostic labels every time a score changes.  ``reading`` was a
+    # legacy duplicate of ``format: czytanie`` and is intentionally dropped.
+    semantic = [tag for tag in canonicalize_tags(tags) if not tag.startswith(CONTEXT_TAG_PREFIXES)]
+    cleaned = deduplicate_content_tags(semantic)
     context: list[str] = []
     if reading_likelihood >= 0.48:
         context.append("format: czytanie")
-    if logical_sense_score >= 68:
-        context.append("struktura: samodzielna myśl")
-    elif 0 <= logical_sense_score <= 35:
+    # Structure is one mutually exclusive diagnostic category.  The detailed
+    # numeric scores stay available in the right-hand panel.
+    if 0 <= logical_sense_score <= 35:
         context.append("struktura: urwana wypowiedź")
-    if context_score >= 72:
-        context.append("kontekst: pełna myśl")
     elif 0 <= context_score <= 38:
         context.append("struktura: wymaga kontekstu")
-    if self_contained_score >= 75:
-        context.append("struktura: samowystarczalny")
     elif 0 <= self_contained_score <= 35:
         context.append("struktura: zależny od kontekstu")
-    if game_reaction_score >= 7:
-        context.append("reakcja: gra")
+    elif self_contained_score >= 75:
+        context.append("struktura: samowystarczalny")
+    elif logical_sense_score >= 68:
+        context.append("struktura: samodzielna myśl")
     if voice_expression_score >= 7:
-        context.append("reakcja: mocny głos")
-    if chat_reaction_score >= 8:
-        context.append("reakcja: czat")
-    if chat_joy_score >= 4:
-        context.append("reakcja: radość czatu")
-    if vision_score >= 7:
-        context.append("kontekst: akcja wizualna")
-    if moment_reaction_score >= 7:
-        context.append("moment: gra -> glos")
-    if moment_reaction_stage == "game -> voice -> chat":
-        context.append("moment: gra -> glos -> czat")
-    return list(dict.fromkeys(cleaned + context))
+        context.append("wypowiedź: ekspresyjna")
+    elif voice_expression_score <= -7:
+        context.append("wypowiedź: jednostajna")
+    # Game/chat/vision evidence is exposed as scores and signals in Detailed
+    # scoring.  It is not duplicated as several near-identical card tags.
+    return canonicalize_tags(cleaned + context)
 
 
 def score_moment_reaction(game_reaction_score: int, chat_reaction_score: int = 0, chat_joy_score: int = 0) -> tuple[int, str]:
@@ -256,6 +275,101 @@ def assess_extended_completeness(text: str, before: str = "", after: str = "", b
     return max(1, min(99, round(score)))
 
 
+def assess_extended_story_shape(text: str, words: list[dict] | None = None, before: str = "", after: str = "") -> tuple[int, int, list[str]]:
+    """Score the opening hook and the closing payoff of an Extended clip.
+
+    This is intentionally conservative.  It does not try to invent a joke or
+    a reaction; it only checks whether the start gives the viewer a reason to
+    stay and whether the end resolves the spoken thought.
+    """
+    current = " ".join((text or "").split())
+    tokens = re.findall(r"[^\W_]+", current.lower())
+    if not tokens:
+        return 1, 1, ["empty spoken fragment"]
+    early_words = []
+    if words:
+        first_start = float(words[0].get("start") or 0.0)
+        early_words = [str(word.get("word") or "") for word in words if float(word.get("start") or first_start) <= first_start + 3.5]
+    early = " ".join(early_words) if early_words else " ".join(tokens[:12])
+    hook = 52
+    ending = 50
+    signals: list[str] = []
+    first_tokens = re.findall(r"[^\W_]+", early.lower())
+    filler_count = sum(token in _FILLERS for token in first_tokens)
+    starts_with_link = bool(re.match(r"^(a|ale|bo|wiec|i|ze|zeby|to|jak|ktory|ktora|ktore)\b", current, re.I))
+    if starts_with_link and before:
+        hook -= 23
+        signals.append("weak opening depends on earlier speech")
+    if filler_count:
+        hook -= min(20, filler_count * 8)
+    if len(first_tokens) >= 5:
+        hook += 5
+    if re.search(r"[!?]", early) or re.search(r"\b(?:nie|co|kurwa|serio|naj|dlaczego|mysle|uwazam)\b", early, re.I):
+        hook += 10
+    if len(tokens) < 6:
+        hook -= 14
+
+    complete_end = current.endswith((".", "!", "?"))
+    if complete_end:
+        ending += 16
+    else:
+        ending -= 20
+        signals.append("ending does not resolve the thought")
+    if tokens[-1] in _TRAILING_CONNECTORS:
+        ending -= 14
+    if re.search(r"\b(?:wiec|jednak|ale|dlatego|okazalo sie|najlepsze|najgorsze|koniec)\b", " ".join(tokens[-10:]), re.I):
+        ending += 7
+    if after and not complete_end:
+        ending -= 12
+    if hook >= 66:
+        signals.append("clear opening hook")
+    if ending >= 68:
+        signals.append("resolved ending or payoff")
+    return max(1, min(99, round(hook))), max(1, min(99, round(ending))), signals[:2]
+
+
+def assess_extended_reading_likelihood(text: str, before: str = "", after: str = "", base_likelihood: float = 0.0) -> float:
+    """Use stricter, combined evidence for game-note and task reading.
+
+    Formal words alone are deliberately not enough: a streamer can use them
+    while expressing a real opinion.  In Extended mode we flag the clip only
+    when formal/document language is paired with directive or quote-like
+    wording and there is no clear personal commentary.
+    """
+    normalized = unicodedata.normalize("NFKD", " ".join((text or "").lower().split())).encode("ascii", "ignore").decode("ascii")
+    tokens = re.findall(r"[a-z]+", normalized)
+    formal_hits = sum(1 for token in tokens if any(token.startswith(stem) for stem in _DOCUMENT_CUE_STEMS))
+    directive_hits = len(re.findall(
+        r"\b(?:zabrania sie|nalezy|ma(?:ja|) zostac|powinien(?:no|niscie)?|"
+        r"zachowaj(?:cie)?|zainstaluj(?:cie)?|wejdz(?:cie)?|zbierz(?:cie)?|"
+        r"kontynuuj|przechowywania|ukrywania)\b",
+        normalized,
+    ))
+    quote_markers = sum(marker in normalized for marker in (
+        "glos prawdy", "dyrektywa", "rozporzadzenie", "zabrania sie", "wszystkie ",
+    ))
+    personal_commentary = bool(re.search(
+        r"\b(?:moim zdaniem|uwazam|mysle|wydaje mi sie|dla mnie|ja bym|wedlug mnie)\b",
+        normalized,
+    ))
+    sentence_count = len(re.findall(r"[.!?]", text or ""))
+
+    boost = 0.0
+    if not personal_commentary and (formal_hits >= 3 or directive_hits >= 2):
+        boost += 0.42
+    elif not personal_commentary and formal_hits >= 2 and directive_hits >= 1:
+        boost += 0.32
+    if not personal_commentary and formal_hits >= 2 and quote_markers >= 1:
+        boost += 0.16
+    if not personal_commentary and len(tokens) >= 22 and sentence_count >= 3 and (formal_hits >= 2 or directive_hits >= 2):
+        boost += 0.10
+    # Nearby speech does not prove reading, but a clip that contains a block
+    # of document language between unrelated remarks is more suspicious.
+    if boost and before and after and not personal_commentary:
+        boost += 0.05
+    return round(min(1.0, max(float(base_likelihood or 0.0), float(base_likelihood or 0.0) + boost)), 3)
+
+
 def assess_clip_quality(text: str, words: list[dict], start: float, end: float, tags: list[str]) -> tuple[int, list[str], float]:
     """Fast local heuristics used to rank clips and flag likely reading aloud."""
     duration = max(1.0, end - start)
@@ -327,6 +441,73 @@ def assess_clip_quality(text: str, words: list[dict], start: float, end: float, 
     if reading >= 0.48 and "possible reading aloud" not in signals[:3]:
         signals = signals[:2] + ["possible reading aloud"]
     return max(1, min(99, round(score))), signals[:3], round(reading, 3)
+
+
+def calibrate_quality_score(
+    score: float,
+    *,
+    duration: float,
+    tags: list[str],
+    quality_signals: list[str],
+    reading_likelihood: float,
+    logical_sense_score: int,
+    context_score: int,
+    self_contained_score: int,
+    extended_completeness_score: int,
+    game_reaction_score: int,
+    voice_expression_score: int,
+    moment_reaction_score: int,
+) -> tuple[int, str | None]:
+    """Apply final, deliberately strict calibration to a quality score.
+
+    Quality may accumulate several related bonuses during the pipeline.  This
+    final pass keeps an ordinary fluent fragment from reaching 99 merely
+    because those correlated signals all happen to be present.
+    """
+    value = float(score)
+    tag_set = set(tags or [])
+    emotional_delivery = bool({"humor", "gniew", "zaskoczenie", "radość", "złość"}.intersection(tag_set))
+    strong_delivery = (
+        emotional_delivery
+        or "expressive delivery" in quality_signals
+        or game_reaction_score >= 10
+        or moment_reaction_score >= 10
+        or voice_expression_score >= 10
+    )
+    ideal_presentation = (
+        6 <= duration <= 30
+        and "natural speaking pace" in quality_signals
+        and reading_likelihood < 0.20
+    )
+
+    if reading_likelihood >= 0.48:
+        value = min(value, 22)
+    elif reading_likelihood >= 0.30:
+        value = min(value, 68)
+    if self_contained_score < 58 or logical_sense_score < 55:
+        value = min(value, 72)
+    elif self_contained_score < 72 or logical_sense_score < 70:
+        value = min(value, 82)
+    if 0 <= context_score < 52:
+        value = min(value, 86)
+    if extended_completeness_score < 0:
+        value = min(value, 93)
+    elif extended_completeness_score < 65:
+        value = min(value, 88)
+    if not strong_delivery:
+        value = min(value, 90)
+
+    exceptional = (
+        ideal_presentation
+        and self_contained_score >= 85
+        and logical_sense_score >= 84
+        and context_score >= 72
+        and extended_completeness_score >= 82
+        and strong_delivery
+    )
+    if not exceptional:
+        value = min(value, 95)
+    return max(1, min(99, round(value))), "exceptional quality criteria met" if exceptional else None
 
 
 def assess_short_potential(
@@ -410,12 +591,18 @@ def assess_short_potential(
 
     hook_tags = {"humor", "forma: puenta", "forma: opinia", "forma: historia", "forma: krytyka", "forma: decyzja"}
     emotional_tags = {tag for tag in tag_set if tag.startswith("emocja:")} | (tag_set & EMOTION_OR_OPINION_TAGS)
-    if tag_set & hook_tags:
+    has_content_hook = bool(tag_set & hook_tags)
+    has_answer = "forma: odpowied" in " ".join(tag_set).lower()
+    has_game_or_voice_reaction = game_reaction_score >= 10 or moment_reaction_score >= 10 or voice_expression_score >= 10
+    has_chat_reaction = chat_reaction_score >= 12 or chat_joy_score >= 8
+    has_attention_trigger = has_content_hook or bool(emotional_tags) or has_answer or has_game_or_voice_reaction or has_chat_reaction
+
+    if has_content_hook:
         score += 8
         signals.append("clear content hook")
     if emotional_tags:
         score += 6
-    if "forma: odpowied" in " ".join(tag_set).lower():
+    if has_answer:
         score += 7
         signals.append("answer with context")
 
@@ -446,6 +633,39 @@ def assess_short_potential(
     elif reading_likelihood >= 0.30:
         score -= 14
         signals.append("reading cues")
+
+    # Short potential is intentionally stricter than quality.  A 99 is not
+    # merely a fluent fragment with several overlapping bonuses: it is a
+    # verified, concise, self-contained thought with a real reason to keep
+    # watching.  Without Extended verification a clip can still be excellent,
+    # but cannot claim the very top of the scale.
+    if self_contained_score < 58 or logical_sense_score < 55:
+        score = min(score, 72)
+    elif self_contained_score < 72 or logical_sense_score < 70:
+        score = min(score, 82)
+    if 0 <= context_score < 52:
+        score = min(score, 86)
+    if extended_completeness_score < 0:
+        score = min(score, 92)
+    elif extended_completeness_score < 65:
+        score = min(score, 88)
+    if not has_attention_trigger:
+        score = min(score, 87)
+
+    exceptional = (
+        8 <= duration <= 28
+        and self_contained_score >= 85
+        and logical_sense_score >= 84
+        and context_score >= 72
+        and extended_completeness_score >= 82
+        and quality_score >= 80
+        and reading_likelihood < 0.20
+        and has_attention_trigger
+    )
+    if exceptional:
+        signals.append("exceptional short criteria met")
+    else:
+        score = min(score, 95)
 
     return max(1, min(99, round(score))), list(dict.fromkeys(signals))[:4]
 

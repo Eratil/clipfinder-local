@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import platform
 import re
@@ -51,22 +52,33 @@ def safe_error(error: BaseException | str) -> str:
 
 def redact(value: str) -> str:
     value = re.sub(r"https?://\S+", "[url]", value, flags=re.IGNORECASE)
-    value = re.sub(r"[A-Za-z]:\\[^\r\n\"']+", "[path]", value)
+    value = re.sub(r"(?:file:/+)?[A-Za-z]:[\\/][^\r\n\"']+", "[path]", value, flags=re.IGNORECASE)
+    value = re.sub(r"\\\\[^\\/\r\n\"']+[\\/][^\r\n\"']+", "[path]", value)
     return value
 
 
 def log_failure(event: str, error: BaseException) -> None:
     """Log a redacted traceback so a report cannot disclose source content."""
     trace = redact("".join(traceback.format_exception(type(error), error, error.__traceback__)))[:12_000]
-    logger().error("%s error=%s\n%s", event, safe_error(error), trace)
+    logger().error("%s error=%s\n%s", redact(event)[:1_500], safe_error(error), trace)
 
 
 def build_report(runtime: dict[str, Any], version: str) -> str:
     """Return a shareable report with system state and recent operational logs only."""
     try:
-        recent = log_path().read_text(encoding="utf-8", errors="replace").splitlines()[-220:]
+        recent = [
+            redact(line)
+            for line in log_path().read_text(encoding="utf-8", errors="replace").splitlines()[-220:]
+        ]
     except OSError:
         recent = ["No diagnostic log has been created yet."]
+    build_info: dict[str, Any] = {}
+    if getattr(sys, "frozen", False):
+        try:
+            value = json.loads(Path(sys.executable).with_name("build-info.json").read_text(encoding="utf-8"))
+            build_info = value if isinstance(value, dict) else {}
+        except (OSError, ValueError, TypeError):
+            build_info = {}
     lines = [
         "ClipFinder diagnostic report",
         f"App version: {version}",
@@ -77,6 +89,9 @@ def build_report(runtime: dict[str, Any], version: str) -> str:
         f"Configured transcription: {runtime.get('transcription', {}).get('label', 'unknown')}",
         f"Similarity search: {runtime.get('embeddings', {}).get('label', 'unknown')}",
         f"GPU: {runtime.get('gpu', {}).get('name', 'not detected') if runtime.get('gpu') else 'not detected'}",
+        f"Artifact profile: {build_info.get('artifact_profile', 'source/development')}",
+        f"Build Git SHA: {build_info.get('git_sha', 'not packaged')}",
+        f"GPU runtime contract: {build_info.get('gpu_runtime_contract', 'source/development')}",
         "",
         "Privacy note: this report contains no recording, audio, transcript, prompt, chat content or source URL.",
         "Recent diagnostic events:",

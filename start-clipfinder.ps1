@@ -1,12 +1,6 @@
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
-$cudaRoot = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA'
-if (Test-Path $cudaRoot) {
-    $cudaBins = Get-ChildItem $cudaRoot -Directory | ForEach-Object { Join-Path $_.FullName 'bin' } | Where-Object { Test-Path $_ }
-    if ($cudaBins) { $env:Path = (($cudaBins -join ';') + ';' + $env:Path) }
-}
-
 if (-not (Test-Path '.venv\Scripts\python.exe')) {
     Write-Host 'Virtual environment is missing. Follow the README installation steps first.' -ForegroundColor Red
     exit 1

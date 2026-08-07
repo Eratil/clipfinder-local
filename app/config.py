@@ -34,6 +34,11 @@ class Settings(BaseSettings):
         return self.clipfinder_data_dir / "previews"
 
     @property
+    def review_audio_dir(self) -> Path:
+        """Small, durable audio archive for reviewed clips after source removal."""
+        return self.clipfinder_data_dir / "review-audio"
+
+    @property
     def work_dir(self) -> Path:
         return self.clipfinder_data_dir / "work"
 
@@ -41,8 +46,17 @@ class Settings(BaseSettings):
     def reference_dir(self) -> Path:
         return self.clipfinder_data_dir / "reference-downloads"
 
+    @property
+    def pipeline_cache_dir(self) -> Path:
+        """Compact, reproducible intermediate results keyed by source input."""
+        return self.clipfinder_data_dir / "cache" / "pipeline"
+
     def ensure_directories(self) -> None:
-        for directory in (self.clipfinder_data_dir, self.incoming_dir, self.exports_dir, self.previews_dir, self.work_dir, self.reference_dir):
+        for directory in (
+            self.clipfinder_data_dir, self.incoming_dir, self.exports_dir,
+            self.previews_dir, self.review_audio_dir, self.work_dir,
+            self.reference_dir, self.pipeline_cache_dir,
+        ):
             directory.mkdir(parents=True, exist_ok=True)
 
 

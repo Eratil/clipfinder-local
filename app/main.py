@@ -1,11 +1,15 @@
 import base64
+import hashlib
 import json
 import os
 import re
 import shutil
 import statistics
+import threading
 import time
 import uuid
+from collections import Counter, defaultdict
+from copy import deepcopy
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -23,6 +27,7 @@ except ImportError:
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from app import database as db
 from app.config import settings
@@ -69,7 +74,33 @@ from app.services.discovery import (
 )
 from app.services.media import MediaError, audio_track_count, export_audio_preview, export_clip, pause_trim_ranges, remap_words_for_kept_ranges, run as run_media_command, write_caption_ass
 from app.services.pipeline import analyse, import_reference_files, import_reference_folder, transcribe, transcribe_clip_range
-from app.services.tagging import CHAT_QUESTION_ANSWER_TAG, CHAT_QUESTION_TAG, GAME_REACTION_TAG, assess_clip_quality, assess_context, assess_logical_sense, assess_self_containment, assess_short_potential, build_reference_prompt, detailed_lexical_tags, enrich_tags, infer_tags, score_moment_reaction
+from app.services.analysis_store import (
+    fail_running_analysis,
+    record_manual_revision_with_updates,
+    set_latest_run_elapsed,
+    update_current_segment_and_revision,
+)
+from app.services.feature_graph import recompute_segment_features
+from app.services.feedback import set_review, set_tag_verdict
+from app.services.background_worker import (
+    DurableBackgroundWorker,
+    PermanentWorkError,
+    QueueAdapter,
+    WorkCancelled,
+    WorkPaused,
+)
+from app.services import job_queue, reference_queue
+from app.services.pipeline_cache import PipelineCache
+from app.services.workspace_cleanup import cleanup_workspace
+from app.services.tagging import (
+    CHAT_QUESTION_ANSWER_TAG,
+    CHAT_QUESTION_TAG,
+    GAME_REACTION_TAG,
+    build_reference_prompt,
+    detailed_lexical_tags,
+    infer_tags,
+)
+from app.services.tag_taxonomy import canonical_tag, canonicalize_tags
 from app.services.updater import automatic_updates_available, install_downloaded_update, job_status as update_download_status, start_download as start_update_download
 from app.services.updates import update_status
 from app.services.runtime_status import runtime_status
@@ -79,65 +110,38 @@ from app.version import __version__
 
 def backfill_segment_quality() -> None:
     """Add lightweight quality/read-aloud data to clips analyzed before this feature."""
-    items = db.rows("SELECT id, transcript, tags, word_timestamps, start_seconds, end_seconds FROM segments WHERE quality_score=0")
-    if not items:
-        return
-    with db.connection() as con:
-        for item in items:
-            tags = json.loads(item.get("tags") or "[]")
-            words = json.loads(item.get("word_timestamps") or "[]")
-            score, signals, reading = assess_clip_quality(item["transcript"], words, item["start_seconds"], item["end_seconds"], tags)
-            if reading >= 0.48:
-                tags = list(dict.fromkeys(tags + ["reading"]))
-            con.execute(
-                "UPDATE segments SET tags=?, quality_score=?, quality_signals=?, reading_likelihood=? WHERE id=?",
-                (json.dumps(tags, ensure_ascii=False), score, json.dumps(signals), reading, item["id"]),
-            )
+    for item in db.rows(
+        "SELECT id FROM segments WHERE lifecycle_state='current' AND quality_score=0"
+    ):
+        _recompute_persisted_segment(item["id"])
 
 
 def backfill_reading_filter() -> None:
     """Apply the stricter task/note reading rule to existing recordings once."""
     items = db.rows(
-        """SELECT id, transcript, tags, word_timestamps, start_seconds, end_seconds, quality_signals,
-                  logical_sense_score, context_score, self_contained_score, game_reaction_score,
-                  voice_expression_score, chat_reaction_score, chat_joy_score, vision_score,
-                  moment_reaction_score, moment_reaction_stage
-           FROM segments WHERE quality_signals NOT LIKE ?""",
+        """SELECT id, quality_signals, reading_likelihood,
+                  visual_reading_likelihood
+           FROM segments WHERE lifecycle_state='current' AND quality_signals NOT LIKE ?""",
         ('%"reading heuristics v3"%',),
     )
-    if not items:
-        return
-    updates = []
     for item in items:
-        original_tags = [tag for tag in json.loads(item.get("tags") or "[]") if tag != "reading"]
-        words = json.loads(item.get("word_timestamps") or "[]")
-        quality, new_signals, reading = assess_clip_quality(item["transcript"], words, item["start_seconds"], item["end_seconds"], original_tags)
-        signals = list(dict.fromkeys(json.loads(item.get("quality_signals") or "[]") + new_signals + ["reading heuristics v3"]))
-        logical = assess_logical_sense(item["transcript"])
-        context = int(item.get("context_score") or 50)
-        self_contained = int(item.get("self_contained_score") or 50)
-        if reading >= 0.48:
-            original_tags.append("reading")
-            logical, context, self_contained = min(logical, 35), min(context, 35), min(self_contained, 35)
-        tags = enrich_tags(
-            original_tags,
-            logical_sense_score=logical,
-            reading_likelihood=reading,
-            game_reaction_score=int(item.get("game_reaction_score") or 0),
-            voice_expression_score=int(item.get("voice_expression_score") or 0),
-            chat_reaction_score=int(item.get("chat_reaction_score") or 0),
-            chat_joy_score=int(item.get("chat_joy_score") or 0),
-            vision_score=int(item.get("vision_score") or 0),
-            context_score=context,
-            self_contained_score=self_contained,
-            moment_reaction_score=int(item.get("moment_reaction_score") or 0),
-            moment_reaction_stage=item.get("moment_reaction_stage") or "",
+        # Older rows stored only the final probability. Preserve it as legacy
+        # visual evidence so a text-only migration can never erase a prior
+        # visual or Extended reading detection, regardless of analysis mode.
+        preserved = max(
+            float(item.get("reading_likelihood") or 0.0),
+            float(item.get("visual_reading_likelihood") or 0.0),
         )
-        updates.append((quality, json.dumps(signals, ensure_ascii=False), reading, logical, context, self_contained, json.dumps(tags, ensure_ascii=False), item["id"]))
-    with db.connection() as con:
-        con.executemany(
-            "UPDATE segments SET quality_score=?, quality_signals=?, reading_likelihood=?, logical_sense_score=?, context_score=?, self_contained_score=?, tags=? WHERE id=?",
-            updates,
+        updates = _recompute_persisted_segment(
+            item["id"],
+            overrides={"visual_reading_likelihood": preserved},
+        )
+        signals = list(dict.fromkeys(list(updates.get("quality_signals") or []) + ["reading heuristics v3"]))
+        current = db.row("SELECT revision_number FROM segments WHERE id=?", (item["id"],)) or {}
+        update_current_segment_and_revision(
+            item["id"],
+            {"quality_signals": json.dumps(signals, ensure_ascii=False)},
+            expected_revision_number=int(current.get("revision_number") or 1),
         )
 
 
@@ -145,28 +149,19 @@ def backfill_context_signals() -> None:
     """Make the new context and game-reaction signals available for old clips."""
     items = db.rows(
         "SELECT id, transcript, tags, game_reaction_score FROM segments "
-        "WHERE logical_sense_score < 0 OR (game_reaction_score >= 7 AND tags NOT LIKE ?) ",
+        "WHERE lifecycle_state='current' AND (logical_sense_score < 0 OR (game_reaction_score >= 7 AND tags NOT LIKE ?)) ",
         (f'%"{GAME_REACTION_TAG}"%',),
     )
-    if not items:
-        return
-    with db.connection() as con:
-        for item in items:
-            tags = json.loads(item.get("tags") or "[]")
-            if int(item.get("game_reaction_score") or 0) >= 7:
-                tags = list(dict.fromkeys(tags + [GAME_REACTION_TAG]))
-            con.execute(
-                "UPDATE segments SET tags=?, logical_sense_score=? WHERE id=?",
-                (json.dumps(tags, ensure_ascii=False), assess_logical_sense(item["transcript"]), item["id"]),
-            )
+    for item in items:
+        _recompute_persisted_segment(item["id"])
 
 
 def backfill_segment_context() -> None:
     """Build lightweight context from adjacent existing candidates once."""
     updates = []
-    for video in db.rows("SELECT DISTINCT video_id FROM segments WHERE context_score < 0 OR self_contained_score < 0"):
+    for video in db.rows("SELECT DISTINCT video_id FROM segments WHERE lifecycle_state='current' AND (context_score < 0 OR self_contained_score < 0)"):
         segments = db.rows(
-            "SELECT id, start_seconds, end_seconds, transcript, context_score, self_contained_score FROM segments WHERE video_id=? ORDER BY start_seconds",
+            "SELECT id, start_seconds, end_seconds, transcript, context_score, self_contained_score FROM segments WHERE video_id=? AND lifecycle_state='current' ORDER BY start_seconds",
             (video["video_id"],),
         )
         for segment in segments:
@@ -175,22 +170,20 @@ def backfill_segment_context() -> None:
             start, end = float(segment["start_seconds"]), float(segment["end_seconds"])
             before = " ".join(item["transcript"] for item in segments if start - 12 <= float(item["end_seconds"]) <= start and item["id"] != segment["id"])[-700:]
             after = " ".join(item["transcript"] for item in segments if end <= float(item["start_seconds"]) <= end + 12 and item["id"] != segment["id"])[:700]
-            score, _signals = assess_context(segment["transcript"], before, after)
-            self_contained = assess_self_containment(segment["transcript"], before, after)
-            updates.append((score, self_contained, before, after, segment["id"]))
-    if updates:
-        with db.connection() as con:
-            con.executemany("UPDATE segments SET context_score=?, self_contained_score=?, context_before=?, context_after=? WHERE id=?", updates)
+            updates.append((segment["id"], before, after))
+    for segment_id, before, after in updates:
+        _recompute_persisted_segment(
+            segment_id,
+            {"context_before", "context_after"},
+            {"context_before": before, "context_after": after},
+        )
 
 
 def backfill_moment_reactions() -> None:
     """Seed the game-to-voice stage for clips analysed before the combined score."""
-    items = db.rows("SELECT id, game_reaction_score FROM segments WHERE moment_reaction_score=0 AND game_reaction_score>=7")
-    if not items:
-        return
-    updates = [(*score_moment_reaction(int(item["game_reaction_score"])), item["id"]) for item in items]
-    with db.connection() as con:
-        con.executemany("UPDATE segments SET moment_reaction_score=?, moment_reaction_stage=? WHERE id=?", updates)
+    items = db.rows("SELECT id, game_reaction_score FROM segments WHERE lifecycle_state='current' AND moment_reaction_score=0 AND game_reaction_score>=7")
+    for item in items:
+        _recompute_persisted_segment(item["id"], {"game_reaction_score"})
 
 
 def backfill_detailed_tags() -> None:
@@ -199,9 +192,8 @@ def backfill_detailed_tags() -> None:
         """SELECT id, transcript, tags, logical_sense_score, reading_likelihood,
                   game_reaction_score, voice_expression_score, moment_reaction_score, moment_reaction_stage, chat_reaction_score, context_score, self_contained_score,
                   chat_joy_score, vision_score
-           FROM segments"""
+           FROM segments WHERE lifecycle_state='current'"""
     )
-    updates = []
     for item in items:
         # Question labels are now evidence-based: only chat.py may restore
         # them after matching a viewer question to a spoken answer.
@@ -210,45 +202,15 @@ def backfill_detailed_tags() -> None:
             if tag not in {CHAT_QUESTION_TAG, "forma: pytanie", CHAT_QUESTION_ANSWER_TAG}
         ]
         tags = list(dict.fromkeys(previous + detailed_lexical_tags(item["transcript"])))
-        tags = enrich_tags(
-            tags,
-            logical_sense_score=int(item.get("logical_sense_score") or -1),
-            reading_likelihood=float(item.get("reading_likelihood") or 0),
-            game_reaction_score=int(item.get("game_reaction_score") or 0),
-            voice_expression_score=int(item.get("voice_expression_score") or 0),
-            chat_reaction_score=int(item.get("chat_reaction_score") or 0),
-            chat_joy_score=int(item.get("chat_joy_score") or 0),
-            vision_score=int(item.get("vision_score") or 0),
-            context_score=int(item.get("context_score") or -1),
-            self_contained_score=int(item.get("self_contained_score") or -1),
-            moment_reaction_score=int(item.get("moment_reaction_score") or 0),
-            moment_reaction_stage=item.get("moment_reaction_stage") or "",
-        )
-        if tags != json.loads(item.get("tags") or "[]"):
-            updates.append((json.dumps(tags, ensure_ascii=False), item["id"]))
-    if updates:
-        with db.connection() as con:
-            con.executemany("UPDATE segments SET tags=? WHERE id=?", updates)
+        _recompute_persisted_segment(item["id"], {"tags"}, {"tags": tags})
 
 
 def backfill_short_potential() -> None:
     """Give older candidates the separate short-format suitability score."""
-    items = db.rows("SELECT * FROM segments WHERE short_potential_score < 0")
-    updates = []
-    for item in items:
-        score, signals = assess_short_potential(
-            item.get("transcript") or "", item["start_seconds"], item["end_seconds"], json.loads(item.get("tags") or "[]"),
-            quality_score=int(item.get("quality_score") or 0), reading_likelihood=float(item.get("reading_likelihood") or 0),
-            logical_sense_score=int(item.get("logical_sense_score") or -1), context_score=int(item.get("context_score") or -1),
-            self_contained_score=int(item.get("self_contained_score") or -1), extended_completeness_score=int(item.get("extended_completeness_score") or -1),
-            game_reaction_score=int(item.get("game_reaction_score") or 0), voice_expression_score=int(item.get("voice_expression_score") or 0),
-            moment_reaction_score=int(item.get("moment_reaction_score") or 0), chat_reaction_score=int(item.get("chat_reaction_score") or 0),
-            chat_joy_score=int(item.get("chat_joy_score") or 0),
-        )
-        updates.append((score, json.dumps(signals, ensure_ascii=False), item["id"]))
-    if updates:
-        with db.connection() as con:
-            con.executemany("UPDATE segments SET short_potential_score=?, short_potential_signals=? WHERE id=?", updates)
+    for item in db.rows(
+        "SELECT id FROM segments WHERE lifecycle_state='current' AND short_potential_score < 0"
+    ):
+        _recompute_persisted_segment(item["id"], {"quality_score"})
 
 
 def remove_legacy_game_audio_bonus() -> None:
@@ -256,47 +218,63 @@ def remove_legacy_game_audio_bonus() -> None:
     items = db.rows(
         """SELECT id, transcript, tags, word_timestamps, start_seconds, end_seconds, quality_signals
            FROM segments
-           WHERE audio_event_score > 0 AND game_reaction_score=0 AND voice_expression_score=0"""
+           WHERE lifecycle_state='current' AND audio_event_score > 0 AND game_reaction_score=0 AND voice_expression_score=0"""
     )
     legacy_labels = {"all-sounds event", "game-audio event"}
-    with db.connection() as con:
-        for item in items:
-            previous_signals = set(json.loads(item.get("quality_signals") or "[]"))
-            if not previous_signals.intersection(legacy_labels):
-                continue
-            tags = json.loads(item.get("tags") or "[]")
-            words = json.loads(item.get("word_timestamps") or "[]")
-            score, signals, reading = assess_clip_quality(item["transcript"], words, item["start_seconds"], item["end_seconds"], tags)
-            con.execute(
-                "UPDATE segments SET quality_score=?, quality_signals=?, reading_likelihood=?, audio_event_score=0 WHERE id=?",
-                (score, json.dumps(signals), reading, item["id"]),
+    for item in items:
+        previous_signals = set(json.loads(item.get("quality_signals") or "[]"))
+        if previous_signals.intersection(legacy_labels):
+            _recompute_persisted_segment(
+                item["id"],
+                {"audio_event_score"},
+                {"audio_event_score": 0},
             )
 
 
 def backfill_duplicate_groups() -> None:
     """Group older candidates once so the compact review list works immediately."""
-    for video in db.rows("SELECT DISTINCT video_id FROM segments WHERE embedding IS NOT NULL"):
-        items = db.rows("SELECT id, start_seconds, end_seconds, embedding FROM segments WHERE video_id=? AND embedding IS NOT NULL", (video["video_id"],))
+    for video in db.rows("SELECT DISTINCT video_id FROM segments WHERE lifecycle_state='current' AND embedding IS NOT NULL"):
+        items = db.rows("SELECT id, start_seconds, end_seconds, embedding FROM segments WHERE video_id=? AND lifecycle_state='current' AND embedding IS NOT NULL", (video["video_id"],))
         records = [{"id": item["id"], "start": item["start_seconds"], "end": item["end_seconds"], "vector": json.loads(item["embedding"]), "duplicate_group": ""} for item in items]
         assign_duplicate_groups(records)
+        revisions = {
+            item["id"]: int((db.row("SELECT revision_number FROM segments WHERE id=?", (item["id"],)) or {}).get("revision_number") or 1)
+            for item in items
+        }
         with db.connection() as con:
             for record in records:
-                con.execute("UPDATE segments SET duplicate_group=? WHERE id=?", (record["duplicate_group"], record["id"]))
+                update_current_segment_and_revision(
+                    record["id"],
+                    {"duplicate_group": record["duplicate_group"]},
+                    con=con,
+                    expected_revision_number=revisions[record["id"]],
+                )
 
 
 def backfill_preference_feedback() -> None:
     """Seed the general profile with prior review decisions from older versions."""
-    items = db.rows("SELECT * FROM segments WHERE rating IN ('accepted', 'rejected') AND embedding IS NOT NULL")
+    items = db.rows(
+        """SELECT s.*, r.rating, r.review_reason
+           FROM segments s
+           JOIN segment_reviews r ON r.segment_id=s.id
+           JOIN segment_revisions sr
+             ON sr.id=r.reviewed_revision_id AND sr.segment_id=s.id
+            AND sr.revision_number=s.revision_number
+           WHERE r.rating IN ('accepted', 'rejected') AND s.embedding IS NOT NULL"""
+    )
     if not items:
         return
     timestamp = db.now()
     with db.connection() as con:
         for item in items:
             con.execute(
-                """INSERT OR IGNORE INTO preference_feedback (id, segment_id, profile, decision, review_reason, embedding, features, created_at, updated_at)
-                   VALUES (?, ?, 'general', ?, ?, ?, ?, ?, ?)""",
+                """INSERT OR IGNORE INTO preference_feedback
+                   (id, segment_id, profile, decision, review_reason, embedding,
+                    features, reviewed_revision_number, created_at, updated_at)
+                   VALUES (?, ?, 'general', ?, ?, ?, ?, ?, ?, ?)""",
                 (str(uuid.uuid4()), item["id"], item["rating"], item.get("review_reason") or "", item["embedding"],
-                 json.dumps(preference_features(item), ensure_ascii=False), timestamp, timestamp),
+                 json.dumps(preference_features(item), ensure_ascii=False), int(item.get("revision_number") or 1),
+                 timestamp, timestamp),
             )
 
 
@@ -325,17 +303,50 @@ def run_startup_maintenance() -> None:
             continue
         started = time.perf_counter()
         diagnostics.logger().info("Startup maintenance started: %s", task_name)
-        callback()
-        db.mark_maintenance_task_completed(task_name)
-        diagnostics.logger().info(
-            "Startup maintenance completed: %s in %.2fs",
-            task_name,
-            time.perf_counter() - started,
-        )
+        try:
+            callback()
+        except Exception as exc:
+            # These are repairable feature backfills, not schema migrations.
+            # One malformed legacy row must not make the whole desktop app
+            # unavailable; an unmarked task is retried on the next launch.
+            diagnostics.log_failure(f"Startup maintenance deferred: {task_name}", exc)
+        else:
+            db.mark_maintenance_task_completed(task_name)
+            diagnostics.logger().info(
+                "Startup maintenance completed: %s in %.2fs",
+                task_name,
+                time.perf_counter() - started,
+            )
+
+
+_durable_worker: DurableBackgroundWorker | None = None
+_durable_worker_start_lock = threading.Lock()
+
+
+def _start_durable_worker_after_healthcheck() -> None:
+    """Start cleanup/queue work only after the local API is reachable.
+
+    The desktop wrapper waits for ``/api/health`` before it loads the main
+    window.  A worker can immediately scan a sizeable local library when it
+    acquires its lease, so starting it during the ASGI lifespan used to let
+    that optional work delay the first health response.  Starting it from the
+    health endpoint keeps startup deterministic while retaining the same
+    durable queue behaviour for every normal desktop launch.
+    """
+    worker = _durable_worker
+    if worker is None or worker.running:
+        return
+    with _durable_worker_start_lock:
+        worker = _durable_worker
+        if worker is None or worker.running:
+            return
+        diagnostics.logger().info("Starting durable worker after local health check")
+        worker.start()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global _durable_worker
     diagnostics.configure()
     diagnostics.logger().info("Backend starting: version=%s pid=%s", __version__, os.getpid())
     db.initialize()
@@ -348,8 +359,21 @@ async def lifespan(_: FastAPI):
         current_runtime.get("embeddings", {}).get("label"),
         current_runtime.get("gpu", {}).get("name") if current_runtime.get("gpu") else "not detected",
     )
-    yield
-    diagnostics.logger().info("Backend stopped")
+    _durable_worker = build_durable_worker()
+    diagnostics.logger().info("Backend API ready; durable worker is deferred until the first health check")
+    try:
+        yield
+    finally:
+        with _durable_worker_start_lock:
+            worker = _durable_worker
+            _durable_worker = None
+        if worker is not None:
+            stopped = worker.stop(timeout=10.0)
+            if not stopped:
+                diagnostics.logger().warning(
+                    "Durable worker is still finishing a native operation; its leased job will resume after restart"
+                )
+        diagnostics.logger().info("Backend stopped")
 
 
 app = FastAPI(title="ClipFinder Local", lifespan=lifespan)
@@ -412,7 +436,7 @@ def estimate_analysis_duration(video: dict) -> tuple[float | None, int]:
         return None, 0
     # Recent recordings better reflect the current model cache and machine
     # state; the median of the latest eight stays robust against outliers.
-    ratio = statistics.median(ratios[-8:])
+    ratio = statistics.median(ratios[:8])
     return round(max(15.0, duration * ratio), 1), min(8, len(ratios))
 
 
@@ -431,21 +455,196 @@ def approximate_word_timestamps(transcript: str, start: float, end: float) -> li
     return result
 
 
-def run_analysis(video_id: str, job_id: str) -> None:
+def _segment_context(video_id: str, segment_id: str, start: float, end: float, window: float = 16.0) -> tuple[str, str]:
+    """Load neighbouring current speech for deterministic editor rescoring."""
+    neighbours = db.rows(
+        """SELECT id, start_seconds, end_seconds, transcript FROM segments
+           WHERE video_id=? AND lifecycle_state='current' AND id != ?
+             AND end_seconds >= ? AND start_seconds <= ?
+           ORDER BY start_seconds""",
+        (video_id, segment_id, max(0.0, start - window), end + window),
+    )
+    before = " ".join(
+        str(item.get("transcript") or "") for item in neighbours
+        if float(item["end_seconds"]) <= start
+    )[-900:]
+    after = " ".join(
+        str(item.get("transcript") or "") for item in neighbours
+        if float(item["start_seconds"]) >= end
+    )[:900]
+    return before, after
+
+
+def _encode_feature_updates(values: dict) -> dict:
+    encoded = dict(values)
+    for field in (
+        "keywords", "tags", "word_timestamps", "quality_signals",
+        "short_potential_signals", "boundary_signals", "context_signals",
+        "extended_story_signals",
+        "chat_messages",
+    ):
+        if field in encoded and not isinstance(encoded[field], str):
+            encoded[field] = json.dumps(encoded[field], ensure_ascii=False)
+    if "embedding" in encoded and encoded["embedding"] is not None and not isinstance(encoded["embedding"], str):
+        encoded["embedding"] = json.dumps(encoded["embedding"])
+    return encoded
+
+
+_GRAPH_JSON_FIELDS = {
+    "keywords", "tags", "word_timestamps", "quality_signals",
+    "short_potential_signals", "boundary_signals", "context_signals",
+    "extended_story_signals",
+    "chat_messages",
+}
+
+
+def _decoded_graph_state(segment: dict) -> dict:
+    state = dict(segment)
+    for field in _GRAPH_JSON_FIELDS:
+        value = state.get(field)
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                decoded = []
+            state[field] = decoded if isinstance(decoded, list) else []
+    return state
+
+
+def _recompute_persisted_segment(
+    segment_id: str,
+    changed_fields: set[str] | None = None,
+    overrides: dict | None = None,
+) -> dict:
+    """Run the canonical graph for one legacy/current segment and sync its snapshot."""
+    segment = db.row(
+        """SELECT s.*, v.analysis_mode FROM segments s
+           JOIN videos v ON v.id=s.video_id
+           WHERE s.id=? AND s.lifecycle_state='current'""",
+        (segment_id,),
+    )
+    if not segment:
+        return {}
+    state = _decoded_graph_state(segment)
+    state.update(overrides or {})
+    result = recompute_segment_features(state, changed_fields)
+    persisted = {
+        **{key: value for key, value in (overrides or {}).items() if key in db.SEGMENT_MACHINE_COLUMNS},
+        **result.updates,
+    }
+    update_current_segment_and_revision(
+        segment_id,
+        _encode_feature_updates(persisted),
+        expected_revision_number=int(segment.get("revision_number") or 1),
+    )
+    return result.updates
+
+
+def _refresh_duplicate_groups(video_id: str) -> None:
+    """Rebuild duplicate groups after a manual timing or transcript edit."""
+    items = db.rows(
+        """SELECT id, start_seconds, end_seconds, embedding, revision_number
+           FROM segments
+           WHERE video_id=? AND lifecycle_state='current' AND embedding IS NOT NULL
+           ORDER BY start_seconds""",
+        (video_id,),
+    )
+    records = [
+        {
+            "id": item["id"],
+            "start": item["start_seconds"],
+            "end": item["end_seconds"],
+            "vector": json.loads(item["embedding"]),
+            "duplicate_group": "",
+        }
+        for item in items
+    ]
+    assign_duplicate_groups(records)
+    revisions = {str(item["id"]): int(item.get("revision_number") or 1) for item in items}
+    with db.connection() as con:
+        for record in records:
+            update_current_segment_and_revision(
+                str(record["id"]),
+                {"duplicate_group": str(record.get("duplicate_group") or "")},
+                con=con,
+                expected_revision_number=revisions[str(record["id"])],
+            )
+
+
+def _refresh_neighbour_contexts(
+    video_id: str,
+    changed_segment_id: str,
+    range_start: float,
+    range_end: float,
+    window: float = 16.0,
+) -> None:
+    """Rescore nearby moments whose context includes an edited utterance."""
+    neighbours = db.rows(
+        """SELECT id, start_seconds, end_seconds FROM segments
+           WHERE video_id=? AND lifecycle_state='current' AND id<>?
+             AND end_seconds>=? AND start_seconds<=?
+           ORDER BY start_seconds""",
+        (
+            video_id,
+            changed_segment_id,
+            max(0.0, float(range_start) - window),
+            float(range_end) + window,
+        ),
+    )
+    for neighbour in neighbours:
+        before, after = _segment_context(
+            video_id,
+            str(neighbour["id"]),
+            float(neighbour["start_seconds"]),
+            float(neighbour["end_seconds"]),
+            window,
+        )
+        _recompute_persisted_segment(
+            str(neighbour["id"]),
+            {"context_before", "context_after"},
+            {"context_before": before, "context_after": after},
+        )
+
+
+def run_analysis(video_id: str, job_id: str, report=None) -> None:
+    """Execute one analysis attempt; the durable worker owns job finalization."""
     started_at = time.monotonic()
+    publish = report or (lambda progress, message: update_job(job_id, progress, message))
     try:
         diagnostics.logger().info("Analysis started: video_id=%s job_id=%s", video_id, job_id)
-        update_job(job_id, 1, "Waiting for worker", "running")
-        analyse(video_id, lambda progress, message: update_job(job_id, progress, message))
+        publish(1, "Waiting for worker")
+        job = db.row("SELECT payload_json FROM jobs WHERE id=?", (job_id,)) or {}
+        payload = job_queue.decode_payload(job)
+        audio_snapshot = payload.get("analysis_audio")
+        analyse(video_id, publish, audio_snapshot if isinstance(audio_snapshot, dict) else None)
         save_analysis_duration(video_id, started_at)
-        update_job(job_id, 100, "Analysis completed", "completed")
+        set_latest_run_elapsed(video_id, time.monotonic() - started_at)
         diagnostics.logger().info("Analysis completed: video_id=%s job_id=%s elapsed_seconds=%.2f", video_id, job_id, time.monotonic() - started_at)
     except Exception as exc:
         elapsed = round(max(0.0, time.monotonic() - started_at), 2)
-        diagnostics.log_failure(f"Analysis failed: video_id={video_id} job_id={job_id} elapsed_seconds={elapsed:.2f}", exc)
+        fail_running_analysis(video_id, str(exc))
+        set_latest_run_elapsed(video_id, elapsed)
         with db.connection() as con:
-            con.execute("UPDATE videos SET status='failed', error_message=?, analysis_seconds=?, updated_at=? WHERE id=?", (str(exc), elapsed, db.now(), video_id))
-        update_job(job_id, 100, str(exc), "failed")
+            con.execute("UPDATE videos SET analysis_seconds=?, updated_at=? WHERE id=?", (elapsed, db.now(), video_id))
+        if not isinstance(exc, (WorkCancelled, WorkPaused)):
+            diagnostics.log_failure(f"Analysis failed: video_id={video_id} job_id={job_id} elapsed_seconds={elapsed:.2f}", exc)
+        # Native decoder/model/configuration failures are deterministic for a
+        # given file and runtime. Repeating a multi-hour analysis three times
+        # only wastes time and disk. Keep automatic retry for short-lived file,
+        # database and network conditions; the user can explicitly reanalyse a
+        # permanently failed recording after fixing its environment or source.
+        transient = isinstance(exc, (PermissionError, TimeoutError)) or any(
+            marker in str(exc).casefold()
+            for marker in (
+                "database is locked", "database is busy", "sharing violation",
+                "temporarily unavailable", "temporary failure", "timed out",
+                "connection reset", "connection aborted", "connection refused",
+                "service unavailable", "http 502", "http 503", "http 504",
+            )
+        )
+        if isinstance(exc, (WorkCancelled, WorkPaused, PermanentWorkError)) or transient:
+            raise
+        raise PermanentWorkError(str(exc)) from exc
 
 
 def _supported_remote_url(value: str) -> str:
@@ -513,11 +712,12 @@ def _configure_remote_download_certificates() -> None:
         os.environ["REQUESTS_CA_BUNDLE"] = certificate_bundle
 
 
-def run_remote_import(video_id: str, job_id: str) -> None:
+def run_remote_import(video_id: str, job_id: str, report=None) -> None:
+    """Download and analyse one URL; the durable worker owns retries/state."""
+    publish = report or (lambda progress, message: update_job(job_id, progress, message))
     video = db.row("SELECT source_url FROM videos WHERE id=?", (video_id,))
     if not video or not video.get("source_url"):
-        update_job(job_id, 100, "Remote source URL is missing.", "failed")
-        return
+        raise PermanentWorkError("Remote source URL is missing.")
     # The recording card starts its progress bar with the download. Keep the
     # displayed elapsed time aligned with that whole visible job, not just the
     # later transcription stage.
@@ -538,11 +738,11 @@ def run_remote_import(video_id: str, job_id: str) -> None:
                 percentage = int(current / total * 20) if total else 1
                 if percentage != last_progress:
                     last_progress = percentage
-                    update_job(job_id, max(1, percentage), f"Downloading video: {min(100, int(current / total * 100)) if total else 'working'}%")
+                    publish(max(1, percentage), f"Downloading video: {min(100, int(current / total * 100)) if total else 'working'}%")
             elif status.get("status") == "finished":
-                update_job(job_id, 20, "Download completed. Preparing analysis.")
+                publish(20, "Download completed. Preparing analysis.")
 
-        update_job(job_id, 1, "Preparing YouTube/Twitch download.")
+        publish(1, "Preparing YouTube/Twitch download.")
         options = {
             "format": "bv*+ba/b",
             "merge_output_format": "mp4",
@@ -564,26 +764,46 @@ def run_remote_import(video_id: str, job_id: str) -> None:
                 "UPDATE videos SET original_name=?, path=?, status='queued', transcript_audio_track=1, audio_analysis_mode='single', error_message=NULL, updated_at=? WHERE id=?",
                 (f"{title}{source_path.suffix}", str(source_path), db.now(), video_id),
             )
-        analyse(video_id, lambda progress, message: update_job(job_id, 20 + int(progress * 0.8), message))
+            # Once the source is complete, retries/restarts only need to redo
+            # analysis; they must not contact the remote service again.
+            con.execute(
+                "UPDATE jobs SET kind='analysis', updated_at=? WHERE id=? AND state='running'",
+                (db.now(), job_id),
+            )
+        job = db.row("SELECT payload_json FROM jobs WHERE id=?", (job_id,)) or {}
+        payload = job_queue.decode_payload(job)
+        audio_snapshot = payload.get("analysis_audio")
+        analyse(
+            video_id,
+            lambda progress, message: publish(20 + int(progress * 0.8), message),
+            audio_snapshot if isinstance(audio_snapshot, dict) else None,
+        )
         save_analysis_duration(video_id, analysis_started_at)
-        update_job(job_id, 100, "Analysis completed", "completed")
+        set_latest_run_elapsed(video_id, time.monotonic() - analysis_started_at)
         diagnostics.logger().info("Remote import and analysis completed: video_id=%s job_id=%s elapsed_seconds=%.2f", video_id, job_id, time.monotonic() - analysis_started_at)
     except ModuleNotFoundError as exc:
         detail = "Remote import requires yt-dlp. Run: python -m pip install -r requirements.txt" if exc.name == "yt_dlp" else str(exc)
+        elapsed = round(max(0.0, time.monotonic() - analysis_started_at), 2)
         with db.connection() as con:
-            con.execute("UPDATE videos SET status='failed', error_message=?, analysis_seconds=?, updated_at=? WHERE id=?", (detail, round(max(0.0, time.monotonic() - analysis_started_at), 2) if analysis_started_at else 0, db.now(), video_id))
-        update_job(job_id, 100, detail, "failed")
+            con.execute("UPDATE videos SET analysis_seconds=?, updated_at=? WHERE id=?", (elapsed, db.now(), video_id))
+        raise PermanentWorkError(detail) from exc
     except Exception as exc:
         detail = str(exc)
-        diagnostics.log_failure(f"Remote import failed: video_id={video_id} job_id={job_id}", exc)
+        elapsed = round(max(0.0, time.monotonic() - analysis_started_at), 2)
+        fail_running_analysis(video_id, detail)
+        set_latest_run_elapsed(video_id, elapsed)
+        with db.connection() as con:
+            con.execute("UPDATE videos SET analysis_seconds=?, updated_at=? WHERE id=?", (elapsed, db.now(), video_id))
+        if not isinstance(exc, (WorkCancelled, WorkPaused)):
+            diagnostics.log_failure(f"Remote import failed: video_id={video_id} job_id={job_id}", exc)
         if "CERTIFICATE_VERIFY_FAILED" in detail or "certificate verify failed" in detail.lower():
             detail = (
                 "HTTPS certificate verification failed while contacting YouTube/Twitch. "
                 "Update/reinstall ClipFinder so its certificate bundle is refreshed, then try again."
             )
-        with db.connection() as con:
-            con.execute("UPDATE videos SET status='failed', error_message=?, analysis_seconds=?, updated_at=? WHERE id=?", (detail, round(max(0.0, time.monotonic() - analysis_started_at), 2) if analysis_started_at else 0, db.now(), video_id))
-        update_job(job_id, 100, detail, "failed")
+        if isinstance(exc, (WorkCancelled, WorkPaused)):
+            raise
+        raise RuntimeError(detail) from exc
 
 
 def update_reference_import(import_id: str, progress: int, message: str, state: str = "running", imported_files: int | None = None) -> None:
@@ -600,36 +820,42 @@ def update_reference_import(import_id: str, progress: int, message: str, state: 
             )
 
 
-def run_reference_import(collection_id: str, import_id: str, folder_path: str, include_subfolders: bool) -> None:
-    try:
-        update_reference_import(import_id, 1, "Reading reference folder", "running")
-        count = import_reference_folder(
-            collection_id,
-            folder_path,
-            include_subfolders,
-            lambda progress, message: update_reference_import(import_id, progress, message),
+def run_reference_import(
+    collection_id: str,
+    import_id: str,
+    folder_path: str,
+    include_subfolders: bool,
+    report=None,
+) -> int:
+    """Import a saved folder; durable queue state is finalized by the worker."""
+    publish = report or (lambda progress, message: update_reference_import(import_id, progress, message))
+    publish(1, "Reading reference folder")
+    count = import_reference_folder(collection_id, folder_path, include_subfolders, publish)
+    with db.connection() as con:
+        con.execute(
+            "UPDATE reference_imports SET imported_files=?, message=?, updated_at=? WHERE id=?",
+            (count, f"Imported {count} reference clips", db.now(), import_id),
         )
-        update_reference_import(import_id, 100, f"Imported {count} reference clips", "completed", count)
-    except Exception as exc:
-        update_reference_import(import_id, 100, str(exc), "failed")
+    return count
 
 
-def run_reference_url_import(collection_id: str, import_id: str, source_url: str) -> None:
+def run_reference_url_import(collection_id: str, import_id: str, source_url: str, report=None) -> int:
     """Download one public short/video, then index it as a collection example."""
+    publish = report or (lambda progress, message: update_reference_import(import_id, progress, message))
     try:
         from yt_dlp import YoutubeDL
 
         _configure_remote_download_certificates()
-        update_reference_import(import_id, 1, "Preparing reference download", "running")
+        publish(1, "Preparing reference download")
 
         def report_download(status: dict) -> None:
             if status.get("status") == "downloading":
                 total = status.get("total_bytes") or status.get("total_bytes_estimate") or 0
                 current = status.get("downloaded_bytes") or 0
                 percent = int(current / total * 45) if total else 5
-                update_reference_import(import_id, max(2, min(45, percent)), "Downloading reference clip")
+                publish(max(2, min(45, percent)), "Downloading reference clip")
             elif status.get("status") == "finished":
-                update_reference_import(import_id, 46, "Download complete. Transcribing reference clip")
+                publish(46, "Download complete. Transcribing reference clip")
 
         options = {
             "format": "bv*+ba/b",
@@ -650,7 +876,7 @@ def run_reference_url_import(collection_id: str, import_id: str, source_url: str
         count = import_reference_files(
             collection_id,
             [source_path],
-            lambda progress, message: update_reference_import(import_id, 46 + int(progress * 0.54), message),
+            lambda progress, message: publish(46 + int(progress * 0.54), message),
             {source_path.resolve(): source_url},
         )
         with db.connection() as con:
@@ -660,12 +886,326 @@ def run_reference_url_import(collection_id: str, import_id: str, source_url: str
                    ON CONFLICT(collection_id, source_url) DO UPDATE SET source_path=excluded.source_path, original_name=excluded.original_name, updated_at=excluded.updated_at""",
                 (str(uuid.uuid4()), collection_id, source_url, str(source_path), title, db.now(), db.now()),
             )
-        update_reference_import(import_id, 100, f"Imported {count} reference clip from link", "completed", count)
+        with db.connection() as con:
+            con.execute(
+                "UPDATE reference_imports SET imported_files=?, message=?, updated_at=? WHERE id=?",
+                (count, f"Imported {count} reference clip from link", db.now(), import_id),
+            )
+        return count
     except Exception as exc:
         detail = str(exc)
         if "CERTIFICATE_VERIFY_FAILED" in detail or "certificate verify failed" in detail.lower():
             detail = "HTTPS certificate verification failed while downloading the reference link. Update/reinstall ClipFinder, then try again."
-        update_reference_import(import_id, 100, detail, "failed")
+        if isinstance(exc, (WorkCancelled, WorkPaused)):
+            raise
+        if isinstance(exc, ModuleNotFoundError):
+            raise PermanentWorkError(detail) from exc
+        raise RuntimeError(detail) from exc
+
+
+def _wake_durable_worker() -> None:
+    if _durable_worker is not None:
+        _durable_worker.wake()
+
+
+def _sync_video_job(job: dict | None) -> None:
+    if not job:
+        return
+    state = str(job.get("state") or "")
+    video_id = str(job.get("video_id") or "")
+    if not video_id:
+        return
+    timestamp = db.now()
+    with db.connection() as con:
+        if state == "queued":
+            con.execute(
+                "UPDATE videos SET status='queued', error_message=NULL, updated_at=? WHERE id=?",
+                (timestamp, video_id),
+            )
+        elif state == "running":
+            con.execute(
+                "UPDATE videos SET status='processing', error_message=NULL, updated_at=? WHERE id=?",
+                (timestamp, video_id),
+            )
+        elif state == "paused":
+            con.execute(
+                "UPDATE videos SET status='paused', error_message=NULL, updated_at=? WHERE id=?",
+                (timestamp, video_id),
+            )
+        elif state == "completed":
+            con.execute(
+                "UPDATE videos SET status='ready', error_message=NULL, updated_at=? WHERE id=?",
+                (timestamp, video_id),
+            )
+        elif state in {"failed", "cancelled"}:
+            current_run = con.execute(
+                "SELECT 1 FROM analysis_runs WHERE video_id=? AND is_current=1 AND state='completed' LIMIT 1",
+                (video_id,),
+            ).fetchone()
+            # A failed/cancelled reanalysis must not hide the last successful
+            # current run. Keep that result reviewable and surface the latest
+            # job message as a warning on the recording card.
+            status = "ready" if current_run else "failed"
+            detail = str(job.get("last_error") or job.get("message") or state.title())
+            con.execute(
+                "UPDATE videos SET status=?, error_message=?, updated_at=? WHERE id=?",
+                (status, detail, timestamp, video_id),
+            )
+
+
+def _claim_video_job(worker_id: str, lease_seconds: float) -> dict | None:
+    with db.connection() as con:
+        released = job_queue.release_expired_leases(con)
+        claimed = job_queue.claim_next(con, worker_id=worker_id, lease_seconds=lease_seconds)
+    for item in released:
+        _sync_video_job(item)
+    if released:
+        diagnostics.logger().warning("Recovered %s recording job(s) with expired leases", len(released))
+    _sync_video_job(claimed)
+    return claimed
+
+
+def _heartbeat_video_job(job_id: str, lease_token: str, lease_seconds: float) -> dict | None:
+    with db.connection() as con:
+        return job_queue.heartbeat(con, job_id, lease_token, lease_seconds=lease_seconds)
+
+
+def _progress_video_job(job_id: str, lease_token: str, progress: int, message: str,
+                        lease_seconds: float) -> dict | None:
+    with db.connection() as con:
+        return job_queue.update_progress(
+            con, job_id, lease_token, progress, message, lease_seconds=lease_seconds,
+        )
+
+
+def _complete_video_job(job_id: str, lease_token: str) -> dict | None:
+    with db.connection() as con:
+        result = job_queue.complete(con, job_id, lease_token, message="Analysis completed")
+    _sync_video_job(result)
+    return result
+
+
+def _fail_video_job(job_id: str, lease_token: str, error: str, retryable: bool) -> dict | None:
+    with db.connection() as con:
+        result = job_queue.fail(con, job_id, lease_token, error, retryable=retryable)
+    _sync_video_job(result)
+    return result
+
+
+def _recover_video_jobs() -> None:
+    with db.connection() as con:
+        timestamp = db.now()
+        # Older releases could restart between atomically activating a run and
+        # marking its public job complete. Do not redo work that is already a
+        # valid current result.
+        con.execute(
+            """UPDATE jobs
+               SET state='completed', progress=100,
+                   message='Analysis completed before restart', updated_at=?
+               WHERE state IN ('running', 'interrupted')
+                 AND EXISTS (
+                     SELECT 1 FROM videos v
+                     WHERE v.id=jobs.video_id AND v.status='ready'
+                 )
+                 AND EXISTS (
+                     SELECT 1 FROM analysis_runs ar
+                     WHERE ar.video_id=jobs.video_id AND ar.is_current=1 AND ar.state='completed'
+                 )""",
+            (timestamp,),
+        )
+        con.execute(
+            """UPDATE analysis_runs
+               SET state='interrupted', error_message='Application restarted', completed_at=?
+               WHERE state='running'""",
+            (timestamp,),
+        )
+        recovered = job_queue.recover_abandoned(con)
+        # Reconcile the public recording card from the latest durable row as
+        # well. A process can exit after the queue transaction commits but
+        # before the best-effort videos-table projection is updated.
+        latest = [dict(item) for item in con.execute(
+            """SELECT j.* FROM jobs j
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM jobs newer
+                   WHERE newer.video_id=j.video_id
+                     AND (newer.created_at > j.created_at
+                          OR (newer.created_at=j.created_at AND newer.id > j.id))
+               )
+               ORDER BY j.created_at, j.id"""
+        ).fetchall()]
+    for item in [*recovered, *latest]:
+        _sync_video_job(item)
+    if recovered:
+        diagnostics.logger().warning("Recovered %s recording job(s) after restart", len(recovered))
+
+
+def _dispatch_video_job(job: dict, report, should_cancel) -> None:
+    if should_cancel():
+        raise WorkCancelled("Cancellation requested")
+    video = db.row("SELECT * FROM videos WHERE id=?", (job["video_id"],))
+    if not video:
+        raise PermanentWorkError("Video was deleted before its queued job started.")
+    if video.get("source_removed"):
+        raise PermanentWorkError("The source video was removed and cannot be analysed again.")
+    source = Path(str(video.get("path") or ""))
+    kind = str(job.get("kind") or "analysis")
+    if kind == "remote_import" or (not source.is_file() and video.get("source_url")):
+        run_remote_import(str(video["id"]), str(job["id"]), report)
+        return
+    if kind != "analysis":
+        raise PermanentWorkError(f"Unsupported recording job kind: {kind}")
+    if not source.is_file():
+        raise PermanentWorkError("The original recording file is no longer available.")
+    run_analysis(str(video["id"]), str(job["id"]), report)
+
+
+def _claim_reference_job(worker_id: str, lease_seconds: float) -> dict | None:
+    with db.connection() as con:
+        released = reference_queue.release_expired_leases(con)
+        claimed = reference_queue.claim_next(con, worker_id=worker_id, lease_seconds=lease_seconds)
+    if released:
+        diagnostics.logger().warning("Recovered %s reference import(s) with expired leases", len(released))
+    return claimed
+
+
+def _heartbeat_reference_job(import_id: str, lease_token: str, lease_seconds: float) -> dict | None:
+    with db.connection() as con:
+        return reference_queue.heartbeat(con, import_id, lease_token, lease_seconds=lease_seconds)
+
+
+def _progress_reference_job(import_id: str, lease_token: str, progress: int, message: str,
+                            lease_seconds: float) -> dict | None:
+    with db.connection() as con:
+        return reference_queue.update_progress(
+            con, import_id, lease_token, progress, message, lease_seconds=lease_seconds,
+        )
+
+
+def _complete_reference_job(import_id: str, lease_token: str) -> dict | None:
+    current = db.row("SELECT imported_files FROM reference_imports WHERE id=?", (import_id,)) or {}
+    imported = int(current.get("imported_files") or 0)
+    with db.connection() as con:
+        return reference_queue.complete(
+            con,
+            import_id,
+            lease_token,
+            message=f"Imported {imported} reference clip{'s' if imported != 1 else ''}",
+            imported_files=imported,
+        )
+
+
+def _fail_reference_job(import_id: str, lease_token: str, error: str, retryable: bool) -> dict | None:
+    with db.connection() as con:
+        return reference_queue.fail(con, import_id, lease_token, error, retryable=retryable)
+
+
+def _recover_reference_jobs() -> None:
+    with db.connection() as con:
+        recovered = reference_queue.recover_abandoned(con)
+    if recovered:
+        diagnostics.logger().warning("Recovered %s reference import(s) after restart", len(recovered))
+
+
+def _dispatch_reference_job(job: dict, report, should_cancel) -> None:
+    if should_cancel():
+        raise WorkCancelled("Cancellation requested")
+    if not db.row("SELECT id FROM collections WHERE id=?", (job["collection_id"],)):
+        raise PermanentWorkError("The reference collection was deleted.")
+    kind = str(job.get("kind") or "folder")
+    source = str(job.get("folder_path") or "")
+    if kind == "folder":
+        folder = Path(source).expanduser()
+        if not folder.is_dir():
+            raise PermanentWorkError("The saved reference folder is no longer available.")
+        run_reference_import(
+            str(job["collection_id"]), str(job["id"]), str(folder),
+            bool(job.get("include_subfolders")), report,
+        )
+        return
+    if kind == "url":
+        try:
+            source_url = _supported_reference_url(source)
+        except HTTPException as exc:
+            raise PermanentWorkError(str(exc.detail)) from exc
+        run_reference_url_import(str(job["collection_id"]), str(job["id"]), source_url, report)
+        return
+    raise PermanentWorkError(f"Unsupported reference job kind: {kind}")
+
+
+def _cleanup_abandoned_temporary_files() -> None:
+    active_paths: list[Path] = []
+    for item in db.rows(
+        """SELECT v.id, v.path FROM jobs j JOIN videos v ON v.id=j.video_id
+           WHERE j.state IN ('queued', 'running')"""
+    ):
+        active_paths.append(Path(item["path"]))
+        active_paths.extend(settings.incoming_dir.glob(f"{item['id']}*"))
+        active_paths.extend(settings.work_dir.glob(f"{item['id']}*"))
+    for item in db.rows(
+        "SELECT id FROM reference_imports WHERE state IN ('queued', 'running')"
+    ):
+        active_paths.extend(settings.reference_dir.glob(f"{item['id']}*"))
+    result = cleanup_workspace(
+        [
+            settings.incoming_dir,
+            settings.work_dir,
+            settings.reference_dir,
+            settings.clipfinder_data_dir.parent / "updates",
+        ],
+        older_than_seconds=24 * 60 * 60,
+        active_paths=active_paths,
+        dry_run=False,
+    )
+    if result.deleted or result.errors:
+        diagnostics.logger().info(
+            "Temporary workspace cleanup: deleted=%s skipped=%s errors=%s",
+            len(result.deleted), len(result.skipped), len(result.errors),
+        )
+    try:
+        cache_result = PipelineCache(settings.pipeline_cache_dir).cleanup(
+            older_than_seconds=180 * 24 * 60 * 60,
+            max_total_bytes=4 * 1024 * 1024 * 1024,
+            temporary_older_than_seconds=60 * 60,
+            dry_run=False,
+        )
+    except Exception as exc:
+        diagnostics.log_failure("Pipeline cache cleanup skipped", exc)
+    else:
+        if cache_result.removed or cache_result.errors:
+            diagnostics.logger().info(
+                "Pipeline cache cleanup: removed=%s reclaimed_bytes=%s errors=%s",
+                len(cache_result.removed), cache_result.reclaimed_bytes,
+                len(cache_result.errors),
+            )
+
+
+def build_durable_worker() -> DurableBackgroundWorker:
+    video_adapter = QueueAdapter(
+        name="recording",
+        claim=_claim_video_job,
+        heartbeat=_heartbeat_video_job,
+        update_progress=_progress_video_job,
+        complete=_complete_video_job,
+        fail=_fail_video_job,
+        dispatch=_dispatch_video_job,
+        recover=_recover_video_jobs,
+    )
+    reference_adapter = QueueAdapter(
+        name="reference import",
+        claim=_claim_reference_job,
+        heartbeat=_heartbeat_reference_job,
+        update_progress=_progress_reference_job,
+        complete=_complete_reference_job,
+        fail=_fail_reference_job,
+        dispatch=_dispatch_reference_job,
+        recover=_recover_reference_jobs,
+    )
+    return DurableBackgroundWorker(
+        [video_adapter, reference_adapter],
+        lock_directory=settings.work_dir / "locks",
+        on_acquired=_cleanup_abandoned_temporary_files,
+        on_error=lambda context, exc: diagnostics.log_failure(context, exc),
+    )
 
 
 # Remote previews deliberately stay out of SQLite: they are a transient way to
@@ -673,22 +1213,50 @@ def run_reference_url_import(collection_id: str, import_id: str, source_url: str
 # collection, incoming recording or export directory.
 _remote_preview_jobs: dict[str, dict] = {}
 _remote_preview_fingerprints: dict[str, dict] = {}
+_remote_preview_lock = threading.RLock()
+_media_output_lock = threading.RLock()
 _REMOTE_PREVIEW_MAX_SECONDS = 600
+_REMOTE_PREVIEW_TTL_SECONDS = 60 * 60
+_REMOTE_PREVIEW_MAX_JOBS = 24
+
+
+def _prune_remote_previews(now: float | None = None) -> None:
+    current = time.monotonic() if now is None else now
+    with _remote_preview_lock:
+        removable = [
+            job_id for job_id, job in _remote_preview_jobs.items()
+            if job.get("state") not in {"queued", "running"}
+            and current - float(job.get("updated_monotonic") or current) >= _REMOTE_PREVIEW_TTL_SECONDS
+        ]
+        for job_id in removable:
+            _remote_preview_jobs.pop(job_id, None)
+            _remote_preview_fingerprints.pop(job_id, None)
+        overflow = max(0, len(_remote_preview_jobs) - _REMOTE_PREVIEW_MAX_JOBS)
+        if overflow:
+            completed = sorted(
+                ((job_id, job) for job_id, job in _remote_preview_jobs.items() if job.get("state") not in {"queued", "running"}),
+                key=lambda item: float(item[1].get("updated_monotonic") or 0),
+            )
+            for job_id, _ in completed[:overflow]:
+                _remote_preview_jobs.pop(job_id, None)
+                _remote_preview_fingerprints.pop(job_id, None)
 
 
 def _update_remote_preview(job_id: str, *, state: str | None = None, progress: int | None = None,
                            message: str | None = None, result: dict | None = None) -> None:
-    job = _remote_preview_jobs.get(job_id)
-    if not job:
-        return
-    if state is not None:
-        job["state"] = state
-    if progress is not None:
-        job["progress"] = max(0, min(100, int(progress)))
-    if message is not None:
-        job["message"] = message
-    if result is not None:
-        job["result"] = result
+    with _remote_preview_lock:
+        job = _remote_preview_jobs.get(job_id)
+        if not job:
+            return
+        if state is not None:
+            job["state"] = state
+        if progress is not None:
+            job["progress"] = max(0, min(100, int(progress)))
+        if message is not None:
+            job["message"] = message
+        if result is not None:
+            job["result"] = result
+        job["updated_monotonic"] = time.monotonic()
 
 
 def _remote_stream_info(source_url: str, selector: str) -> tuple[dict, str]:
@@ -768,17 +1336,39 @@ def run_remote_preview(job_id: str, source_url: str) -> None:
         words = [word for part in parts for word in (part.get("words") or [])]
         _update_remote_preview(job_id, progress=85, message="Scoring transcript")
         embedding = embed_texts([transcript or "no speech detected"])[0]
-        tags = infer_tags(transcript, embedding)
-        quality, quality_signals, reading_likelihood = assess_clip_quality(transcript, words, 0, duration, tags)
-        logical_sense = assess_logical_sense(transcript)
-        _remote_preview_fingerprints[job_id] = {
-            "duration_seconds": duration,
-            "tags": tags,
-            "quality_score": quality,
-            "logical_sense_score": logical_sense,
-            "reading_likelihood": reading_likelihood,
-            "embedding": embedding,
-        }
+        semantic_tags = infer_tags(transcript, embedding)
+        preview_features = recompute_segment_features({
+            "transcript": transcript,
+            "start_seconds": 0.0,
+            "end_seconds": duration,
+            "word_timestamps": words,
+            "tags": semantic_tags,
+            "analysis_mode": "default",
+            # The complete remote short is the available context window.
+            "context_before": "",
+            "context_after": "",
+            "boundary_signals": [],
+            "extended_completeness_score": -1,
+            "game_reaction_score": 0,
+            "voice_expression_score": 0,
+            "vision_score": 0,
+            "chat_reaction_score": 0,
+            "chat_joy_score": 0,
+        }).updates
+        tags = preview_features["tags"]
+        quality = int(preview_features["quality_score"])
+        quality_signals = preview_features["quality_signals"]
+        reading_likelihood = float(preview_features["reading_likelihood"])
+        logical_sense = int(preview_features["logical_sense_score"])
+        with _remote_preview_lock:
+            _remote_preview_fingerprints[job_id] = {
+                "duration_seconds": duration,
+                "tags": tags,
+                "quality_score": quality,
+                "logical_sense_score": logical_sense,
+                "reading_likelihood": reading_likelihood,
+                "embedding": embedding,
+            }
 
         result = {
             "title": title,
@@ -811,6 +1401,7 @@ def home():
 
 @app.get("/api/health")
 def health():
+    _start_durable_worker_after_healthcheck()
     return {"status": "ok", "data_dir": str(settings.clipfinder_data_dir), "version": __version__}
 
 
@@ -818,25 +1409,33 @@ def health():
 def create_remote_preview(body: RemotePreviewCreate, background_tasks: BackgroundTasks):
     source_url = _supported_reference_url(body.source_url)
     job_id = str(uuid.uuid4())
-    _remote_preview_jobs[job_id] = {
-        "id": job_id, "state": "queued", "progress": 0, "message": "Queued", "result": None,
-    }
+    _prune_remote_previews()
+    with _remote_preview_lock:
+        _remote_preview_jobs[job_id] = {
+            "id": job_id, "state": "queued", "progress": 0, "message": "Queued", "result": None,
+            "updated_monotonic": time.monotonic(),
+        }
+    _prune_remote_previews()
     background_tasks.add_task(run_remote_preview, job_id, source_url)
     return {"job_id": job_id}
 
 
 @app.get("/api/remote-preview/{job_id}")
 def get_remote_preview(job_id: str):
-    job = _remote_preview_jobs.get(job_id)
+    _prune_remote_previews()
+    with _remote_preview_lock:
+        job = deepcopy(_remote_preview_jobs.get(job_id))
     if not job:
         not_found("Preview job not found. Preview results are available only during this app session.")
+    job.pop("updated_monotonic", None)
     return job
 
 
 @app.post("/api/remote-preview/{job_id}/save-pattern", status_code=201)
 def save_remote_preview_pattern(job_id: str, body: RemotePreviewSave):
-    job = _remote_preview_jobs.get(job_id)
-    fingerprint = _remote_preview_fingerprints.get(job_id)
+    with _remote_preview_lock:
+        job = deepcopy(_remote_preview_jobs.get(job_id))
+        fingerprint = deepcopy(_remote_preview_fingerprints.get(job_id))
     if not job or job.get("state") != "completed" or not fingerprint:
         raise HTTPException(400, "Complete the temporary preview before saving its analysis pattern.")
     pattern_set = db.row("SELECT id, name FROM discovery_pattern_sets WHERE id=?", (body.pattern_set_id,))
@@ -849,17 +1448,102 @@ def save_remote_preview_pattern(job_id: str, body: RemotePreviewSave):
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 str(uuid.uuid4()), pattern_set["id"], float(fingerprint["duration_seconds"]),
-                json.dumps(fingerprint["tags"], ensure_ascii=False), int(fingerprint["quality_score"]),
+                json.dumps(canonicalize_tags(fingerprint["tags"]), ensure_ascii=False), int(fingerprint["quality_score"]),
                 int(fingerprint["logical_sense_score"]), float(fingerprint["reading_likelihood"]),
                 json.dumps(fingerprint["embedding"]), db.now(),
             ),
         )
+    with _remote_preview_lock:
+        _remote_preview_fingerprints.pop(job_id, None)
     return {"ok": True, "pattern_set_id": pattern_set["id"], "pattern_set_name": pattern_set["name"]}
 
 
 @app.get("/api/runtime-status")
 def get_runtime_status():
     return {**runtime_status(), "version": __version__}
+
+
+@app.get("/api/statistics")
+def app_statistics():
+    """Return privacy-safe, local review feedback for the Statistics tab."""
+    rows = db.rows(
+        """SELECT r.rating, r.review_reason, sr.payload_json,
+                  s.tags, s.quality_score, s.short_potential_score,
+                  s.self_contained_score, s.extended_completeness_score,
+                  s.reading_likelihood, v.analysis_mode
+           FROM segments s
+           JOIN videos v ON v.id=s.video_id
+           JOIN segment_reviews r ON r.segment_id=s.id
+           LEFT JOIN segment_revisions sr ON sr.id=r.reviewed_revision_id
+           WHERE s.lifecycle_state='current' OR r.rating IN ('accepted', 'rejected')"""
+    )
+    decisions = Counter({"accepted": 0, "rejected": 0, "unrated": 0})
+    reasons: Counter[str] = Counter()
+    tags: dict[str, Counter[str]] = defaultdict(Counter)
+    modes: dict[str, Counter[str]] = defaultdict(Counter)
+    score_values: dict[str, dict[str, list[float]]] = {
+        "quality": defaultdict(list), "short_potential": defaultdict(list),
+        "self_contained": defaultdict(list), "extended_completeness": defaultdict(list),
+    }
+    reading = Counter({"accepted": 0, "rejected": 0, "unrated": 0})
+    for row in rows:
+        try:
+            reviewed_machine = json.loads(row.get("payload_json") or "{}")
+        except (TypeError, ValueError):
+            reviewed_machine = {}
+        if isinstance(reviewed_machine, dict):
+            # Statistics describe what the user actually reviewed, not a newer
+            # machine revision that inherited the stable moment ID.
+            row = {**row, **reviewed_machine}
+        rating = str(row.get("rating") or "unrated")
+        if rating not in decisions:
+            rating = "unrated"
+        decisions[rating] += 1
+        modes[str(row.get("analysis_mode") or "default")][rating] += 1
+        if rating == "rejected":
+            reasons[str(row.get("review_reason") or "No reason given")] += 1
+        try:
+            row_tags = canonicalize_tags(json.loads(row.get("tags") or "[]"))
+        except (TypeError, ValueError):
+            row_tags = []
+        for tag in row_tags:
+            if isinstance(tag, str) and tag.strip():
+                tags[tag.strip()][rating] += 1
+        if float(row.get("reading_likelihood") or 0) >= 0.48:
+            reading[rating] += 1
+        if rating in {"accepted", "rejected"}:
+            for key, column in (
+                ("quality", "quality_score"), ("short_potential", "short_potential_score"),
+                ("self_contained", "self_contained_score"), ("extended_completeness", "extended_completeness_score"),
+            ):
+                value = float(row.get(column) or -1)
+                if value >= 0:
+                    score_values[key][rating].append(value)
+
+    reviewed = decisions["accepted"] + decisions["rejected"]
+    def average(values: list[float]) -> int | None:
+        return round(sum(values) / len(values)) if values else None
+    # Show saved custom reasons even before they are used.  That makes the
+    # Statistics tab a useful checklist while the user is building a review
+    # vocabulary, instead of silently hiding every zero-count custom reason.
+    saved_reason_rows = db.rows("SELECT reason FROM rejection_reasons ORDER BY created_at DESC")
+    saved_reasons = [str(item.get("reason") or "").strip() for item in saved_reason_rows]
+    listed_reasons: list[dict] = []
+    for reason in saved_reasons:
+        if reason:
+            listed_reasons.append({"reason": reason, "count": reasons.pop(reason, 0), "saved": True})
+    listed_reasons.extend({"reason": reason, "count": count, "saved": False} for reason, count in reasons.most_common(10))
+    return {
+        "overview": {"total": len(rows), "reviewed": reviewed, "accepted": decisions["accepted"], "rejected": decisions["rejected"], "approval_rate": round(decisions["accepted"] * 100 / reviewed) if reviewed else None},
+        "rejection_reasons": listed_reasons,
+        "tags": [
+            {"tag": tag, "accepted": counts["accepted"], "rejected": counts["rejected"], "unrated": counts["unrated"], "total": sum(counts.values()), "approval_rate": round(counts["accepted"] * 100 / (counts["accepted"] + counts["rejected"])) if counts["accepted"] + counts["rejected"] else None}
+            for tag, counts in sorted(tags.items(), key=lambda item: (sum(item[1].values()), item[0]), reverse=True)[:14]
+        ],
+        "analysis_modes": [{"mode": mode, "accepted": counts["accepted"], "rejected": counts["rejected"], "unrated": counts["unrated"]} for mode, counts in sorted(modes.items())],
+        "score_comparison": {key: {"accepted": average(values["accepted"]), "rejected": average(values["rejected"])} for key, values in score_values.items()},
+        "reading_flags": dict(reading),
+    }
 
 
 @app.get("/api/diagnostics/report")
@@ -894,6 +1578,10 @@ def app_update_download_status(job_id: str):
 
 @app.post("/api/updates/downloads/{job_id}/install")
 def install_app_update(job_id: str):
+    if db.row("SELECT id FROM jobs WHERE state IN ('queued', 'running') LIMIT 1") or db.row(
+        "SELECT id FROM reference_imports WHERE state IN ('queued', 'running') LIMIT 1"
+    ):
+        raise HTTPException(409, "Wait for active analysis/import jobs to finish or cancel them before installing an update.")
     try:
         install_downloaded_update(job_id)
     except RuntimeError as exc:
@@ -901,83 +1589,135 @@ def install_app_update(job_id: str):
     return {"state": "installing"}
 
 
+_ANALYSIS_AUDIO_PAYLOAD_KEYS = (
+    "mode", "single_track", "microphone_track", "all_sounds_track",
+    "game_track", "use_all_sounds", "use_game",
+)
+
+
+def _analysis_job_payload(**extra) -> dict:
+    """Freeze analysis inputs which could otherwise change while queued."""
+    current = db.row("SELECT * FROM analysis_audio_defaults WHERE id=1") or {}
+    snapshot = {key: current[key] for key in _ANALYSIS_AUDIO_PAYLOAD_KEYS if key in current}
+    return {**extra, "analysis_audio": snapshot}
+
+
+def _store_uploaded_video(source, partial_destination: Path, destination: Path) -> None:
+    """Persist a potentially multi-GB upload outside the async event loop."""
+    with partial_destination.open("wb") as output:
+        shutil.copyfileobj(source, output)
+        output.flush()
+        os.fsync(output.fileno())
+    # Windows Defender and third-party antivirus tools can briefly open a
+    # freshly closed upload. Retry only this atomic rename.
+    for attempt in range(6):
+        try:
+            os.replace(partial_destination, destination)
+            return
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 @app.post("/api/videos", status_code=201)
-async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = File(...), analysis_mode: str = Form("default")):
+async def upload_video(file: UploadFile = File(...), analysis_mode: str = Form("default")):
     if not file.filename or Path(file.filename).suffix.lower() not in {".mp4", ".mkv", ".mov", ".webm"}:
         raise HTTPException(400, "Add MP4, MKV, MOV or WebM video file.")
     if analysis_mode not in {"fast", "default", "extended"}:
         raise HTTPException(400, "Choose Fast, Default or Extended analysis.")
     video_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
     destination = settings.incoming_dir / f"{video_id}{Path(file.filename).suffix.lower()}"
+    partial_destination = destination.with_name(f"{destination.name}.upload.part")
     try:
-        with destination.open("wb") as output:
-            shutil.copyfileobj(file.file, output)
+        await run_in_threadpool(_store_uploaded_video, file.file, partial_destination, destination)
     except OSError as exc:
+        partial_destination.unlink(missing_ok=True)
         destination.unlink(missing_ok=True)
         raise HTTPException(507, f"Could not store the upload: {exc}. Check free disk space and write access to the ClipFinder data folder.") from exc
     finally:
         await file.close()
     timestamp = db.now()
-    with db.connection() as con:
-        con.execute(
-            "INSERT INTO videos (id, original_name, path, analysis_mode, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?)",
-            (video_id, file.filename, str(destination), analysis_mode, timestamp, timestamp),
-        )
-        con.execute(
-            "INSERT INTO jobs (id, video_id, state, progress, message, created_at, updated_at) VALUES (?, ?, 'queued', 0, 'Queued', ?, ?)",
-            (job_id, video_id, timestamp, timestamp),
-        )
-    background_tasks.add_task(run_analysis, video_id, job_id)
-    return {"video_id": video_id, "job_id": job_id}
+    job_payload = _analysis_job_payload(analysis_mode=analysis_mode)
+    try:
+        with db.connection() as con:
+            con.execute(
+                "INSERT INTO videos (id, original_name, path, analysis_mode, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?)",
+                (video_id, file.filename, str(destination), analysis_mode, timestamp, timestamp),
+            )
+            job = job_queue.enqueue(
+                con, video_id=video_id, kind="analysis", job_id=job_id,
+                payload=job_payload, message="Queued", now=timestamp,
+            )
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    _wake_durable_worker()
+    return {"video_id": video_id, "job_id": job["id"]}
 
 
 @app.post("/api/videos/from-url", status_code=201)
-def import_remote_video(body: RemoteVideoCreate, background_tasks: BackgroundTasks):
+def import_remote_video(body: RemoteVideoCreate):
     source_url = _supported_remote_url(body.source_url)
     video_id, job_id, timestamp = str(uuid.uuid4()), str(uuid.uuid4()), db.now()
+    job_payload = _analysis_job_payload(source_url=source_url)
     placeholder = settings.incoming_dir / f"{video_id}.download"
     with db.connection() as con:
         con.execute(
             "INSERT INTO videos (id, original_name, path, source_url, analysis_mode, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)",
             (video_id, "YouTube/Twitch download", str(placeholder), source_url, body.analysis_mode, timestamp, timestamp),
         )
-        con.execute(
-            "INSERT INTO jobs (id, video_id, state, progress, message, created_at, updated_at) VALUES (?, ?, 'queued', 0, 'Queued remote download', ?, ?)",
-            (job_id, video_id, timestamp, timestamp),
+        job = job_queue.enqueue(
+            con, video_id=video_id, kind="remote_import", job_id=job_id,
+            payload=job_payload, message="Queued remote download", now=timestamp,
         )
-    background_tasks.add_task(run_remote_import, video_id, job_id)
-    return {"video_id": video_id, "job_id": job_id}
+    _wake_durable_worker()
+    return {"video_id": video_id, "job_id": job["id"]}
 
 
 @app.post("/api/videos/{video_id}/analyse", status_code=202)
-def restart_analysis(video_id: str, background_tasks: BackgroundTasks):
+def restart_analysis(video_id: str):
     video = db.row("SELECT * FROM videos WHERE id=?", (video_id,))
     if not video:
         not_found("Video not found")
+    if video.get("source_removed"):
+        raise HTTPException(409, "The source video was removed to save disk space. Its analysis archive remains available, but it cannot be reanalysed.")
     if not Path(video["path"]).is_file() and not video.get("source_url"):
         raise HTTPException(400, "The original video file is no longer available.")
     job_id, timestamp = str(uuid.uuid4()), db.now()
+    job_payload = _analysis_job_payload(reanalyze=True)
     with db.connection() as con:
-        con.execute("UPDATE videos SET status='queued', error_message=NULL, analysis_seconds=0, updated_at=? WHERE id=?", (timestamp, video_id))
-        con.execute(
-            "INSERT INTO jobs (id, video_id, state, progress, message, created_at, updated_at) VALUES (?, ?, 'queued', 0, 'Queued again', ?, ?)",
-            (job_id, video_id, timestamp, timestamp),
+        kind = "analysis" if Path(video["path"]).is_file() else "remote_import"
+        job = job_queue.enqueue(
+            con, video_id=video_id, kind=kind, job_id=job_id,
+            payload=job_payload, message="Queued again", now=timestamp,
         )
-    background_tasks.add_task(run_analysis if Path(video["path"]).is_file() else run_remote_import, video_id, job_id)
-    return {"job_id": job_id}
+        if str(job["id"]) == job_id:
+            con.execute(
+                "UPDATE videos SET status='queued', error_message=NULL, analysis_seconds=0, updated_at=? WHERE id=?",
+                (timestamp, video_id),
+            )
+    _wake_durable_worker()
+    return {"job_id": job["id"]}
 
 
 @app.get("/api/videos")
 def videos():
     items = db.rows(
-        """SELECT v.*, j.progress, j.message, j.state AS job_state
-           FROM videos v LEFT JOIN jobs j ON j.video_id=v.id
-           WHERE j.created_at = (SELECT MAX(created_at) FROM jobs WHERE video_id=v.id)
+        """SELECT v.*, j.id AS job_id, j.kind AS job_kind, j.progress, j.message,
+                  j.state AS job_state, j.pause_requested
+           FROM videos v LEFT JOIN jobs j ON j.id=(
+               SELECT latest.id FROM jobs latest
+               WHERE latest.video_id=v.id
+               ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1
+           )
            ORDER BY v.created_at DESC"""
     )
     for item in items:
         source = Path(item["path"])
         item["size_bytes"] = source.stat().st_size if source.is_file() else 0
+        item["source_removed"] = bool(item.get("source_removed"))
+        item["source_size_bytes"] = int(item.get("source_size_bytes") or item["size_bytes"] or 0)
         estimate, samples = estimate_analysis_duration(item)
         item["estimated_analysis_seconds"] = estimate
         item["estimate_sample_count"] = samples
@@ -990,41 +1730,273 @@ def storage_usage():
     video_bytes = sum(path.stat().st_size for path in source_paths if path.is_file())
     export_files = [path for path in settings.exports_dir.rglob("*") if path.is_file() and path.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}]
     clip_bytes = sum(path.stat().st_size for path in export_files)
+    review_audio_files = [path for path in settings.review_audio_dir.rglob("*.mp3") if path.is_file()]
+    review_audio_bytes = sum(path.stat().st_size for path in review_audio_files)
     return {
         "video_bytes": video_bytes,
         "clip_bytes": clip_bytes,
         "video_count": sum(1 for path in source_paths if path.is_file()),
         "clip_count": len(export_files),
+        "review_audio_bytes": review_audio_bytes,
+        "review_audio_count": len(review_audio_files),
     }
+
+
+def _segments_requiring_review_audio(video_id: str) -> list[dict]:
+    """Return immutable snapshots for every moment carrying human evidence."""
+    segments = db.rows(
+        """SELECT s.id, s.start_seconds, s.end_seconds, s.word_timestamps,
+                  s.archive_audio_path, s.archive_audio_track, s.revision_number,
+                  r.reviewed_revision_id, r.rating, r.review_reason,
+                  r.censor_profanity, r.remove_pauses,
+                  r.archive_audio_path AS review_archive_audio_path,
+                  r.archive_audio_track AS review_archive_audio_track
+           FROM segments s
+           JOIN segment_reviews r ON r.segment_id=s.id
+           WHERE s.video_id=? AND (
+               r.rating IN ('accepted', 'rejected')
+               OR r.review_reason<>'' OR r.censor_profanity=1 OR r.remove_pauses=1
+               OR EXISTS(SELECT 1 FROM segment_tag_reviews tr WHERE tr.segment_id=s.id)
+               OR EXISTS(SELECT 1 FROM tag_feedback tf WHERE tf.segment_id=s.id)
+               OR EXISTS(SELECT 1 FROM collection_examples ce WHERE ce.segment_id=s.id)
+               OR EXISTS(SELECT 1 FROM preference_feedback pf WHERE pf.segment_id=s.id)
+               OR EXISTS(
+                   SELECT 1 FROM segment_revisions mr
+                   WHERE mr.segment_id=s.id
+                     AND mr.revision_kind NOT IN ('analysis', 'reanalysis', 'legacy')
+               )
+           )
+           ORDER BY s.start_seconds, s.id""",
+        (video_id,),
+    )
+    snapshots: list[dict] = []
+    for item in segments:
+        revision = None
+        if item.get("rating") in {"accepted", "rejected"} and item.get("reviewed_revision_id"):
+            revision = db.row("SELECT * FROM segment_revisions WHERE id=?", (item["reviewed_revision_id"],))
+        if not revision:
+            revision = db.row(
+                """SELECT sr.* FROM segment_tag_reviews tr
+                   JOIN segment_revisions sr ON sr.id=tr.reviewed_revision_id
+                   WHERE tr.segment_id=? ORDER BY tr.updated_at DESC LIMIT 1""",
+                (item["id"],),
+            )
+        if not revision:
+            revision = db.row(
+                """SELECT * FROM segment_revisions
+                   WHERE segment_id=? AND revision_kind NOT IN ('analysis', 'reanalysis', 'legacy')
+                   ORDER BY revision_number DESC LIMIT 1""",
+                (item["id"],),
+            )
+        if not revision:
+            revision = db.row(
+                """SELECT sr.* FROM collection_examples ce
+                   JOIN segment_revisions sr
+                     ON sr.segment_id=ce.segment_id AND sr.revision_number=ce.revision_number
+                   WHERE ce.segment_id=? ORDER BY ce.created_at DESC LIMIT 1""",
+                (item["id"],),
+            )
+        if not revision and item.get("reviewed_revision_id"):
+            revision = db.row("SELECT * FROM segment_revisions WHERE id=?", (item["reviewed_revision_id"],))
+        if not revision:
+            revision = db.row(
+                """SELECT * FROM segment_revisions WHERE segment_id=?
+                   ORDER BY is_current DESC, revision_number DESC LIMIT 1""",
+                (item["id"],),
+            )
+        snapshot = dict(item)
+        if revision:
+            snapshot.update({
+                "revision_id": revision["id"],
+                "revision_number": int(revision["revision_number"]),
+                "start_seconds": float(revision["start_seconds"]),
+                "end_seconds": float(revision["end_seconds"]),
+                "payload_json": revision["payload_json"],
+            })
+        else:
+            snapshot["revision_id"] = f"segment:{item['id']}:{item.get('revision_number') or 1}"
+            snapshot["payload_json"] = json.dumps(
+                {"word_timestamps": item.get("word_timestamps") or "[]"},
+                ensure_ascii=False,
+            )
+        snapshot["archive_audio_path"] = (
+            item.get("review_archive_audio_path") or item.get("archive_audio_path") or ""
+        )
+        snapshot["archive_audio_track"] = int(
+            item.get("review_archive_audio_track") or item.get("archive_audio_track") or 1
+        )
+        snapshots.append(snapshot)
+    return snapshots
+
+
+def _review_audio_archive_path(segment: dict, audio_track: int) -> Path:
+    """Name an archive by the exact revision and playback transformation."""
+    raw_id = str(segment["id"])
+    readable = re.sub(r"[^A-Za-z0-9_-]+", "-", raw_id).strip("-")[:40] or "moment"
+    identity = "|".join((
+        raw_id,
+        str(segment.get("revision_id") or segment.get("revision_number") or 1),
+        f"{float(segment['start_seconds']):.6f}",
+        f"{float(segment['end_seconds']):.6f}",
+        str(audio_track),
+        str(int(bool(segment.get("remove_pauses")))),
+    ))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    settings.review_audio_dir.mkdir(parents=True, exist_ok=True)
+    return settings.review_audio_dir / f"{readable}-{digest}.mp3"
+
+
+def _record_review_audio_archives(archives: list[tuple[dict, Path, int]]) -> None:
+    """Atomically point durable reviews at fully written archive files."""
+    stale_paths: set[Path] = set()
+    timestamp = db.now()
+    with db.connection() as con:
+        for segment, archive_path, archive_track in archives:
+            for old_value in (
+                segment.get("archive_audio_path"),
+                segment.get("review_archive_audio_path"),
+            ):
+                if old_value and Path(old_value) != archive_path:
+                    stale_paths.add(Path(old_value))
+            con.execute(
+                "UPDATE segments SET archive_audio_path=?, archive_audio_track=? WHERE id=?",
+                (str(archive_path), archive_track, segment["id"]),
+            )
+            con.execute(
+                """UPDATE segment_reviews
+                   SET archive_audio_path=?, archive_audio_track=?, updated_at=?
+                   WHERE segment_id=?""",
+                (str(archive_path), archive_track, timestamp, segment["id"]),
+            )
+    review_root = settings.review_audio_dir.resolve()
+    for stale_path in stale_paths:
+        try:
+            resolved = stale_path.resolve()
+            resolved.relative_to(review_root)
+            resolved.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            # A stale preview is not allowed to make source removal fail after
+            # the new, referenced archive has been committed successfully.
+            pass
 
 
 @app.delete("/api/videos/{video_id}")
 def delete_video(video_id: str):
+    """Remove only the large source file while retaining analytical history.
+
+    Ratings, tag feedback, vectors, chat analysis and reviewed-clip audio are
+    deliberately preserved. This keeps local learning data usable after disk
+    cleanup and avoids the old destructive cascade through ``segments``.
+    """
     video = db.row("SELECT * FROM videos WHERE id=?", (video_id,))
     if not video:
         not_found("Video not found")
     if video["status"] in {"queued", "processing"}:
         raise HTTPException(409, "Wait for the current analysis to finish before deleting this recording.")
+    if video.get("source_removed"):
+        return {"ok": True, "already_removed": True, "archived_segments": 0}
     source = Path(video["path"])
+    source_size_bytes = source.stat().st_size if source.is_file() else int(video.get("source_size_bytes") or 0)
+    reviewed_segments = _segments_requiring_review_audio(video_id)
+    archived: list[tuple[dict, Path, int]] = []
     if source.exists():
         try:
             source.resolve().relative_to(settings.incoming_dir.resolve())
         except ValueError as exc:
             raise HTTPException(400, "This recording is outside ClipFinder's managed incoming folder and will not be deleted.") from exc
         try:
+            available_tracks = audio_track_count(source)
+        except MediaError as exc:
+            raise HTTPException(500, f"Could not inspect source audio before removal: {exc}") from exc
+        if reviewed_segments and available_tracks < 1:
+            raise HTTPException(
+                409,
+                "The source has no audio track, so ClipFinder cannot preserve audio for reviewed moments.",
+            )
+        for segment in reviewed_segments:
+            archive_track = max(1, min(available_tracks, int(segment.get("archive_audio_track") or 1)))
+            destination = _review_audio_archive_path(segment, archive_track)
+            temporary = destination.with_name(
+                f".{destination.stem}.{uuid.uuid4().hex}.tmp.mp3"
+            )
+            try:
+                try:
+                    reviewed_machine = json.loads(segment.get("payload_json") or "{}")
+                except (TypeError, ValueError):
+                    reviewed_machine = {}
+                words = reviewed_machine.get("word_timestamps", []) if isinstance(reviewed_machine, dict) else []
+                if isinstance(words, str):
+                    words = json.loads(words or "[]")
+                pause_ranges = (
+                    pause_trim_ranges(
+                        words,
+                        float(segment["end_seconds"]) - float(segment["start_seconds"]),
+                        float(segment["start_seconds"]),
+                    )
+                    if segment.get("remove_pauses") else None
+                )
+                export_audio_preview(
+                    source, temporary, float(segment["start_seconds"]),
+                    float(segment["end_seconds"]), archive_track, pause_ranges,
+                )
+                os.replace(temporary, destination)
+                archived.append((segment, destination, archive_track))
+            except (MediaError, OSError) as exc:
+                temporary.unlink(missing_ok=True)
+                raise HTTPException(500, f"Could not archive reviewed clip audio before source removal: {exc}") from exc
+
+        # Commit the exact audio snapshots before removing the only source. If
+        # the process is interrupted between these operations, a retry can use
+        # the already recorded archive rather than silently losing review data.
+        _record_review_audio_archives(archived)
+        try:
             source.unlink()
         except OSError as exc:
             raise HTTPException(500, f"Could not delete the source recording: {exc}") from exc
-    segment_ids = [item["id"] for item in db.rows("SELECT id FROM segments WHERE video_id=?", (video_id,))]
+    else:
+        # Handles recovery after an interruption that happened just after the
+        # file was unlinked but after archive paths had already been committed.
+        missing_archives: list[str] = []
+        for segment in reviewed_segments:
+            existing = Path(segment.get("archive_audio_path") or "")
+            if existing.is_file():
+                archived.append((segment, existing, max(1, int(segment.get("archive_audio_track") or 1))))
+            else:
+                missing_archives.append(str(segment["id"]))
+        if missing_archives:
+            raise HTTPException(
+                409,
+                "The source recording is currently unavailable and reviewed moments do not all have "
+                "archived audio. Restore the source file and try again; ClipFinder has not marked it "
+                "as removed.",
+            )
+
     with db.connection() as con:
-        con.execute("DELETE FROM collection_examples WHERE segment_id IN (SELECT id FROM segments WHERE video_id=?)", (video_id,))
-        con.execute("DELETE FROM jobs WHERE video_id=?", (video_id,))
-        con.execute("DELETE FROM segments WHERE video_id=?", (video_id,))
-        con.execute("DELETE FROM videos WHERE id=?", (video_id,))
-    for segment_id in segment_ids:
-        for preview in settings.previews_dir.glob(f"{segment_id}-*"):
+        con.execute(
+            "UPDATE videos SET source_removed=1, source_removed_at=?, source_size_bytes=?, updated_at=? WHERE id=?",
+            (db.now(), source_size_bytes, db.now(), video_id),
+        )
+    for item in db.rows("SELECT id FROM segments WHERE video_id=?", (video_id,)):
+        for preview in settings.previews_dir.glob(f"{item['id']}-*"):
             preview.unlink(missing_ok=True)
-    return {"ok": True}
+    try:
+        cache_result = PipelineCache(settings.pipeline_cache_dir).invalidate_video(video_id)
+    except Exception as exc:
+        # The recording and its durable review history are already safe. Cache
+        # reclamation is best-effort and must not turn source removal into an
+        # apparent failure for the user.
+        diagnostics.log_failure(f"Pipeline cache invalidation skipped: video_id={video_id}", exc)
+    else:
+        if cache_result.reclaimed_bytes:
+            diagnostics.logger().info(
+                "Pipeline cache invalidated: video_id=%s reclaimed_bytes=%s",
+                video_id, cache_result.reclaimed_bytes,
+            )
+    return {
+        "ok": True,
+        "archived_segments": sum(1 for _segment, path, _track in archived if path.is_file()),
+        "source_size_bytes": source_size_bytes,
+    }
 
 
 @app.get("/api/videos/{video_id}/stream")
@@ -1044,28 +2016,81 @@ def job(job_id: str):
     return result or not_found()
 
 
+@app.post("/api/jobs/{job_id}/cancel", status_code=202)
+def cancel_job(job_id: str):
+    with db.connection() as con:
+        result = job_queue.request_cancel(con, job_id)
+    if not result:
+        not_found("Job not found")
+    _sync_video_job(result)
+    _wake_durable_worker()
+    return result
+
+
+@app.post("/api/jobs/{job_id}/pause", status_code=202)
+def pause_job(job_id: str):
+    with db.connection() as con:
+        result = job_queue.request_pause(con, job_id)
+    if not result:
+        not_found("Job not found")
+    _sync_video_job(result)
+    return result
+
+
+@app.post("/api/jobs/{job_id}/resume", status_code=202)
+def resume_job(job_id: str):
+    with db.connection() as con:
+        result = job_queue.resume(con, job_id)
+    if not result:
+        not_found("Job not found")
+    _sync_video_job(result)
+    _wake_durable_worker()
+    return result
+
+
+@app.post("/api/reference-imports/{import_id}/cancel", status_code=202)
+def cancel_reference_import(import_id: str):
+    with db.connection() as con:
+        result = reference_queue.request_cancel(con, import_id)
+    if not result:
+        not_found("Reference import not found")
+    _wake_durable_worker()
+    return result
+
+
 @app.get("/api/videos/{video_id}/segments")
 def video_segments(video_id: str, q: str = "", rating: str = "", tag: str = "", hide_reading: bool = False, show_duplicates: bool = False, sort: str = "suggested_desc"):
     if not db.row("SELECT id FROM videos WHERE id=?", (video_id,)):
         not_found("Video not found")
-    clauses, parameters = ["video_id=?"], [video_id]
+    clauses, parameters = ["s.video_id=?", "s.lifecycle_state='current'"], [video_id]
     if q.strip():
-        clauses.append("transcript LIKE ?")
+        clauses.append("s.transcript LIKE ?")
         parameters.append(f"%{q.strip()}%")
     if rating in {"unrated", "accepted", "rejected"}:
-        clauses.append("rating=?")
+        clauses.append("r.rating=?")
         parameters.append(rating)
-    if tag.strip():
-        # Tags are stored as a JSON array.  Quoting the value keeps the match
-        # exact (e.g. "gniew" does not match part of another tag name).
-        clauses.append("tags LIKE ?")
-        parameters.append(f'%"{tag.strip()}"%')
     if hide_reading:
-        clauses.append("tags NOT LIKE ?")
-        parameters.append('%"reading"%')
-    items = db.rows(f"SELECT * FROM segments WHERE {' AND '.join(clauses)} AND embedding IS NOT NULL", tuple(parameters))
+        # ``reading`` was a legacy duplicate tag.  The likelihood field is the
+        # authoritative signal and works for both older and newer analyses.
+        clauses.append("s.reading_likelihood < ?")
+        parameters.append(0.48)
+    scoped_clauses = " AND ".join(clauses)
+    items = db.rows(
+        f"""SELECT s.*, r.rating, r.review_reason, v.source_removed
+            FROM segments s
+            JOIN videos v ON v.id=s.video_id
+            JOIN segment_reviews r ON r.segment_id=s.id
+            WHERE {scoped_clauses} AND s.embedding IS NOT NULL""",
+        tuple(parameters),
+    )
+    requested_tag = canonical_tag(tag) if tag.strip() else None
+    if requested_tag:
+        items = [
+            item for item in items
+            if requested_tag in canonicalize_tags(json.loads(item.get("tags") or "[]"))
+        ]
     ranked = suppress_duplicate_groups(score_candidates(items, profile=active_profile()), keep_alternatives=show_duplicates)
-    if tag.strip() != "reading":
+    if requested_tag != "format: czytanie":
         ranked = [item for item in ranked if not is_disallowed_reading(item)]
     ranked = filter_profanity(ranked)
     sort_fields = {
@@ -1086,21 +2111,42 @@ def video_chat_summary(video_id: str):
     return chat_summary(video_id)
 
 
+_MAX_CHAT_UPLOAD_BYTES = 50 * 1024 * 1024
+
+
+async def _read_upload_limited(upload: UploadFile, limit: int = _MAX_CHAT_UPLOAD_BYTES) -> bytes:
+    """Read at most ``limit + 1`` bytes so oversized chat files stay bounded."""
+    chunks: list[bytes] = []
+    total = 0
+    while total <= limit:
+        chunk = await upload.read(min(1024 * 1024, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    if total > limit:
+        raise HTTPException(400, f"The chat file is too large (maximum {limit // (1024 * 1024)} MB).")
+    return b"".join(chunks)
+
+
 @app.post("/api/videos/{video_id}/chat")
 async def upload_video_chat(video_id: str, chat_file: UploadFile = File(...), delay_seconds: float = Form(6)):
     if not db.row("SELECT id FROM videos WHERE id=?", (video_id,)):
         not_found("Video not found")
     if not 0 <= delay_seconds <= 60:
         raise HTTPException(400, "Chat delay must be between 0 and 60 seconds.")
-    raw = await chat_file.read()
-    if not raw:
-        raise HTTPException(400, "The chat file is empty.")
-    if len(raw) > 50 * 1024 * 1024:
-        raise HTTPException(400, "The chat file is too large (maximum 50 MB).")
     try:
-        return import_chat(video_id, chat_file.filename or "chat.txt", raw, delay_seconds)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        raw = await _read_upload_limited(chat_file)
+        if not raw:
+            raise HTTPException(400, "The chat file is empty.")
+        try:
+            return await run_in_threadpool(
+                import_chat, video_id, chat_file.filename or "chat.txt", raw, delay_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    finally:
+        await chat_file.close()
 
 
 @app.patch("/api/videos/{video_id}/chat")
@@ -1116,36 +2162,21 @@ def update_video_chat_delay(video_id: str, body: ChatDelayUpdate):
 @app.patch("/api/segments/{segment_id}")
 def rate_segment(segment_id: str, body: RatingUpdate):
     profile = active_profile()
-    with db.connection() as con:
-        segment = con.execute("SELECT * FROM segments WHERE id=?", (segment_id,)).fetchone()
-        if not segment:
+    try:
+        result = set_review(segment_id, body.rating, body.review_reason, profile)
+    except ValueError as exc:
+        if str(exc) == "Segment not found.":
             not_found("Segment not found")
-        reason = " ".join(body.review_reason.split()) if body.rating == "rejected" else ""
-        con.execute("UPDATE segments SET rating=?, review_reason=? WHERE id=?", (body.rating, reason, segment_id))
-        if reason:
-            con.execute("INSERT OR IGNORE INTO rejection_reasons (reason, created_at) VALUES (?, ?)", (reason, db.now()))
-        if body.rating in {"accepted", "rejected"} and segment["embedding"]:
-            updated_segment = dict(segment)
-            updated_segment["rating"] = body.rating
-            updated_segment["review_reason"] = reason
-            timestamp = db.now()
-            con.execute(
-                """INSERT INTO preference_feedback (id, segment_id, profile, decision, review_reason, embedding, features, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(segment_id, profile) DO UPDATE SET decision=excluded.decision, review_reason=excluded.review_reason,
-                   embedding=excluded.embedding, features=excluded.features, updated_at=excluded.updated_at""",
-                (str(uuid.uuid4()), segment_id, profile, body.rating, reason, segment["embedding"],
-                 json.dumps(preference_features(updated_segment), ensure_ascii=False), timestamp, timestamp),
-            )
-        elif body.rating == "unrated":
-            con.execute("DELETE FROM preference_feedback WHERE segment_id=? AND profile=?", (segment_id, profile))
-    return {"ok": True, "review_reason": reason, "profile": profile}
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, **result}
 
 
 @app.patch("/api/segments/{segment_id}/timing")
 def update_segment_timing(segment_id: str, body: SegmentTimingUpdate):
     segment = db.row(
-        "SELECT s.*, v.duration_seconds, v.path, v.transcript_audio_track FROM segments s JOIN videos v ON v.id=s.video_id WHERE s.id=?",
+        """SELECT s.*, v.duration_seconds, v.path, v.transcript_audio_track,
+                  v.analysis_mode
+           FROM segments s JOIN videos v ON v.id=s.video_id WHERE s.id=?""",
         (segment_id,),
     )
     if not segment:
@@ -1159,24 +2190,80 @@ def update_segment_timing(segment_id: str, body: SegmentTimingUpdate):
         vector = embed_texts([transcript or "bez wypowiedzi"])[0]
         keywords = [word.strip(".,!?;:").lower() for word in transcript.split() if len(word.strip(".,!?;:")) >= 6][:12]
         tags = infer_tags(transcript, vector)
-        quality_score, quality_signals, reading_likelihood = assess_clip_quality(transcript, words, body.start_seconds, body.end_seconds, tags)
-        logical_sense_score = assess_logical_sense(transcript)
-        if reading_likelihood >= 0.48:
-            tags = list(dict.fromkeys(tags + ["reading"]))
-        tags = enrich_tags(tags, logical_sense_score=logical_sense_score, reading_likelihood=reading_likelihood)
-        short_potential_score, short_potential_signals = assess_short_potential(
-            transcript, body.start_seconds, body.end_seconds, tags,
-            quality_score=quality_score, reading_likelihood=reading_likelihood,
-            logical_sense_score=logical_sense_score,
+        before, after = _segment_context(
+            segment["video_id"], segment_id, body.start_seconds, body.end_seconds,
         )
+        state = {
+            **segment,
+            "start_seconds": body.start_seconds,
+            "end_seconds": body.end_seconds,
+            "transcript": transcript,
+            "word_timestamps": words,
+            "tags": tags,
+            "context_before": before,
+            "context_after": after,
+            "analysis_mode": segment.get("analysis_mode") or "default",
+            # Range-dependent evidence is invalid until the next full media
+            # analysis. Never keep evidence sampled for the previous range.
+            "vision_score": 0,
+            "visual_reading_likelihood": 0.0,
+            "boundary_signals": [],
+            "audio_event_score": 0,
+            "game_reaction_score": 0,
+            "voice_expression_score": 0,
+            "chat_reaction_score": 0,
+            "chat_joy_score": 0,
+            "chat_question_match_score": 0,
+            "chat_question_text": "",
+        }
+        derived = recompute_segment_features(
+            state,
+            {
+                "transcript", "start_seconds", "end_seconds",
+                "word_timestamps", "tags", "context_before", "context_after",
+            },
+        ).updates
     except Exception as exc:
         raise HTTPException(500, f"Unable to update captions for the new range: {exc}") from exc
-    with db.connection() as con:
-        con.execute(
-            "UPDATE segments SET start_seconds=?, end_seconds=?, transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, short_potential_score=?, short_potential_signals=?, logical_sense_score=?, context_score=-1, self_contained_score=-1, context_before='', context_after='', reading_likelihood=?, audio_event_score=0, game_reaction_score=0, voice_expression_score=0, moment_reaction_score=0, moment_reaction_stage='' WHERE id=?",
-            (body.start_seconds, body.end_seconds, transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), short_potential_score, json.dumps(short_potential_signals, ensure_ascii=False), logical_sense_score, reading_likelihood, segment_id),
-        )
-    apply_chat_reactions(segment["video_id"])
+    record_manual_revision_with_updates(
+        segment_id,
+        _encode_feature_updates({
+            **derived,
+            "start_seconds": body.start_seconds,
+            "end_seconds": body.end_seconds,
+            "transcript": transcript,
+            "keywords": keywords,
+            "tags": derived.get("tags", tags),
+            "word_timestamps": words,
+            "embedding": vector,
+            "context_before": before,
+            "context_after": after,
+            "boundary_signals": [],
+            "vision_score": 0,
+            "visual_reading_likelihood": 0.0,
+            "audio_event_score": 0,
+            "game_reaction_score": 0,
+            "voice_expression_score": 0,
+            "chat_reaction_score": 0,
+            "chat_joy_score": 0,
+            "chat_message_count": 0,
+            "chat_unique_authors": 0,
+            "chat_surge": 0.0,
+            "chat_messages": [],
+            "chat_question_match_score": 0,
+            "chat_question_text": "",
+            "duplicate_group": "",
+        }),
+        "timing_edit",
+    )
+    _refresh_neighbour_contexts(
+        segment["video_id"],
+        segment_id,
+        min(float(segment["start_seconds"]), float(body.start_seconds)),
+        max(float(segment["end_seconds"]), float(body.end_seconds)),
+    )
+    apply_chat_reactions(segment["video_id"], [segment_id])
+    _refresh_duplicate_groups(segment["video_id"])
     for preview in settings.previews_dir.glob(f"{segment_id}-*"):
         preview.unlink(missing_ok=True)
     updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
@@ -1185,7 +2272,11 @@ def update_segment_timing(segment_id: str, body: SegmentTimingUpdate):
 
 @app.patch("/api/segments/{segment_id}/transcript")
 def update_segment_transcript(segment_id: str, body: SegmentTranscriptUpdate):
-    segment = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
+    segment = db.row(
+        """SELECT s.*, v.analysis_mode FROM segments s
+           JOIN videos v ON v.id=s.video_id WHERE s.id=?""",
+        (segment_id,),
+    )
     if not segment:
         not_found("Segment not found")
     transcript = " ".join(body.transcript.split())
@@ -1193,39 +2284,44 @@ def update_segment_transcript(segment_id: str, body: SegmentTranscriptUpdate):
     keywords = [word.strip(".,!?;:").lower() for word in transcript.split() if len(word.strip(".,!?;:")) >= 6][:12]
     tags = infer_tags(transcript, vector)
     words = approximate_word_timestamps(transcript, segment["start_seconds"], segment["end_seconds"])
-    quality_score, quality_signals, reading_likelihood = assess_clip_quality(transcript, words, segment["start_seconds"], segment["end_seconds"], tags)
-    logical_sense_score = assess_logical_sense(transcript)
-    self_contained_score = assess_self_containment(transcript, segment.get("context_before") or "", segment.get("context_after") or "")
-    if reading_likelihood >= 0.48:
-        tags = list(dict.fromkeys(tags + ["reading"]))
-    tags = enrich_tags(
-        tags,
-        logical_sense_score=logical_sense_score,
-        reading_likelihood=reading_likelihood,
-        game_reaction_score=int(segment.get("game_reaction_score") or 0),
-        voice_expression_score=int(segment.get("voice_expression_score") or 0),
-        chat_reaction_score=int(segment.get("chat_reaction_score") or 0),
-        chat_joy_score=int(segment.get("chat_joy_score") or 0),
-        vision_score=int(segment.get("vision_score") or 0),
-        context_score=int(segment.get("context_score") or -1),
-        self_contained_score=self_contained_score,
-        moment_reaction_score=int(segment.get("moment_reaction_score") or 0),
-        moment_reaction_stage=segment.get("moment_reaction_stage") or "",
+    state = {
+        **segment,
+        "transcript": transcript,
+        "word_timestamps": words,
+        "tags": tags,
+        "analysis_mode": segment.get("analysis_mode") or "default",
+        # A former Q&A match describes the old wording. Extended scores are
+        # rebuilt by the graph from the corrected transcript and context.
+        "chat_question_match_score": 0,
+        "chat_question_text": "",
+    }
+    derived = recompute_segment_features(
+        state,
+        {"transcript", "word_timestamps", "tags"},
+    ).updates
+    record_manual_revision_with_updates(
+        segment_id,
+        _encode_feature_updates({
+            **derived,
+            "transcript": transcript,
+            "keywords": keywords,
+            "tags": derived.get("tags", tags),
+            "word_timestamps": words,
+            "embedding": vector,
+            "chat_question_match_score": 0,
+            "chat_question_text": "",
+            "duplicate_group": "",
+        }),
+        "transcript_edit",
     )
-    short_potential_score, short_potential_signals = assess_short_potential(
-        transcript, segment["start_seconds"], segment["end_seconds"], tags,
-        quality_score=quality_score, reading_likelihood=reading_likelihood,
-        logical_sense_score=logical_sense_score, context_score=int(segment.get("context_score") or -1),
-        self_contained_score=self_contained_score, extended_completeness_score=int(segment.get("extended_completeness_score") or -1),
-        game_reaction_score=int(segment.get("game_reaction_score") or 0), voice_expression_score=int(segment.get("voice_expression_score") or 0),
-        moment_reaction_score=int(segment.get("moment_reaction_score") or 0), chat_reaction_score=int(segment.get("chat_reaction_score") or 0),
-        chat_joy_score=int(segment.get("chat_joy_score") or 0),
+    _refresh_neighbour_contexts(
+        segment["video_id"],
+        segment_id,
+        float(segment["start_seconds"]),
+        float(segment["end_seconds"]),
     )
-    with db.connection() as con:
-        con.execute(
-            "UPDATE segments SET transcript=?, keywords=?, tags=?, word_timestamps=?, embedding=?, quality_score=?, quality_signals=?, short_potential_score=?, short_potential_signals=?, logical_sense_score=?, self_contained_score=?, reading_likelihood=? WHERE id=?",
-            (transcript, json.dumps(keywords, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), json.dumps(words, ensure_ascii=False), json.dumps(vector), quality_score, json.dumps(quality_signals), short_potential_score, json.dumps(short_potential_signals, ensure_ascii=False), logical_sense_score, self_contained_score, reading_likelihood, segment_id),
-        )
+    apply_chat_reactions(segment["video_id"], [segment_id])
+    _refresh_duplicate_groups(segment["video_id"])
     for preview in settings.previews_dir.glob(f"{segment_id}-*"):
         preview.unlink(missing_ok=True)
     updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
@@ -1237,7 +2333,12 @@ def update_segment_censor(segment_id: str, body: SegmentCensorUpdate):
     with db.connection() as con:
         if not con.execute("SELECT id FROM segments WHERE id=?", (segment_id,)).fetchone():
             not_found("Segment not found")
-        con.execute("UPDATE segments SET censor_profanity=? WHERE id=?", (int(body.censor_profanity), segment_id))
+        value = int(body.censor_profanity)
+        con.execute(
+            "UPDATE segment_reviews SET censor_profanity=?, updated_at=? WHERE segment_id=?",
+            (value, db.now(), segment_id),
+        )
+        con.execute("UPDATE segments SET censor_profanity=? WHERE id=?", (value, segment_id))
     updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
     return db.serialize_segment(updated)
 
@@ -1245,31 +2346,32 @@ def update_segment_censor(segment_id: str, body: SegmentCensorUpdate):
 @app.patch("/api/segments/{segment_id}/pause-trim")
 def update_segment_pause_trim(segment_id: str, body: SegmentPauseTrimUpdate):
     with db.connection() as con:
-        if not con.execute("SELECT id FROM segments WHERE id=?", (segment_id,)).fetchone():
+        segment = con.execute(
+            "SELECT s.id, v.path FROM segments s JOIN videos v ON v.id=s.video_id WHERE s.id=?",
+            (segment_id,),
+        ).fetchone()
+        if not segment:
             not_found("Segment not found")
-        con.execute("UPDATE segments SET remove_pauses=? WHERE id=?", (int(body.remove_pauses), segment_id))
+        if not Path(segment["path"]).is_file():
+            raise HTTPException(409, "Pause removal cannot be changed after the source recording is removed. The archived audio keeps the setting used during removal.")
+        value = int(body.remove_pauses)
+        con.execute(
+            "UPDATE segment_reviews SET remove_pauses=?, updated_at=? WHERE segment_id=?",
+            (value, db.now(), segment_id),
+        )
+        con.execute("UPDATE segments SET remove_pauses=? WHERE id=?", (value, segment_id))
     updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
     return db.serialize_segment(updated)
 
 
 @app.patch("/api/segments/{segment_id}/tag-feedback")
 def update_segment_tag_feedback(segment_id: str, body: TagFeedbackUpdate):
-    tag = " ".join(body.tag.split())
-    with db.connection() as con:
-        segment = con.execute("SELECT id, tags FROM segments WHERE id=?", (segment_id,)).fetchone()
-        if not segment:
+    try:
+        set_tag_verdict(segment_id, body.tag, body.verdict)
+    except ValueError as exc:
+        if str(exc) == "Segment not found.":
             not_found("Segment not found")
-        tags = json.loads(segment["tags"] or "[]")
-        if tag not in tags:
-            raise HTTPException(400, "This tag is no longer assigned to the clip.")
-        if body.verdict == "unmarked":
-            con.execute("DELETE FROM tag_feedback WHERE segment_id=? AND tag=?", (segment_id, tag))
-        else:
-            con.execute(
-                """INSERT INTO tag_feedback (segment_id, tag, verdict, updated_at) VALUES (?, ?, ?, ?)
-                   ON CONFLICT(segment_id, tag) DO UPDATE SET verdict=excluded.verdict, updated_at=excluded.updated_at""",
-                (segment_id, tag, body.verdict, db.now()),
-            )
+        raise HTTPException(400, str(exc)) from exc
     updated = db.row("SELECT * FROM segments WHERE id=?", (segment_id,))
     return db.serialize_segment(updated)
 
@@ -1299,12 +2401,35 @@ def _available_export_path(stem: str) -> Path:
     return candidate
 
 
-def _export_segment(segment_id: str, lead_in_seconds: float, lead_out_seconds: float, captions_preset: str = "none", caption_position: str = "bottom", base_color: str = "#FFFFFF", active_color: str = "#FFFF00", layout: str = "original", audio_track: int = 1, filename: str = "", outline_enabled: bool = True, outline_color: str = "#000000", glow_enabled: bool = False, opacity: int = 100, font_family: str = "Inter", camera_x: float | None = None, camera_y: float | None = None, camera_width: float | None = None, camera_height: float | None = None, game_x: float | None = None, game_y: float | None = None, game_width: float | None = None, game_height: float | None = None):
-    segment = db.row("SELECT s.*, v.path, v.original_name FROM segments s JOIN videos v ON v.id=s.video_id WHERE s.id=?", (segment_id,))
+def _export_segment(*args, **kwargs):
+    # Filename selection, ASS generation and ffmpeg output must be one atomic
+    # operation. Two simultaneous clicks previously selected the same output
+    # path and reused the same temporary subtitle file.
+    with _media_output_lock:
+        return _export_segment_locked(*args, **kwargs)
+
+
+def _export_segment_locked(segment_id: str, lead_in_seconds: float, lead_out_seconds: float, captions_preset: str = "none", caption_position: str = "bottom", base_color: str = "#FFFFFF", active_color: str = "#FFFF00", layout: str = "original", audio_track: int = 1, filename: str = "", outline_enabled: bool = True, outline_color: str = "#000000", glow_enabled: bool = False, opacity: int = 100, font_family: str = "Inter", camera_x: float | None = None, camera_y: float | None = None, camera_width: float | None = None, camera_height: float | None = None, game_x: float | None = None, game_y: float | None = None, game_width: float | None = None, game_height: float | None = None):
+    segment = db.row(
+        """SELECT s.*, r.rating, r.review_reason, r.censor_profanity,
+                  r.remove_pauses, sr.id AS current_revision_id,
+                  r.reviewed_revision_id, v.path, v.original_name
+           FROM segments s
+           JOIN videos v ON v.id=s.video_id
+           JOIN segment_reviews r ON r.segment_id=s.id
+           JOIN segment_revisions sr
+             ON sr.segment_id=s.id AND sr.revision_number=s.revision_number
+           WHERE s.id=?""",
+        (segment_id,),
+    )
     if not segment:
         not_found("Segment not found")
     if segment["rating"] != "accepted":
         raise HTTPException(409, "Approve this clip before exporting MP4.")
+    if segment.get("reviewed_revision_id") != segment.get("current_revision_id"):
+        raise HTTPException(409, "This clip changed during reanalysis. Review and approve the current version before exporting MP4.")
+    if not Path(segment["path"]).is_file():
+        raise HTTPException(409, "The source video was removed. Analysis data and archived review audio remain available, but MP4 export is no longer possible.")
     start = max(0, segment["start_seconds"] - min(10, max(0, lead_in_seconds)))
     end = segment["end_seconds"] + min(10, max(0, lead_out_seconds))
     if captions_preset not in {"none", "clean", "highlight", "minimal", "boxed_pop", "neon_gaming", "cinematic", "karaoke_punch", "minimal_center"}:
@@ -1356,6 +2481,7 @@ def _export_segment(segment_id: str, lead_in_seconds: float, lead_out_seconds: f
             write_caption_ass(captions_path, segment["transcript"], output_duration, captions_preset, word_timestamps, start, caption_position, base_color, active_color, censor_profanity, outline_enabled, outline_color, glow_enabled, opacity, font_family)
         export_clip(Path(segment["path"]), destination, start, end, captions_path, layout, audio_track, word_timestamps, segment["transcript"], censor_profanity, camera_rect, game_rect, pause_ranges)
     except MediaError as exc:
+        destination.unlink(missing_ok=True)
         raise HTTPException(500, f"Unable to export clip: {exc}") from exc
     finally:
         if captions_path:
@@ -1363,30 +2489,59 @@ def _export_segment(segment_id: str, lead_in_seconds: float, lead_out_seconds: f
     return FileResponse(destination, media_type="video/mp4", filename=destination.name)
 
 
-@app.get("/api/segments/{segment_id}/audio-preview")
-def audio_preview(segment_id: str, audio_track: int = 1, remove_pauses: bool = False):
-    segment = db.row("SELECT s.*, v.path FROM segments s JOIN videos v ON v.id=s.video_id WHERE s.id=?", (segment_id,))
+def _resolve_audio_preview(segment_id: str, audio_track: int, remove_pauses: bool) -> tuple[dict, Path | None, Path | None]:
+    segment = db.row("SELECT s.*, v.path, v.source_removed FROM segments s JOIN videos v ON v.id=s.video_id WHERE s.id=?", (segment_id,))
     if not segment:
         not_found("Segment not found")
     if audio_track not in {1, 2, 3, 4}:
         raise HTTPException(400, "Audio track must be between 1 and 4.")
     source = Path(segment["path"])
     if not source.is_file():
-        raise HTTPException(404, "The original recording is no longer available.")
+        archive = Path(segment.get("archive_audio_path") or "")
+        if archive.is_file():
+            archived_track = int(segment.get("archive_audio_track") or 1)
+            if audio_track != archived_track:
+                raise HTTPException(400, f"Only archived track {archived_track} is available after source removal.")
+            if bool(remove_pauses) != bool(segment.get("remove_pauses")):
+                raise HTTPException(409, "Archived audio is available only with the pause-removal setting saved when the source was removed.")
+            return segment, None, archive
+        raise HTTPException(404, "The original recording was removed and this clip has no archived audio. Analysis data and reviews are still retained.")
     try:
         available_tracks = audio_track_count(source)
     except MediaError as exc:
         raise HTTPException(500, f"Unable to inspect audio tracks: {exc}") from exc
     if audio_track > available_tracks:
         raise HTTPException(400, f"Track {audio_track} does not exist in this recording. Available audio tracks: {available_tracks}.")
+    return segment, source, None
+
+
+@app.get("/api/segments/{segment_id}/audio-preview/check")
+def check_audio_preview(segment_id: str, audio_track: int = 1, remove_pauses: bool = False):
+    segment, source, archive = _resolve_audio_preview(segment_id, audio_track, remove_pauses)
+    return {
+        "status": "ok",
+        "audio_track": audio_track,
+        "remove_pauses": bool(remove_pauses),
+        "archived": archive is not None,
+        "duration_seconds": max(0.0, float(segment["end_seconds"]) - float(segment["start_seconds"])),
+    }
+
+
+@app.get("/api/segments/{segment_id}/audio-preview")
+def audio_preview(segment_id: str, audio_track: int = 1, remove_pauses: bool = False):
+    segment, source, archive = _resolve_audio_preview(segment_id, audio_track, remove_pauses)
+    if archive is not None:
+        return FileResponse(archive, media_type="audio/mpeg", filename=archive.name)
+    assert source is not None
     destination = settings.previews_dir / f"{segment_id}-track{audio_track}{'-dynamic' if remove_pauses else ''}.mp3"
-    if not destination.is_file():
-        try:
-            words = json.loads(segment.get("word_timestamps") or "[]")
-            pause_ranges = pause_trim_ranges(words, float(segment["end_seconds"]) - float(segment["start_seconds"]), float(segment["start_seconds"])) if remove_pauses else None
-            export_audio_preview(source, destination, segment["start_seconds"], segment["end_seconds"], audio_track, pause_ranges)
-        except MediaError as exc:
-            raise HTTPException(500, f"Unable to prepare audio preview: {exc}") from exc
+    with _media_output_lock:
+        if not destination.is_file():
+            try:
+                words = json.loads(segment.get("word_timestamps") or "[]")
+                pause_ranges = pause_trim_ranges(words, float(segment["end_seconds"]) - float(segment["start_seconds"]), float(segment["start_seconds"])) if remove_pauses else None
+                export_audio_preview(source, destination, segment["start_seconds"], segment["end_seconds"], audio_track, pause_ranges)
+            except MediaError as exc:
+                raise HTTPException(500, f"Unable to prepare audio preview: {exc}") from exc
     return FileResponse(destination, media_type="audio/mpeg", filename=destination.name)
 
 
@@ -1565,9 +2720,12 @@ def delete_discovery_pattern_set(pattern_set_id: str):
 def top_clips(video_id: str, limit: int = 10, unrated_only: bool = False):
     if not db.row("SELECT id FROM videos WHERE id=?", (video_id,)):
         not_found("Video not found")
-    query = "SELECT * FROM segments WHERE video_id=? AND embedding IS NOT NULL AND rating != 'rejected'"
+    query = """SELECT s.*, r.rating, r.review_reason
+               FROM segments s JOIN segment_reviews r ON r.segment_id=s.id
+               WHERE s.video_id=? AND s.lifecycle_state='current'
+                 AND s.embedding IS NOT NULL AND r.rating != 'rejected'"""
     if unrated_only:
-        query += " AND rating='unrated'"
+        query += " AND r.rating='unrated'"
     candidates = db.rows(query, (video_id,))
     ranked = score_candidates(candidates, profile=active_profile())
     ranked = [item for item in ranked if not is_disallowed_reading(item)]
@@ -1677,6 +2835,11 @@ def delete_collection(collection_id: str):
     collection = db.row("SELECT id, name FROM collections WHERE id=?", (collection_id,))
     if not collection:
         not_found("Collection not found")
+    if db.row(
+        "SELECT id FROM reference_imports WHERE collection_id=? AND state IN ('queued', 'running') LIMIT 1",
+        (collection_id,),
+    ):
+        raise HTTPException(409, "Cancel or finish the active reference import before deleting this collection.")
     remote_sources = db.rows("SELECT source_path FROM reference_url_sources WHERE collection_id=?", (collection_id,))
     with db.connection() as con:
         # Older databases may have been created before foreign keys were
@@ -1707,20 +2870,51 @@ def add_example(collection_id: str, body: ExampleCreate):
             not_found("Collection not found")
         if not con.execute("SELECT id FROM segments WHERE id=?", (body.segment_id,)).fetchone():
             not_found("Segment not found")
+        segment = con.execute(
+            """SELECT video_id, revision_number, start_seconds, end_seconds, transcript, embedding
+               FROM segments WHERE id=?""",
+            (body.segment_id,),
+        ).fetchone()
         con.execute(
-            "INSERT OR IGNORE INTO collection_examples (collection_id, segment_id, created_at) VALUES (?, ?, ?)",
-            (collection_id, body.segment_id, db.now()),
+            """INSERT INTO collection_examples
+               (collection_id, segment_id, revision_number, snapshot_video_id,
+                snapshot_start_seconds, snapshot_end_seconds, snapshot_transcript,
+                snapshot_embedding, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(collection_id, segment_id) DO NOTHING""",
+            (
+                collection_id, body.segment_id, int(segment["revision_number"] or 1),
+                segment["video_id"], segment["start_seconds"], segment["end_seconds"],
+                segment["transcript"], segment["embedding"], db.now(),
+            ),
         )
     return {"ok": True}
 
 
 @app.get("/api/collections/{collection_id}/imports")
 def reference_imports(collection_id: str):
-    return db.rows("SELECT * FROM reference_imports WHERE collection_id=? ORDER BY created_at DESC LIMIT 10", (collection_id,))
+    # Always expose active work so an older queued/running import cannot fall
+    # outside the recent-history limit and disappear together with its cancel
+    # button.
+    return db.rows(
+        """SELECT * FROM reference_imports current
+           WHERE current.collection_id=?
+             AND (
+                 current.state IN ('queued', 'running')
+                 OR current.id IN (
+                     SELECT recent.id FROM reference_imports recent
+                     WHERE recent.collection_id=?
+                     ORDER BY recent.created_at DESC, recent.id DESC LIMIT 10
+                 )
+             )
+           ORDER BY CASE WHEN current.state IN ('queued', 'running') THEN 0 ELSE 1 END,
+                    current.created_at DESC, current.id DESC""",
+        (collection_id, collection_id),
+    )
 
 
 @app.post("/api/collections/{collection_id}/imports", status_code=202)
-def import_references(collection_id: str, body: ReferenceFolderImport, background_tasks: BackgroundTasks):
+def import_references(collection_id: str, body: ReferenceFolderImport):
     if not db.row("SELECT id FROM collections WHERE id=?", (collection_id,)):
         not_found("Collection not found")
     folder = Path(body.folder_path).expanduser()
@@ -1736,48 +2930,60 @@ def import_references(collection_id: str, body: ReferenceFolderImport, backgroun
                ON CONFLICT(collection_id, folder_path) DO UPDATE SET include_subfolders=excluded.include_subfolders, updated_at=excluded.updated_at""",
             (source_id, collection_id, str(folder.resolve()), int(body.include_subfolders), timestamp, timestamp),
         )
-    import_id = queue_reference_import(collection_id, str(folder), body.include_subfolders)
-    background_tasks.add_task(run_reference_import, collection_id, import_id, str(folder), body.include_subfolders)
+    import_id = queue_reference_import(collection_id, str(folder.resolve()), body.include_subfolders, "folder")
+    _wake_durable_worker()
     return {"import_id": import_id, "source_id": source_id}
 
 
 @app.post("/api/collections/{collection_id}/imports/from-url", status_code=202)
-def import_reference_url(collection_id: str, body: ReferenceUrlImport, background_tasks: BackgroundTasks):
+def import_reference_url(collection_id: str, body: ReferenceUrlImport):
     if not db.row("SELECT id FROM collections WHERE id=?", (collection_id,)):
         not_found("Collection not found")
     source_url = _supported_reference_url(body.source_url)
-    import_id = queue_reference_import(collection_id, source_url, False)
-    background_tasks.add_task(run_reference_url_import, collection_id, import_id, source_url)
+    import_id = queue_reference_import(collection_id, source_url, False, "url")
+    _wake_durable_worker()
     return {"import_id": import_id}
 
 
-def queue_reference_import(collection_id: str, folder_path: str, include_subfolders: bool) -> str:
+def queue_reference_import(
+    collection_id: str,
+    folder_path: str,
+    include_subfolders: bool,
+    kind: str = "folder",
+) -> str:
     import_id, timestamp = str(uuid.uuid4()), db.now()
     with db.connection() as con:
-        con.execute(
-            """INSERT INTO reference_imports (id, collection_id, folder_path, state, progress, message, created_at, updated_at)
-               VALUES (?, ?, ?, 'queued', 0, 'Queued', ?, ?)""",
-            (import_id, collection_id, folder_path, timestamp, timestamp),
+        item = reference_queue.enqueue(
+            con,
+            collection_id=collection_id,
+            kind=kind,
+            source=folder_path,
+            include_subfolders=include_subfolders,
+            import_id=import_id,
+            now=timestamp,
         )
-    return import_id
+    return str(item["id"])
 
 
 @app.post("/api/reference-sources/{source_id}/imports", status_code=202)
-def reimport_reference_source(source_id: str, background_tasks: BackgroundTasks):
+def reimport_reference_source(source_id: str):
     source = db.row("SELECT * FROM reference_sources WHERE id=?", (source_id,))
     if not source:
         not_found("Reference source not found")
     if not Path(source["folder_path"]).is_dir():
         raise HTTPException(400, "Saved reference folder is no longer available.")
-    import_id = queue_reference_import(source["collection_id"], source["folder_path"], bool(source["include_subfolders"]))
-    background_tasks.add_task(run_reference_import, source["collection_id"], import_id, source["folder_path"], bool(source["include_subfolders"]))
+    import_id = queue_reference_import(
+        source["collection_id"], source["folder_path"], bool(source["include_subfolders"]), "folder",
+    )
+    _wake_durable_worker()
     return {"import_id": import_id}
 
 
 def collection_embeddings(collection_id: str) -> list[list[float]]:
     rows = db.rows(
-        """SELECT s.embedding AS embedding FROM segments s JOIN collection_examples e ON e.segment_id=s.id
-           WHERE e.collection_id=? AND s.embedding IS NOT NULL
+        """SELECT COALESCE(e.snapshot_embedding, s.embedding) AS embedding
+             FROM collection_examples e JOIN segments s ON e.segment_id=s.id
+           WHERE e.collection_id=? AND COALESCE(e.snapshot_embedding, s.embedding) IS NOT NULL
            UNION ALL
            SELECT embedding FROM external_examples WHERE collection_id=?""",
         (collection_id, collection_id),
@@ -1791,8 +2997,10 @@ def suggest_prompt_from_collection(collection_id: str):
     if not collection:
         not_found("Collection not found")
     references = db.rows(
-        """SELECT s.transcript AS transcript, s.embedding AS embedding FROM segments s JOIN collection_examples e ON e.segment_id=s.id
-           WHERE e.collection_id=? AND s.embedding IS NOT NULL
+        """SELECT COALESCE(NULLIF(e.snapshot_transcript, ''), s.transcript) AS transcript,
+                  COALESCE(e.snapshot_embedding, s.embedding) AS embedding
+             FROM collection_examples e JOIN segments s ON e.segment_id=s.id
+           WHERE e.collection_id=? AND COALESCE(e.snapshot_embedding, s.embedding) IS NOT NULL
            UNION ALL
            SELECT transcript, embedding FROM external_examples WHERE collection_id=?""",
         (collection_id, collection_id),
@@ -1805,7 +3013,13 @@ def suggest_prompt_from_collection(collection_id: str):
 
 
 def ranked_candidates(video_id: str, reference: list[float], limit: int) -> list[dict]:
-    candidates = db.rows("SELECT * FROM segments WHERE video_id=? AND embedding IS NOT NULL AND rating != 'rejected'", (video_id,))
+    candidates = db.rows(
+        """SELECT s.*, r.rating, r.review_reason
+           FROM segments s JOIN segment_reviews r ON r.segment_id=s.id
+           WHERE s.video_id=? AND s.lifecycle_state='current'
+             AND s.embedding IS NOT NULL AND r.rating != 'rejected'""",
+        (video_id,),
+    )
     if not candidates:
         raise HTTPException(400, "Selected video does not have completed analysis.")
     ranked = suppress_duplicate_groups(score_candidates(candidates, reference=reference, profile=active_profile()))

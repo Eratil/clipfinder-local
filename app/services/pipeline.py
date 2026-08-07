@@ -1,4 +1,7 @@
 import json
+import hashlib
+import importlib.metadata
+import threading
 import unicodedata
 import uuid
 import wave
@@ -9,17 +12,44 @@ import numpy as np
 
 from app import database as db
 from app.config import settings
-from app.services.embeddings import embed_texts
+from app.services.embeddings import EMBEDDING_MODEL_NAME, EMBEDDING_MODEL_REVISION, embed_texts
 from app.services.cuda_runtime import cuda12_runtime_error
 from app.services import diagnostics
 from app.services.discovery import assign_duplicate_groups
+from app.services.feature_graph import recompute_segment_features
 from app.services.media import audio_track_count, duration_seconds, extract_audio, extract_audio_range
+from app.services.pipeline_cache import PipelineCache, canonical_json, fingerprint_source_file
+from app.services.model_catalog import whisper_identity, whisper_model_source
 from app.services.scenes import detect_boundaries
-from app.services.tagging import GAME_REACTION_TAG, assess_clip_quality, assess_context, assess_extended_completeness, assess_logical_sense, assess_self_containment, assess_short_potential, enrich_tags, infer_tags, score_moment_reaction
+from app.services.tagging import infer_tags
 from app.services.chat import apply_chat_reactions
+from app.services.analysis_store import (
+    persist_analysis_results,
+    start_analysis_run,
+    update_analysis_run_inputs,
+)
 
 Progress = Callable[[int, str], None]
-_transcription_models: dict[tuple[str, str, str], object] = {}
+_transcription_models: dict[tuple[str, str, str, str], object] = {}
+_failed_transcription_runtimes: set[tuple[str, str, str, str]] = set()
+_transcription_lock = threading.RLock()
+
+TRANSCRIPTION_CACHE_VERSION = "1"
+MEDIA_METADATA_CACHE_VERSION = "1"
+SCENE_BOUNDARY_CACHE_VERSION = "1"
+AUDIO_FEATURE_CACHE_VERSION = "1"
+EMBEDDING_CACHE_VERSION = "1"
+VISUAL_INTEREST_CACHE_VERSION = "1"
+VISUAL_READING_CACHE_VERSION = "1"
+REFERENCE_AUDIO_TRACK = 1
+REFERENCE_AUDIO_SAMPLE_RATE = 16000
+
+
+def _distribution_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def transcription_runtime() -> tuple[str, str, str | None]:
@@ -36,6 +66,35 @@ def transcription_runtime() -> tuple[str, str, str | None]:
     return "cuda", settings.whisper_compute_type, None
 
 
+def resolved_transcription_runtime(model_name: str) -> tuple[str, str, str | None]:
+    """Return the runtime this process can currently use for one model."""
+    device, compute_type, fallback_reason = transcription_runtime()
+    model_id, revision = whisper_identity(model_name)
+    if (model_id, revision or "custom", device, compute_type) in _failed_transcription_runtimes:
+        return "cpu", "int8", "CUDA model initialization failed earlier in this process"
+    return device, compute_type, fallback_reason
+
+
+def transcription_cache_parameters(model_name: str, device: str, compute_type: str) -> dict:
+    model_id, revision = whisper_identity(model_name)
+    return {
+        "stage_version": TRANSCRIPTION_CACHE_VERSION,
+        "model": model_name,
+        "model_id": model_id,
+        "model_revision": revision or "custom",
+        "device": device,
+        "compute_type": compute_type,
+        "faster_whisper_version": _distribution_version("faster-whisper"),
+        "ctranslate2_version": _distribution_version("ctranslate2"),
+        "vad_filter": True,
+        "word_timestamps": True,
+        "language": "auto",
+        "audio_extract_contract": "ffmpeg-pcm-s16le-mono-v1",
+        "sample_rate": 16000,
+        "channels": 1,
+    }
+
+
 def transcribe(
     audio_path: Path,
     progress: Progress,
@@ -43,51 +102,111 @@ def transcribe(
     progress_start: int = 18,
     progress_end: int = 62,
     model_name: str | None = None,
+    runtime_info: dict | None = None,
+) -> list[dict]:
+    # Whisper model creation and the returned segment iterator both touch the
+    # same native CPU/GPU runtime. Serialize the whole operation: keeping only
+    # construction under a lock would still allow concurrent iteration over
+    # one model instance and can lead to native crashes or GPU OOM errors.
+    with _transcription_lock:
+        return _transcribe_locked(
+            audio_path,
+            progress,
+            duration,
+            progress_start,
+            progress_end,
+            model_name,
+            runtime_info,
+        )
+
+
+def _transcribe_locked(
+    audio_path: Path,
+    progress: Progress,
+    duration: float | None,
+    progress_start: int,
+    progress_end: int,
+    model_name: str | None,
+    runtime_info: dict | None,
 ) -> list[dict]:
     selected_model = model_name or settings.whisper_model
-    device, compute_type, fallback_reason = transcription_runtime()
-    model_key = (selected_model, device, compute_type)
-    if model_key not in _transcription_models:
-        from faster_whisper import WhisperModel
-        if fallback_reason:
-            progress(progress_start, "CUDA unavailable - switching transcription to CPU")
-        else:
-            progress(progress_start, f"Loading {selected_model} transcription model on {device.upper()}")
-        try:
-            _transcription_models[model_key] = WhisperModel(selected_model, device=device, compute_type=compute_type)
-        except Exception as exc:
-            if device != "cuda":
-                raise
-            # A driver/runtime can look valid but still fail when CTranslate2
-            # creates the model. Preserve analysis by retrying on CPU.
-            diagnostics.log_failure(
-                f"GPU transcription model failed: model={selected_model} compute_type={compute_type}",
-                exc,
-            )
-            detail = " ".join(str(exc).split())[:180]
-            progress(
-                progress_start,
-                f"GPU model failed{(': ' + detail) if detail else ''} - retrying transcription on CPU",
-            )
-            device, compute_type = "cpu", "int8"
-            model_key = (selected_model, device, compute_type)
-            _transcription_models[model_key] = WhisperModel(selected_model, device=device, compute_type=compute_type)
-    model = _transcription_models[model_key]
-    parts, _info = model.transcribe(str(audio_path), vad_filter=True, word_timestamps=True)
-    result: list[dict] = []
+    device, compute_type, fallback_reason = resolved_transcription_runtime(selected_model)
+    model_id, model_revision = whisper_identity(selected_model)
     last_progress = progress_start
-    for part in parts:
-        words = [
-            {"start": float(word.start), "end": float(word.end), "word": word.word.strip()}
-            for word in (part.words or [])
-            if word.start is not None and word.end is not None and word.word.strip()
-        ]
-        result.append({"start": float(part.start), "end": float(part.end), "text": part.text.strip(), "words": words})
-        if duration and duration > 0:
-            current_progress = progress_start + int(min(part.end / duration, 1) * (progress_end - progress_start))
-            if current_progress > last_progress:
-                progress(current_progress, "Transcribing audio")
-                last_progress = current_progress
+    resolved_model_source: str | None = None
+
+    def resolve_model_source() -> str:
+        nonlocal resolved_model_source
+        if resolved_model_source is None:
+            resolved_model_source = whisper_model_source(selected_model)
+        return resolved_model_source
+
+    def model_for(target_device: str, target_compute_type: str):
+        key = (model_id, model_revision or "custom", target_device, target_compute_type)
+        if key not in _transcription_models:
+            from faster_whisper import WhisperModel
+
+            # Resolve/download the model outside the GPU fallback handler. A
+            # network or model-file error is not evidence of a broken CUDA
+            # runtime and must not poison the process-wide failed-runtime set.
+            source = resolve_model_source()
+            _transcription_models[key] = WhisperModel(
+                source, device=target_device, compute_type=target_compute_type,
+            )
+        return key, _transcription_models[key]
+
+    def consume(model) -> list[dict]:
+        nonlocal last_progress
+        parts, _info = model.transcribe(str(audio_path), vad_filter=True, word_timestamps=True)
+        result: list[dict] = []
+        for part in parts:
+            words = [
+                {"start": float(word.start), "end": float(word.end), "word": word.word.strip()}
+                for word in (part.words or [])
+                if word.start is not None and word.end is not None and word.word.strip()
+            ]
+            result.append({"start": float(part.start), "end": float(part.end), "text": part.text.strip(), "words": words})
+            if duration and duration > 0:
+                current_progress = progress_start + int(min(part.end / duration, 1) * (progress_end - progress_start))
+                if current_progress > last_progress:
+                    progress(current_progress, "Transcribing audio")
+                    last_progress = current_progress
+        return result
+
+    if fallback_reason:
+        progress(progress_start, "CUDA unavailable - switching transcription to CPU")
+    else:
+        progress(progress_start, f"Loading {selected_model} transcription model on {device.upper()}")
+
+    gpu_key = (model_id, model_revision or "custom", device, compute_type)
+    if gpu_key not in _transcription_models:
+        # Do this before entering the CUDA-specific exception handler.
+        resolve_model_source()
+    try:
+        model_key, model = model_for(device, compute_type)
+        # faster-whisper returns a lazy iterator. CUDA/cuDNN/OOM errors can be
+        # raised here during iteration rather than in WhisperModel(...).
+        result = consume(model)
+    except Exception as exc:
+        if device != "cuda":
+            raise
+        diagnostics.log_failure(
+            f"GPU transcription failed: model={selected_model} compute_type={compute_type}",
+            exc,
+        )
+        detail = " ".join(str(exc).split())[:180]
+        progress(
+            last_progress,
+            f"GPU transcription failed{(': ' + detail) if detail else ''} - retrying on CPU",
+        )
+        _failed_transcription_runtimes.add(gpu_key)
+        device, compute_type = "cpu", "int8"
+        model_key, model = model_for(device, compute_type)
+        result = consume(model)
+
+    if runtime_info is not None:
+        runtime_info.clear()
+        runtime_info.update(transcription_cache_parameters(selected_model, device, compute_type))
     progress(progress_end, "Transcription complete")
     return result
 
@@ -229,20 +348,13 @@ def _smart_sentence_bounds(candidate: dict, parts: list[dict], duration: float) 
 
 
 def _attach_speech_context(candidates: list[dict], parts: list[dict], window_seconds: float = 12.0) -> list[dict]:
-    """Store a compact setup and follow-up transcript around each candidate."""
+    """Attach raw neighbouring speech for the central feature graph."""
     for candidate in candidates:
         start, end = float(candidate["start"]), float(candidate["end"])
         before_parts = [part["text"].strip() for part in parts if start - window_seconds <= float(part["end"]) <= start and part.get("text")]
         after_parts = [part["text"].strip() for part in parts if end <= float(part["start"]) <= end + window_seconds and part.get("text")]
-        before = " ".join(before_parts)[-700:]
-        after = " ".join(after_parts)[:700]
-        context_score, context_signals = assess_context(candidate.get("text", ""), before, after)
-        self_contained_score = assess_self_containment(candidate.get("text", ""), before, after)
-        candidate["context_before"] = before
-        candidate["context_after"] = after
-        candidate["context_score"] = context_score
-        candidate["self_contained_score"] = self_contained_score
-        candidate["context_signals"] = context_signals
+        candidate["context_before"] = " ".join(before_parts)[-700:]
+        candidate["context_after"] = " ".join(after_parts)[:700]
     return candidates
 
 
@@ -263,12 +375,47 @@ def transcribe_clip_range(source: Path, start: float, end: float, audio_track: i
         audio_path.unlink(missing_ok=True)
 
 
-def audio_energy_windows(audio_path: Path, window_seconds: float = 0.25) -> np.ndarray:
-    """Return a compact RMS timeline used to compare game and microphone timing."""
+def audio_window_features(audio_path: Path, window_seconds: float = 0.25) -> tuple[np.ndarray, np.ndarray]:
+    """Return energy and a lightweight voiced-spectrum-change proxy per window.
+
+    The second timeline is not a pitch detector.  It is a deliberately cheap
+    zero-crossing proxy that helps distinguish a changing vocal delivery from
+    speech with a nearly unchanged tone.  It keeps full-recording analysis
+    local and avoids loading another heavyweight audio model.
+    """
     with wave.open(str(audio_path), "rb") as handle:
         sample_rate = handle.getframerate()
         window_frames = max(1, round(sample_rate * window_seconds))
         energies = []
+        tone_proxies = []
+        while True:
+            raw = handle.readframes(window_frames)
+            if not raw:
+                break
+            samples = np.frombuffer(raw, dtype="<i2").astype(np.float32)
+            if not len(samples):
+                energies.append(0.0)
+                tone_proxies.append(0.0)
+                continue
+            energies.append(float(np.sqrt(np.mean(samples * samples))))
+            # Ignore low-level noise when measuring sign changes.  We do not
+            # need an exact fundamental frequency here; only a stable signal
+            # that changes when a speaker changes tone/timbre.
+            gate = max(80.0, float(np.percentile(np.abs(samples), 55)) * 0.25)
+            active = (np.abs(samples[:-1]) >= gate) & (np.abs(samples[1:]) >= gate)
+            if not np.any(active):
+                tone_proxies.append(0.0)
+            else:
+                crossings = (samples[:-1] * samples[1:] < 0) & active
+                tone_proxies.append(float(np.count_nonzero(crossings)) / float(np.count_nonzero(active)))
+    return np.asarray(energies, dtype=np.float32), np.asarray(tone_proxies, dtype=np.float32)
+
+
+def audio_energy_windows(audio_path: Path, window_seconds: float = 0.25) -> np.ndarray:
+    """Return a compact RMS timeline used to compare game and microphone timing."""
+    energies: list[float] = []
+    with wave.open(str(audio_path), "rb") as handle:
+        window_frames = max(1, round(handle.getframerate() * window_seconds))
         while True:
             raw = handle.readframes(window_frames)
             if not raw:
@@ -278,23 +425,85 @@ def audio_energy_windows(audio_path: Path, window_seconds: float = 0.25) -> np.n
     return np.asarray(energies, dtype=np.float32)
 
 
-def dynamic_audio_scores(energies: np.ndarray, candidates: list[dict], window_seconds: float = 0.25) -> list[int]:
-    """Find unusual energy changes in a track; this alone is not a clip-quality boost."""
-    if len(energies) < 3:
+def _tempo_variation(candidate: dict) -> float | None:
+    """Return relative speaking-rate variation from Whisper word timestamps."""
+    words = [
+        item for item in (candidate.get("words") or [])
+        if item.get("start") is not None and item.get("end") is not None
+    ]
+    start, end = float(candidate["start"]), float(candidate["end"])
+    duration = end - start
+    if len(words) < 8 or duration < 5.0:
+        return None
+    # Count words in three comparable portions of the clip.  A moving rate is
+    # more useful than raw words-per-minute, which varies naturally by person.
+    edges = np.linspace(start, end, 4)
+    rates = []
+    for left, right in zip(edges[:-1], edges[1:]):
+        count = sum(left <= float(item["start"]) < right for item in words)
+        rates.append(count / max(0.5, right - left))
+    if min(rates) <= 0:
+        return None
+    return float(np.std(rates) / max(0.1, np.mean(rates)))
+
+
+def voice_delivery_scores(
+    energies: np.ndarray,
+    tone_proxies: np.ndarray,
+    candidates: list[dict],
+    window_seconds: float = 0.25,
+) -> list[int]:
+    """Score expressive vocal delivery, not raw loudness.
+
+    Positive values require at least two independent changes: volume contour,
+    speaking tempo, or the lightweight tone proxy.  Long spoken clips with all
+    three dimensions flat receive a small negative value, used as a quality
+    penalty rather than a misleading ``strong voice`` tag.
+    """
+    if len(energies) < 8 or len(tone_proxies) != len(energies):
         return [0] * len(candidates)
-    baseline, high, peak = np.percentile(energies, [55, 88, 98])
-    spread = max(1.0, peak - high)
+    speech_floor = max(40.0, float(np.percentile(energies, 55)) * 0.55)
     scores = []
     for candidate in candidates:
         left = max(0, int(candidate["start"] / window_seconds))
         right = min(len(energies), max(left + 1, int(np.ceil(candidate["end"] / window_seconds))))
         section = energies[left:right]
-        if not len(section):
+        tone_section = tone_proxies[left:right]
+        voiced = section >= speech_floor
+        if len(section) < 8 or int(np.count_nonzero(voiced)) < 5:
             scores.append(0)
             continue
-        peak_bonus = max(0.0, float(section.max()) - high) / spread
-        mean_bonus = max(0.0, float(section.mean()) - baseline) / max(1.0, high - baseline)
-        scores.append(max(0, min(16, round(peak_bonus * 12 + mean_bonus * 4))))
+        voiced_levels = np.log1p(section[voiced])
+        # Log-energy span captures an intentional rise/fall without treating a
+        # consistently loud microphone as expressive.
+        level_span = float(np.percentile(voiced_levels, 85) - np.percentile(voiced_levels, 25))
+        tone_values = tone_section[voiced]
+        tone_cv = float(np.std(tone_values) / max(0.002, np.mean(tone_values))) if len(tone_values) >= 5 and float(np.mean(tone_values)) > 0 else 0.0
+        tempo_cv = _tempo_variation(candidate)
+
+        # Each dimension is deliberately conservative.  Normal intelligible
+        # speech should be neutral; an expressive delivery changes in at least
+        # two ways instead of merely being louder than the stream average.
+        level_change = min(1.0, max(0.0, (level_span - 0.28) / 0.72))
+        tone_change = min(1.0, max(0.0, (tone_cv - 0.13) / 0.22))
+        tempo_change = None if tempo_cv is None else min(1.0, max(0.0, (tempo_cv - 0.24) / 0.46))
+        dimensions = [level_change, tone_change] + ([] if tempo_change is None else [tempo_change])
+        changed_dimensions = sum(value >= 0.48 for value in dimensions)
+        combined = (level_change * 0.42) + (tone_change * 0.34) + ((tempo_change or 0.0) * 0.24)
+        duration = float(candidate["end"]) - float(candidate["start"])
+        # This is intentionally strict: changing volume and tone alone is
+        # common in ordinary speech.  A clip earns the expressive label only
+        # when tempo changes too, which makes it a useful attention signal.
+        if changed_dimensions >= 3 and combined >= 0.70:
+            scores.append(max(7, min(16, round(7 + combined * 9))))
+        # The tone proxy is intentionally not used for the monotony verdict:
+        # microphone noise/compression can make it look variable.  For a long
+        # clip we instead require both the audible level contour and timestamp
+        # based speaking tempo to stay flat.
+        elif duration >= 15.0 and tempo_change is not None and level_change <= 0.30 and tempo_change <= 0.20:
+            scores.append(-8)
+        else:
+            scores.append(0)
     return scores
 
 
@@ -348,14 +557,22 @@ def game_reaction_scores(game_energies: np.ndarray, microphone_energies: np.ndar
     return scores
 
 
-def voice_led_content(tags: list[str]) -> bool:
-    """Opinions and humour should prefer expressive delivery over game loudness."""
-    return any(
-        tag in {"humor", "gniew", "zaskoczenie"}
-        or tag.startswith("wyra")
-        or tag.startswith("rado")
-        or tag.startswith("zło")
-        for tag in tags
+def _visual_scan_priority(record: dict) -> float:
+    """Prioritize useful frames without depending on derived quality scores.
+
+    Visual evidence is an input to the feature graph, so using ``quality_score``
+    to decide which candidates receive that evidence creates a circular and
+    entry-point-dependent calculation. Raw audio response and spoken content
+    are sufficient to keep the bounded visual scan focused.
+    """
+    spoken_words = len(record.get("words") or [])
+    duration = max(0.0, float(record.get("end") or 0.0) - float(record.get("start") or 0.0))
+    return (
+        float(record.get("audio_event_score") or 0) * 1.5
+        + float(record.get("game_reaction_score") or 0)
+        + max(0.0, float(record.get("voice_expression_score") or 0)) * 0.5
+        + min(12.0, spoken_words / 5.0)
+        + min(4.0, duration / 10.0)
     )
 
 
@@ -399,7 +616,7 @@ def visual_interest_scores(
         import cv2
     except Exception:
         return {}
-    strongest = sorted(records, key=lambda item: item["quality_score"] + item["audio_event_score"], reverse=True)[:limit]
+    strongest = sorted(records, key=_visual_scan_priority, reverse=True)[:limit]
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         return {}
@@ -452,7 +669,7 @@ def visual_reading_scores(video_path: Path, records: list[dict], limit: int = 12
         import cv2
     except Exception:
         return {}
-    strongest = sorted(records, key=lambda item: item["quality_score"] + item["audio_event_score"], reverse=True)[:limit]
+    strongest = sorted(records, key=_visual_scan_priority, reverse=True)[:limit]
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         return {}
@@ -492,7 +709,99 @@ def visual_reading_scores(video_path: Path, records: list[dict], limit: int = 12
     return scores
 
 
-def analyse(video_id: str, report: Progress) -> None:
+def _cache_lookup(
+    cache: PipelineCache | None,
+    video_id: str,
+    source_fingerprint: str,
+    stage: str,
+    parameters: dict,
+    validator,
+) -> tuple[bool, object | None]:
+    if cache is None or not source_fingerprint:
+        return False, None
+    try:
+        lookup = cache.get(
+            video_id=video_id,
+            source_fingerprint=source_fingerprint,
+            stage=stage,
+            parameters=parameters,
+        )
+        if lookup.hit and validator(lookup.value):
+            diagnostics.logger().info(
+                "Pipeline cache hit: video_id=%s stage=%s key=%s", video_id, stage, lookup.key,
+            )
+            return True, lookup.value
+        if lookup.hit:
+            diagnostics.logger().warning(
+                "Pipeline cache payload rejected: video_id=%s stage=%s key=%s",
+                video_id, stage, lookup.key,
+            )
+    except Exception as exc:
+        diagnostics.log_failure(f"Pipeline cache read bypassed: video_id={video_id} stage={stage}", exc)
+    return False, None
+
+
+def _cache_store(
+    cache: PipelineCache | None,
+    video_id: str,
+    source_fingerprint: str,
+    stage: str,
+    parameters: dict,
+    value,
+) -> None:
+    if cache is None or not source_fingerprint:
+        return
+    try:
+        cache.put(
+            video_id=video_id,
+            source_fingerprint=source_fingerprint,
+            stage=stage,
+            parameters=parameters,
+            value=value,
+        )
+    except Exception as exc:
+        # Cache is an optimization. A full disk, antivirus lock or corrupt
+        # cache tree must never turn a valid recording into a failed analysis.
+        diagnostics.log_failure(f"Pipeline cache write skipped: video_id={video_id} stage={stage}", exc)
+
+
+def _valid_transcript_cache(value) -> bool:
+    if not isinstance(value, list):
+        return False
+    for part in value:
+        if not isinstance(part, dict) or not isinstance(part.get("text", ""), str):
+            return False
+        try:
+            float(part["start"])
+            float(part["end"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        words = part.get("words", [])
+        if not isinstance(words, list) or any(not isinstance(word, dict) for word in words):
+            return False
+    return True
+
+
+def _valid_number_list(value) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(item, (int, float)) and np.isfinite(float(item)) for item in value
+    )
+
+
+def _valid_vector_list(value) -> bool:
+    return isinstance(value, list) and all(_valid_number_list(item) for item in value)
+
+
+def _payload_digest(value) -> str:
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _analyse(
+    video_id: str,
+    report: Progress,
+    cleanup_paths: list[Path],
+    analysis_audio: dict | None = None,
+) -> None:
     video = db.row("SELECT * FROM videos WHERE id = ?", (video_id,))
     if not video:
         raise ValueError("Nie znaleziono nagrania")
@@ -500,9 +809,20 @@ def analyse(video_id: str, report: Progress) -> None:
     analysis_mode = str(video.get("analysis_mode") or "default")
     if analysis_mode not in {"fast", "default", "extended"}:
         analysis_mode = "default"
+    # The previous successful run remains current while all expensive work is
+    # performed.  Only the final atomic persistence step activates this run.
+    run_id = start_analysis_run(video_id, analysis_mode)
+    cache: PipelineCache | None = None
+    source_fingerprint = ""
+    report(3, "Checking reusable analysis stages")
+    try:
+        cache = PipelineCache(settings.pipeline_cache_dir)
+        source_fingerprint = fingerprint_source_file(source)
+    except Exception as exc:
+        diagnostics.log_failure(f"Pipeline cache bypassed: video_id={video_id}", exc)
     fast_mode = analysis_mode == "fast"
     extended_mode = analysis_mode == "extended"
-    audio_defaults = db.row("SELECT * FROM analysis_audio_defaults WHERE id=1") or {}
+    audio_defaults = analysis_audio or db.row("SELECT * FROM analysis_audio_defaults WHERE id=1") or {}
     export_defaults = db.row("SELECT game_x, game_y, game_width, game_height FROM export_defaults WHERE id=1") or {}
     gameplay_rect = (
         float(export_defaults.get("game_x", 0.12)),
@@ -514,8 +834,36 @@ def analyse(video_id: str, report: Progress) -> None:
     # stream.  Keep it independent from the user's multi-track OBS defaults.
     mode = "single" if video.get("source_url") else audio_defaults.get("mode", "single")
     report(5, "Reading video metadata")
-    duration = duration_seconds(source)
-    available_audio_tracks = audio_track_count(source)
+    metadata_parameters = {
+        "stage_version": MEDIA_METADATA_CACHE_VERSION,
+        "ffprobe_contract": "duration-and-audio-stream-count",
+    }
+    metadata_hit, cached_metadata = _cache_lookup(
+        cache,
+        video_id,
+        source_fingerprint,
+        "media-metadata",
+        metadata_parameters,
+        lambda value: isinstance(value, dict)
+        and isinstance(value.get("duration_seconds"), (int, float))
+        and float(value["duration_seconds"]) >= 0
+        and isinstance(value.get("audio_track_count"), int)
+        and int(value["audio_track_count"]) >= 0,
+    )
+    if metadata_hit:
+        duration = float(cached_metadata["duration_seconds"])
+        available_audio_tracks = int(cached_metadata["audio_track_count"])
+    else:
+        duration = duration_seconds(source)
+        available_audio_tracks = audio_track_count(source)
+        _cache_store(
+            cache,
+            video_id,
+            source_fingerprint,
+            "media-metadata",
+            metadata_parameters,
+            {"duration_seconds": duration, "audio_track_count": available_audio_tracks},
+        )
     if available_audio_tracks < 1:
         raise ValueError("The recording does not contain an audio track.")
 
@@ -547,18 +895,143 @@ def analyse(video_id: str, report: Progress) -> None:
     with db.connection() as con:
         con.execute("UPDATE videos SET duration_seconds=?, status='processing', transcript_audio_track=?, audio_analysis_mode=?, analysis_mode=?, updated_at=? WHERE id=?", (duration, transcript_track, mode, analysis_mode, db.now(), video_id))
 
-    audio_path = settings.work_dir / f"{video_id}.wav"
+    extracted_audio: dict[tuple[int, int], Path] = {}
+
+    def ensure_audio(track: int, sample_rate: int) -> Path:
+        key = (int(track), int(sample_rate))
+        existing = extracted_audio.get(key)
+        if existing is not None:
+            return existing
+        output = settings.work_dir / f"{video_id}-track{track}-{sample_rate}-{uuid.uuid4()}.wav"
+        cleanup_paths.append(output)
+        extract_audio(source, output, track, sample_rate=sample_rate)
+        extracted_audio[key] = output
+        return output
+
     if skipped_tracks:
         report(8, f"Using available audio track {transcript_track}; skipped unavailable/separate tracks")
-    report(10, "Extracting microphone audio" if mode == "split" else "Extracting audio")
-    extract_audio(source, audio_path, transcript_track)
-    transcript = transcribe(audio_path, report, duration, model_name="small" if fast_mode else None)
+    selected_transcription_model = "small" if fast_mode else settings.whisper_model
+    _transcription_model_id, transcription_model_revision = whisper_identity(
+        selected_transcription_model
+    )
+    transcription_cache = cache if transcription_model_revision else None
+    preferred_device, preferred_compute_type, _fallback_reason = resolved_transcription_runtime(
+        selected_transcription_model
+    )
+    transcript_parameters = {
+        **transcription_cache_parameters(
+            selected_transcription_model, preferred_device, preferred_compute_type,
+        ),
+        "audio_track": transcript_track,
+    }
+    transcript_hit, cached_transcript = _cache_lookup(
+        transcription_cache,
+        video_id,
+        source_fingerprint,
+        "transcription",
+        transcript_parameters,
+        _valid_transcript_cache,
+    )
+    # A CUDA probe can succeed at the next process start even when model
+    # initialization previously fell back to CPU. The transcript is independent
+    # of the accelerator, so reuse the verified CPU entry before decoding a
+    # multi-hour recording again merely because the process-local failure set
+    # was reset.
+    if not transcript_hit and preferred_device == "cuda":
+        cpu_parameters = {
+            **transcription_cache_parameters(selected_transcription_model, "cpu", "int8"),
+            "audio_track": transcript_track,
+        }
+        transcript_hit, cached_transcript = _cache_lookup(
+            transcription_cache,
+            video_id,
+            source_fingerprint,
+            "transcription",
+            cpu_parameters,
+            _valid_transcript_cache,
+        )
+        if transcript_hit:
+            transcript_parameters = cpu_parameters
+    if transcript_hit:
+        transcript = cached_transcript
+        effective_transcription_parameters = transcript_parameters
+        report(62, "Using cached transcription")
+    else:
+        report(10, "Extracting microphone audio" if mode == "split" else "Extracting audio")
+        transcript_audio = ensure_audio(transcript_track, 16000)
+        actual_runtime: dict = {}
+        transcript = transcribe(
+            transcript_audio,
+            report,
+            duration,
+            model_name=selected_transcription_model,
+            runtime_info=actual_runtime,
+        )
+        # Third-party adapters and tests may not populate ``runtime_info``.
+        # Preserve complete provenance and a valid cache key by falling back to
+        # the runtime resolved immediately before transcription.
+        actual_parameters = {
+            **transcript_parameters,
+            **actual_runtime,
+            "audio_track": transcript_track,
+        }
+        effective_transcription_parameters = actual_parameters
+        _cache_store(
+            transcription_cache,
+            video_id,
+            source_fingerprint,
+            "transcription",
+            actual_parameters,
+            transcript,
+        )
+    update_analysis_run_inputs(
+        run_id,
+        whisper_model=str(effective_transcription_parameters["model"]),
+        whisper_device=str(effective_transcription_parameters["device"]),
+        whisper_compute_type=str(effective_transcription_parameters["compute_type"]),
+        transcript_audio_track=transcript_track,
+        audio_analysis_mode=str(mode),
+    )
     boundaries: list[float] = []
     if fast_mode:
         report(66, "Fast mode: creating text candidates")
+    elif not extended_mode:
+        # SceneDetect decodes every frame of the source. In the default mode
+        # those boundaries only nudged an otherwise clean edge by at most 2.5
+        # seconds; sentence and pause alignment already provide the useful
+        # signal. Reserve the full scan for an explicitly Extended analysis.
+        report(66, "Default mode: using speech-aligned boundaries")
     else:
-        report(66, "Detecting scene changes")
-        boundaries = detect_boundaries(source)
+        scene_parameters = {
+            "stage_version": SCENE_BOUNDARY_CACHE_VERSION,
+            "scenedetect_version": _distribution_version("scenedetect"),
+            "opencv_version": _distribution_version("opencv-python-headless"),
+            "detector": "AdaptiveDetector",
+            "adaptive_threshold": 3.0,
+            "min_scene_len": 15,
+        }
+        scene_hit, cached_boundaries = _cache_lookup(
+            cache,
+            video_id,
+            source_fingerprint,
+            "scene-boundaries",
+            scene_parameters,
+            _valid_number_list,
+        )
+        if scene_hit:
+            boundaries = [float(value) for value in cached_boundaries]
+            report(66, "Using cached scene boundaries")
+        else:
+            report(66, "Detecting scene changes")
+            boundaries = detect_boundaries(source)
+            _cache_store(
+                cache,
+                video_id,
+                source_fingerprint,
+                "scene-boundaries",
+                scene_parameters,
+                boundaries,
+            )
     report(72, "Creating clip candidates")
     candidates = build_candidates(
         transcript,
@@ -567,154 +1040,288 @@ def analyse(video_id: str, report: Progress) -> None:
         include_context=not fast_mode,
         context_window_seconds=20.0 if extended_mode else 12.0,
     )
-    microphone_energies = audio_energy_windows(audio_path) if not fast_mode else np.asarray([], dtype=np.float32)
+
+    def cached_audio_features(track: int, sample_rate: int, include_tone: bool) -> tuple[np.ndarray, np.ndarray]:
+        parameters = {
+            "stage_version": AUDIO_FEATURE_CACHE_VERSION,
+            "audio_track": int(track),
+            "sample_rate": int(sample_rate),
+            "channels": 1,
+            "window_seconds": 0.25,
+            "include_tone_proxy": bool(include_tone),
+        }
+
+        def valid(value) -> bool:
+            return (
+                isinstance(value, dict)
+                and _valid_number_list(value.get("energies"))
+                and _valid_number_list(value.get("tone_proxies"))
+                and (
+                    not include_tone
+                    or len(value.get("tone_proxies", [])) == len(value.get("energies", []))
+                )
+            )
+
+        hit, cached = _cache_lookup(
+            cache,
+            video_id,
+            source_fingerprint,
+            "audio-features",
+            parameters,
+            valid,
+        )
+        if hit:
+            return (
+                np.asarray(cached["energies"], dtype=np.float32),
+                np.asarray(cached["tone_proxies"], dtype=np.float32),
+            )
+        audio = ensure_audio(track, sample_rate)
+        if include_tone:
+            energies, tones = audio_window_features(audio)
+        else:
+            energies = audio_energy_windows(audio)
+            tones = np.asarray([], dtype=np.float32)
+        _cache_store(
+            cache,
+            video_id,
+            source_fingerprint,
+            "audio-features",
+            parameters,
+            {
+                "energies": energies.astype(float).tolist(),
+                "tone_proxies": tones.astype(float).tolist(),
+            },
+        )
+        return energies, tones
+
+    if not fast_mode and dedicated_microphone_track:
+        microphone_energies, microphone_tone_proxies = cached_audio_features(
+            transcript_track, 16000, True,
+        )
+    elif not fast_mode and event_tracks:
+        microphone_energies, _unused_tones = cached_audio_features(
+            transcript_track, 16000, False,
+        )
+        microphone_tone_proxies = np.asarray([], dtype=np.float32)
+    else:
+        # A single mixed stream has no independent event source, so its raw
+        # energy cannot establish a game -> microphone sequence.
+        microphone_energies = np.asarray([], dtype=np.float32)
+        microphone_tone_proxies = np.asarray([], dtype=np.float32)
     # A single mixed track cannot distinguish a loud game event from the voice.
     # In that legacy mode we keep audio neutral instead of inventing a reaction.
-    microphone_expression_scores = dynamic_audio_scores(microphone_energies, candidates) if not fast_mode and dedicated_microphone_track else [0] * len(candidates)
+    microphone_expression_scores = (
+        voice_delivery_scores(microphone_energies, microphone_tone_proxies, candidates)
+        if not fast_mode and dedicated_microphone_track else [0] * len(candidates)
+    )
     event_energies: list[tuple[str, np.ndarray]] = []
-    temporary_audio: list[Path] = []
     for label, track in event_tracks:
-        event_path = audio_path if track == transcript_track else settings.work_dir / f"{video_id}-track{track}-{uuid.uuid4()}.wav"
-        if event_path != audio_path:
-            report(74, f"Reading {label}")
-            extract_audio(source, event_path, track, sample_rate=8000)
-            temporary_audio.append(event_path)
-        event_energies.append((label, audio_energy_windows(event_path)))
+        report(74, f"Reading {label}")
+        energies, _tones = cached_audio_features(track, 8000, False)
+        event_energies.append((label, energies))
     # Prefer the clean game track. The all-sounds mix is a fallback for users
     # who only have one combined stream track.
     reaction_sources = [item for item in event_energies if item[0] == "game-audio event"] or event_energies
     reaction_scores = [0] * len(candidates)
     for _label, energies in reaction_sources:
         reaction_scores = [max(current, incoming) for current, incoming in zip(reaction_scores, game_reaction_scores(energies, microphone_energies, candidates, lead_seconds=12.0))]
-    vectors = embed_texts([item["text"] or "bez wypowiedzi" for item in candidates])
+    embedding_texts = [item["text"] or "bez wypowiedzi" for item in candidates]
+    embedding_parameters = {
+        "stage_version": EMBEDDING_CACHE_VERSION,
+        "model": EMBEDDING_MODEL_NAME,
+        "model_revision": EMBEDDING_MODEL_REVISION,
+        "sentence_transformers_version": _distribution_version("sentence-transformers"),
+        "normalize_embeddings": True,
+        "texts_sha256": _payload_digest(embedding_texts),
+        "text_count": len(embedding_texts),
+    }
+    embedding_hit, cached_vectors = _cache_lookup(
+        cache,
+        video_id,
+        source_fingerprint,
+        "text-embeddings",
+        embedding_parameters,
+        lambda value: _valid_vector_list(value) and len(value) == len(embedding_texts),
+    )
+    if embedding_hit:
+        vectors = cached_vectors
+    else:
+        vectors = embed_texts(embedding_texts)
+        _cache_store(
+            cache,
+            video_id,
+            source_fingerprint,
+            "text-embeddings",
+            embedding_parameters,
+            vectors,
+        )
     records: list[dict] = []
     for index, (candidate, vector) in enumerate(zip(candidates, vectors)):
         keywords = [word.strip(".,!?;:").lower() for word in candidate["text"].split() if len(word.strip(".,!?;:")) >= 6][:12]
-        tags = infer_tags(candidate["text"], vector)
-        quality_score, quality_signals, reading_likelihood = assess_clip_quality(candidate["text"], candidate.get("words", []), candidate["start"], candidate["end"], tags)
-        quality_signals.extend(candidate.get("boundary_signals") or [])
-        logical_sense_score = assess_logical_sense(candidate["text"])
-        context_score = int(candidate.get("context_score") or 50)
-        self_contained_score = int(candidate.get("self_contained_score") or 50)
-        context_signals = candidate.get("context_signals") or []
-        # A task, note or NPC line can be grammatically complete, but is not a
-        # standalone creator moment.  Do not label it as such before chat has
-        # a chance to prove that a short viewer-comment reply was interesting.
-        if reading_likelihood >= 0.48:
-            logical_sense_score = min(logical_sense_score, 35)
-            context_score = min(context_score, 35)
-            self_contained_score = min(self_contained_score, 35)
+        semantic_tags = infer_tags(candidate["text"], vector)
         game_reaction_score = reaction_scores[index]
         voice_expression_score = microphone_expression_scores[index]
-        moment_reaction_score, moment_reaction_stage = score_moment_reaction(game_reaction_score)
-        event_score = 0
-        if game_reaction_score >= 7:
-            tags = list(dict.fromkeys(tags + [GAME_REACTION_TAG]))
-            event_score = game_reaction_score
-            quality_score = min(99, quality_score + min(10, game_reaction_score))
-            quality_signals.append("game sound followed by microphone reaction")
-        elif voice_led_content(tags) and voice_expression_score >= 7:
-            event_score = voice_expression_score
-            quality_score = min(99, quality_score + min(8, voice_expression_score))
-            quality_signals.append("expressive microphone delivery")
-        if context_score >= 72:
-            quality_score = min(99, quality_score + 3)
-            quality_signals.extend(context_signals)
-        elif context_score <= 38:
-            quality_score = max(1, quality_score - 6)
-            quality_signals.extend(context_signals)
-        if reading_likelihood >= 0.48:
-            tags = list(dict.fromkeys(tags + ["reading"]))
-        tags = enrich_tags(
-            tags,
-            logical_sense_score=logical_sense_score,
-            reading_likelihood=reading_likelihood,
-            game_reaction_score=game_reaction_score,
-            voice_expression_score=voice_expression_score,
-            context_score=context_score,
-            self_contained_score=self_contained_score,
-            moment_reaction_score=moment_reaction_score,
-            moment_reaction_stage=moment_reaction_stage,
-        )
-        records.append({"id": str(uuid.uuid4()), "start": candidate["start"], "end": candidate["end"], "text": candidate["text"], "words": candidate.get("words", []), "vector": vector, "keywords": keywords, "tags": tags, "quality_score": quality_score, "quality_signals": quality_signals, "logical_sense_score": logical_sense_score, "context_score": context_score, "self_contained_score": self_contained_score, "extended_completeness_score": -1, "context_before": candidate.get("context_before", ""), "context_after": candidate.get("context_after", ""), "reading_likelihood": reading_likelihood, "audio_event_score": event_score, "game_reaction_score": game_reaction_score, "voice_expression_score": voice_expression_score, "moment_reaction_score": moment_reaction_score, "moment_reaction_stage": moment_reaction_stage, "duplicate_group": ""})
-    assign_duplicate_groups(records)
+        records.append({
+            "id": str(uuid.uuid4()),
+            "start": candidate["start"],
+            "end": candidate["end"],
+            "text": candidate["text"],
+            "words": candidate.get("words", []),
+            "vector": vector,
+            "keywords": keywords,
+            # Keep semantic input separate from the final enriched tags.  The
+            # graph owns every evidence-based/dynamic label.
+            "semantic_tags": semantic_tags,
+            "tags": semantic_tags,
+            "context_before": candidate.get("context_before", ""),
+            "context_after": candidate.get("context_after", ""),
+            "boundary_signals": candidate.get("boundary_signals") or [],
+            "analysis_mode": analysis_mode,
+            "extended_completeness_score": -1,
+            "audio_event_score": game_reaction_score if game_reaction_score >= 7 else 0,
+            "game_reaction_score": game_reaction_score,
+            "voice_expression_score": voice_expression_score,
+            "vision_score": 0,
+            "reading_screen_score": 0,
+            "chat_reaction_score": 0,
+            "chat_joy_score": 0,
+            "chat_question_match_score": 0,
+            "duplicate_group": "",
+        })
     visual_scores: dict[str, int] = {}
     reading_screens: dict[str, int] = {}
     if fast_mode:
         report(82, "Fast mode: skipping visual and game-audio checks")
-    elif extended_mode:
-        # Extended mode spends its extra work on the thing that makes a clip
-        # useful on its own: a complete thought. Visual analysis remains the
-        # same calibrated gameplay scan used by the default workflow.
-        report(82, "Extended mode: checking complete thoughts and context")
-        visual_scores = visual_interest_scores(source, records, gameplay_rect=gameplay_rect)
-        reading_screens = visual_reading_scores(source, records)
     else:
-        report(82, "Checking visual action and text-heavy game screens")
-        visual_scores = visual_interest_scores(source, records, gameplay_rect=gameplay_rect)
-        reading_screens = visual_reading_scores(source, records)
+        report(
+            82,
+            "Extended mode: checking complete thoughts and context"
+            if extended_mode else "Checking visual action and text-heavy game screens",
+        )
+        visual_inputs = [
+            {
+                "start": float(record["start"]),
+                "end": float(record["end"]),
+                "word_count": len(record.get("words") or []),
+                "audio_event_score": int(record.get("audio_event_score") or 0),
+                "game_reaction_score": int(record.get("game_reaction_score") or 0),
+                "voice_expression_score": int(record.get("voice_expression_score") or 0),
+            }
+            for record in records
+        ]
+        visual_input_digest = _payload_digest(visual_inputs)
+        interest_parameters = {
+            "stage_version": VISUAL_INTEREST_CACHE_VERSION,
+            "opencv_version": _distribution_version("opencv-python-headless"),
+            "candidate_inputs_sha256": visual_input_digest,
+            "candidate_count": len(records),
+            "limit": 120,
+            "gameplay_rect": [float(value) for value in gameplay_rect],
+        }
+        interest_hit, cached_interest = _cache_lookup(
+            cache,
+            video_id,
+            source_fingerprint,
+            "visual-interest",
+            interest_parameters,
+            lambda value: _valid_number_list(value) and len(value) == len(records),
+        )
+        if interest_hit:
+            visual_scores = {
+                record["id"]: int(score)
+                for record, score in zip(records, cached_interest)
+                if int(score)
+            }
+        else:
+            visual_scores = visual_interest_scores(source, records, gameplay_rect=gameplay_rect)
+            _cache_store(
+                cache,
+                video_id,
+                source_fingerprint,
+                "visual-interest",
+                interest_parameters,
+                [int(visual_scores.get(record["id"], 0)) for record in records],
+            )
+
+        reading_parameters = {
+            "stage_version": VISUAL_READING_CACHE_VERSION,
+            "opencv_version": _distribution_version("opencv-python-headless"),
+            "candidate_inputs_sha256": visual_input_digest,
+            "candidate_count": len(records),
+            "limit": 120,
+            "crop_policy": "central-gameplay-v1",
+        }
+        reading_hit, cached_reading = _cache_lookup(
+            cache,
+            video_id,
+            source_fingerprint,
+            "visual-reading",
+            reading_parameters,
+            lambda value: _valid_number_list(value) and len(value) == len(records),
+        )
+        if reading_hit:
+            reading_screens = {
+                record["id"]: int(score)
+                for record, score in zip(records, cached_reading)
+                if int(score)
+            }
+        else:
+            reading_screens = visual_reading_scores(source, records)
+            _cache_store(
+                cache,
+                video_id,
+                source_fingerprint,
+                "visual-reading",
+                reading_parameters,
+                [int(reading_screens.get(record["id"], 0)) for record in records],
+            )
     for record in records:
         reading_screen = reading_screens.get(record["id"], 0)
-        if reading_screen:
-            # A static screen full of text confirms that apparently coherent
-            # speech is being read from the game rather than authored live.
-            record["reading_likelihood"] = min(1.0, max(record["reading_likelihood"], 0.52) + reading_screen * 0.035)
-            record["quality_score"] = max(1, record["quality_score"] - 28)
-            record["logical_sense_score"] = min(record["logical_sense_score"], 35)
-            record["context_score"] = min(record["context_score"], 35)
-            record["self_contained_score"] = min(record["self_contained_score"], 35)
-            record["quality_signals"].append("static text-heavy game screen")
-            record["tags"] = list(dict.fromkeys(record["tags"] + ["reading"]))
         record["vision_score"] = 0 if reading_screen else visual_scores.get(record["id"], 0)
-        if record["vision_score"] >= 7:
-            record["quality_signals"].append("visual action")
-        if extended_mode:
-            completeness = assess_extended_completeness(
-                record["text"], record["context_before"], record["context_after"], record["quality_signals"],
-            )
-            record["extended_completeness_score"] = completeness
-            if completeness >= 76:
-                record["quality_score"] = min(99, record["quality_score"] + 6)
-                record["quality_signals"].append("extended complete-thought verification")
-            elif completeness <= 43:
-                record["quality_score"] = max(1, record["quality_score"] - 14)
-                record["quality_signals"].append("extended incomplete-thought warning")
-        record["tags"] = enrich_tags(
-            record["tags"],
-            logical_sense_score=record["logical_sense_score"],
-            reading_likelihood=record["reading_likelihood"],
-            game_reaction_score=record["game_reaction_score"],
-            voice_expression_score=record["voice_expression_score"],
-            vision_score=record["vision_score"],
-            context_score=record["context_score"],
-            self_contained_score=record["self_contained_score"],
-            moment_reaction_score=record["moment_reaction_score"],
-            moment_reaction_stage=record["moment_reaction_stage"],
-        )
-        record["short_potential_score"], record["short_potential_signals"] = assess_short_potential(
-            record["text"], record["start"], record["end"], record["tags"],
-            quality_score=record["quality_score"], reading_likelihood=record["reading_likelihood"],
-            logical_sense_score=record["logical_sense_score"], context_score=record["context_score"],
-            self_contained_score=record["self_contained_score"], extended_completeness_score=record["extended_completeness_score"],
-            game_reaction_score=record["game_reaction_score"], voice_expression_score=record["voice_expression_score"],
-            moment_reaction_score=record["moment_reaction_score"],
-        )
-    with db.connection() as con:
-        con.execute("DELETE FROM segments WHERE video_id = ?", (video_id,))
-        for record in records:
-            con.execute(
-                "INSERT INTO segments (id, video_id, start_seconds, end_seconds, transcript, keywords, tags, word_timestamps, embedding, quality_score, quality_signals, short_potential_score, short_potential_signals, logical_sense_score, context_score, self_contained_score, extended_completeness_score, context_before, context_after, reading_likelihood, audio_event_score, game_reaction_score, voice_expression_score, moment_reaction_score, moment_reaction_stage, vision_score, duplicate_group, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record["id"], video_id, record["start"], record["end"], record["text"], json.dumps(record["keywords"], ensure_ascii=False), json.dumps(record["tags"], ensure_ascii=False), json.dumps(record["words"], ensure_ascii=False), json.dumps(record["vector"]), record["quality_score"], json.dumps(record["quality_signals"]), record["short_potential_score"], json.dumps(record["short_potential_signals"]), record["logical_sense_score"], record["context_score"], record["self_contained_score"], record["extended_completeness_score"], record["context_before"], record["context_after"], record["reading_likelihood"], record["audio_event_score"], record["game_reaction_score"], record["voice_expression_score"], record["moment_reaction_score"], record["moment_reaction_stage"], record["vision_score"], record["duplicate_group"], db.now()),
-            )
-        con.execute("UPDATE videos SET status='ready', updated_at=? WHERE id=?", (db.now(), video_id))
+        record["reading_screen_score"] = reading_screen
+        # This is the single authoritative derivation pass.  Extended reading,
+        # story shape and completeness are deterministic graph nodes selected
+        # through ``analysis_mode``; the pipeline supplies only raw evidence.
+        record.update(recompute_segment_features(record).updates)
+    # Do this after all Extended checks.  The normal list suppression then
+    # keeps the highest-ranked variant, which naturally favours a concise
+    # clip with a clear hook and a resolved ending.
+    if extended_mode:
+        assign_duplicate_groups(records, threshold=0.84, overlap_similarity=0.64, overlap_ratio=0.45)
+    else:
+        assign_duplicate_groups(records)
+    report(94, "Saving a versioned analysis without deleting earlier reviews")
+    persistence = persist_analysis_results(video_id, run_id, records)
     # A chat transcript may have been imported before a reanalysis. Reapply it
-    # after replacing segments so its delayed reaction score is never stale.
-    apply_chat_reactions(video_id)
-    audio_path.unlink(missing_ok=True)
-    for path in temporary_audio:
-        path.unlink(missing_ok=True)
+    # to the newly active moments. Chat scoring synchronizes each immutable
+    # revision payload atomically. A malformed legacy chat import remains
+    # optional evidence and must not discard an otherwise valid analysis run.
+    try:
+        apply_chat_reactions(video_id)
+    except Exception as exc:
+        diagnostics.log_failure(f"Chat rescore skipped after analysis: video_id={video_id}", exc)
     mode_label = {"fast": "Fast scan", "default": "Default analysis", "extended": "Extended analysis"}[analysis_mode]
-    report(100, f"{mode_label} ready: {len(candidates)} candidates")
+    history_message = (
+        f"; matched {persistence['matched']} stable moments"
+        f"; retained {persistence['retired']} earlier moments in history"
+    )
+    report(100, f"{mode_label} ready: {len(candidates)} candidates{history_message}")
+
+
+def analyse(video_id: str, report: Progress, analysis_audio: dict | None = None) -> None:
+    """Run analysis and always remove its large intermediate WAV files."""
+    cleanup_paths: list[Path] = []
+    try:
+        _analyse(video_id, report, cleanup_paths, analysis_audio)
+    finally:
+        # Extraction of a multi-hour recording can create gigabyte-sized WAV
+        # files. Cancellation, decoder errors and model failures must not leave
+        # them behind for a retry or until the user notices a full disk.
+        for path in reversed(tuple(dict.fromkeys(cleanup_paths))):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                diagnostics.log_failure(f"Could not remove temporary analysis audio: {path}", exc)
 
 
 def import_reference_files(collection_id: str, files: list[Path], report: Progress, source_keys: dict[Path, str] | None = None) -> int:
@@ -723,24 +1330,121 @@ def import_reference_files(collection_id: str, files: list[Path], report: Progre
     if not files:
         raise ValueError("No supported reference video files were found")
 
+    cache: PipelineCache | None = None
+    try:
+        cache = PipelineCache(settings.pipeline_cache_dir)
+    except Exception as exc:
+        # Importing a reference must keep working when the cache directory is
+        # unavailable, full or temporarily locked by antivirus software.
+        diagnostics.log_failure("Reference pipeline cache bypassed", exc)
+
     imported = 0
     for index, source in enumerate(files, start=1):
         start_progress = int((index - 1) / len(files) * 96)
         report(start_progress, f"Reference {index}/{len(files)}: {source.name}")
         audio_path = settings.work_dir / f"reference-{uuid.uuid4()}.wav"
+        source_fingerprint = ""
         try:
-            extract_audio(source, audio_path)
-            clip_duration = duration_seconds(source)
+            source_fingerprint = fingerprint_source_file(source)
+        except Exception as exc:
+            diagnostics.log_failure(f"Reference cache fingerprint failed: {source}", exc)
+
+        # A content-derived namespace lets the same reference be reused across
+        # collections without putting a local filename or URL in the cache.
+        cache_namespace = f"reference:{source_fingerprint}" if source_fingerprint else ""
+        selected_model = settings.whisper_model
+        _model_id, model_revision = whisper_identity(selected_model)
+        transcription_cache = cache if model_revision else None
+        preferred_device, preferred_compute_type, _fallback_reason = resolved_transcription_runtime(
+            selected_model
+        )
+        transcript_parameters = {
+            **transcription_cache_parameters(
+                selected_model, preferred_device, preferred_compute_type,
+            ),
+            "audio_track": REFERENCE_AUDIO_TRACK,
+            "reference_import": True,
+        }
+        try:
             span = max(1, int(96 / len(files)))
-            parts = transcribe(
-                audio_path,
-                lambda clip_progress, _message: report(min(96, start_progress + int(clip_progress / 100 * span)), f"Reference {index}/{len(files)}: transcribing"),
-                clip_duration,
-                0,
-                100,
+            transcript_hit, cached_parts = _cache_lookup(
+                transcription_cache,
+                cache_namespace,
+                source_fingerprint,
+                "reference-transcription",
+                transcript_parameters,
+                _valid_transcript_cache,
             )
+            if transcript_hit:
+                parts = cached_parts
+                effective_transcription_parameters = transcript_parameters
+                report(
+                    min(96, start_progress + span // 2),
+                    f"Reference {index}/{len(files)}: using cached transcription",
+                )
+            else:
+                extract_audio(
+                    source,
+                    audio_path,
+                    REFERENCE_AUDIO_TRACK,
+                    sample_rate=REFERENCE_AUDIO_SAMPLE_RATE,
+                )
+                clip_duration = duration_seconds(source)
+                actual_runtime: dict = {}
+                parts = transcribe(
+                    audio_path,
+                    lambda clip_progress, _message: report(min(96, start_progress + int(clip_progress / 100 * span)), f"Reference {index}/{len(files)}: transcribing"),
+                    clip_duration,
+                    0,
+                    100,
+                    model_name=selected_model,
+                    runtime_info=actual_runtime,
+                )
+                actual_parameters = {
+                    **transcript_parameters,
+                    **actual_runtime,
+                    "audio_track": REFERENCE_AUDIO_TRACK,
+                    "reference_import": True,
+                }
+                effective_transcription_parameters = actual_parameters
+                _cache_store(
+                    transcription_cache,
+                    cache_namespace,
+                    source_fingerprint,
+                    "reference-transcription",
+                    actual_parameters,
+                    parts,
+                )
             transcript = " ".join(part["text"] for part in parts).strip()
-            embedding = embed_texts([transcript or "no speech"])[0]
+            embedding_text = transcript or "no speech"
+            embedding_parameters = {
+                "stage_version": EMBEDDING_CACHE_VERSION,
+                "model": EMBEDDING_MODEL_NAME,
+                "model_revision": EMBEDDING_MODEL_REVISION,
+                "sentence_transformers_version": _distribution_version("sentence-transformers"),
+                "normalize_embeddings": True,
+                "text_sha256": _payload_digest(embedding_text),
+            }
+            embedding_hit, cached_embedding = _cache_lookup(
+                cache,
+                cache_namespace,
+                source_fingerprint,
+                "reference-text-embedding",
+                embedding_parameters,
+                lambda value: bool(value) and _valid_number_list(value),
+            )
+            if embedding_hit:
+                embedding = cached_embedding
+            else:
+                embedding = embed_texts([embedding_text])[0]
+                _cache_store(
+                    cache,
+                    cache_namespace,
+                    source_fingerprint,
+                    "reference-text-embedding",
+                    embedding_parameters,
+                    embedding,
+                )
             with db.connection() as con:
                 con.execute(
                     """INSERT INTO external_examples (id, collection_id, source_path, original_name, transcript, embedding, created_at)

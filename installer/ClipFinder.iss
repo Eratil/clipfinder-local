@@ -3,6 +3,9 @@
 #ifndef MyAppVersion
   #define MyAppVersion "0.1.0"
 #endif
+#ifndef RuntimeContract
+  #define RuntimeContract "missing-build-contract"
+#endif
 
 #define MyAppName "ClipFinder"
 #define MyAppPublisher "ClipFinder"
@@ -39,8 +42,8 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Files]
 Source: "..\dist\ClipFinder\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "Configure-ClipFinder.ps1"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\TESTER-INSTALLATION.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\ClipFinder\Configure-ClipFinder.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\ClipFinder\TESTER-INSTALLATION.md"; DestDir: "{app}"; Flags: ignoreversion
 ; PyTorch's native CPU libraries need the MSVC runtime. Keep the official x64
 ; installer in the base setup so a tester does not have to have winget.
 Source: "third_party\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
@@ -56,7 +59,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Run]
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; Description: "Install Microsoft Visual C++ Runtime (required by ClipFinder AI libraries)"; Flags: waituntilterminated; Check: VCRedistMissing
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Configure-ClipFinder.ps1"""; Description: "Install missing Windows components and configure ClipFinder"; Flags: postinstall waituntilterminated runascurrentuser
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Configure-ClipFinder.ps1"" -PreserveDeviceChoice"; Description: "Install missing Windows components and configure ClipFinder"; Flags: postinstall waituntilterminated runascurrentuser; Check: RuntimeConfigurationNeedsRepair
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch ClipFinder"; Flags: nowait; Check: ShouldLaunchClipFinder
 
 [Code]
@@ -74,4 +77,28 @@ begin
   { The update helper launches the application itself after a silent update.
     A normal, interactive installer always opens ClipFinder when it finishes. }
   Result := not WizardSilent;
+end;
+
+function RuntimeConfigurationNeedsRepair(): Boolean;
+var
+  RuntimeText: AnsiString;
+  RuntimePath: String;
+begin
+  { Updating application files must not reset a user's chosen CPU/GPU mode,
+    model or verified CUDA paths. The Start-menu repair action remains
+    available when the user intentionally wants to detect the runtime again. }
+  RuntimePath := ExpandConstant('{localappdata}\ClipFinder\runtime.json');
+  if not FileExists(RuntimePath) then begin
+    Result := True;
+    exit;
+  end;
+  LoadStringFromFile(RuntimePath, RuntimeText);
+  Result := False;
+  if not Result then begin
+    Result :=
+      (Pos('"runtime_schema"', RuntimeText) = 0) or
+      (Pos('"gpu_runtime_contract"', RuntimeText) = 0) or
+      (Pos('{#RuntimeContract}', RuntimeText) = 0) or
+      (Pos('"whisper_device"', RuntimeText) = 0);
+  end;
 end;

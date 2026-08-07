@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 
 PATCH_MANIFEST_PATH = "__clipfinder_patch__/manifest.json"
 PATCH_FILES_PREFIX = "files/"
+CACHE_MANIFEST_PATH = "__clipfinder_cache__/manifest.json"
 
 
 def safe_relative(value: str) -> PurePosixPath:
@@ -70,6 +71,10 @@ def cache_release(source: Path, version: str, output: Path) -> Path:
     index = file_index(source)
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        archive.writestr(
+            CACHE_MANIFEST_PATH,
+            json.dumps({"schema": 1, "app": "ClipFinder", "version": version}, ensure_ascii=False, sort_keys=True) + "\n",
+        )
         for relative in index:
             archive.write(source / relative, relative)
     return output
@@ -80,6 +85,8 @@ def _extract_cache(archive_path: Path, destination: Path) -> Path:
         for member in archive.infolist():
             if member.is_dir():
                 continue
+            if member.filename == CACHE_MANIFEST_PATH:
+                continue
             relative = safe_relative(member.filename)
             target = destination.joinpath(*relative.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -88,10 +95,30 @@ def _extract_cache(archive_path: Path, destination: Path) -> Path:
     return destination
 
 
+def cache_version(archive_path: Path) -> str:
+    with zipfile.ZipFile(archive_path) as archive:
+        try:
+            raw = archive.read(CACHE_MANIFEST_PATH)
+        except KeyError as exc:
+            raise ValueError("Previous release cache has no embedded version manifest.") from exc
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Previous release cache manifest is invalid.") from exc
+    if manifest.get("schema") != 1 or manifest.get("app") != "ClipFinder" or not manifest.get("version"):
+        raise ValueError("Previous release cache manifest has an unsupported format.")
+    return str(manifest["version"])
+
+
 def build_patch(from_archive: Path, from_version: str, to_directory: Path, to_version: str, output_dir: Path) -> tuple[Path, Path]:
     """Build a patch ZIP and a complete target manifest for one exact upgrade."""
     if not from_archive.is_file():
         raise ValueError(f"Previous release cache is missing: {from_archive}")
+    embedded_version = cache_version(from_archive)
+    if embedded_version != from_version:
+        raise ValueError(f"Previous release cache is {embedded_version}, not requested {from_version}.")
+    if tuple(map(int, from_version.split("."))) >= tuple(map(int, to_version.split("."))):
+        raise ValueError("Patch target version must be newer than its source version.")
     target = file_index(to_directory)
     with tempfile.TemporaryDirectory(prefix="clipfinder-patch-") as temporary:
         previous_root = _extract_cache(from_archive, Path(temporary) / "previous")

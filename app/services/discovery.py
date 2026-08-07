@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from functools import lru_cache
 
 import numpy as np
 
 from app import database as db
 from app.services.media import is_profanity
+from app.services.tag_taxonomy import canonicalize_tags
 
 
 PROFILE_DEFINITIONS = {
@@ -21,8 +23,34 @@ PROFILE_DEFINITIONS = {
 
 PREFERENCE_FEATURES = (
     "quality", "audio", "game_reaction", "voice_expression", "visual", "chat",
-    "chat_joy", "logical_sense", "context", "self_contained", "moment_reaction", "reading",
+    "chat_joy", "logical_sense", "context", "self_contained",
+    "extended_completeness", "chat_question_match", "moment_reaction", "reading",
 )
+
+# Every suggested-score contribution has a deliberate ceiling.  This keeps
+# several correlated observations of one event (game audio, microphone
+# reaction and chat response) from behaving like three independent reasons to
+# award a near-perfect score.
+RANKING_COMPONENT_LIMITS: dict[str, tuple[float, float]] = {
+    "editorial": (12.0, 42.0),
+    "coherence": (-14.0, 15.0),
+    "engagement": (0.0, 16.0),
+    "delivery": (-6.0, 4.0),
+    "profile": (-12.0, 10.0),
+    "preference": (-12.0, 14.0),
+    "duration": (-25.0, 8.0),
+    "reading": (-52.0, 0.0),
+}
+
+
+def _decoded_tags(value: object) -> list[str]:
+    """Decode persisted or in-memory tags through one canonical boundary."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            value = []
+    return canonicalize_tags(value if isinstance(value, (list, tuple, set)) else [])
 
 
 def active_profile() -> str:
@@ -108,7 +136,14 @@ def profile_payload() -> dict:
 
 def preference_features(segment: dict) -> dict:
     """Stable, human-readable signals captured when the user makes a decision."""
-    tags = json.loads(segment.get("tags") or "[]")
+    tags = _decoded_tags(segment.get("tags"))
+    def known_score(name: str, neutral: float = 50.0) -> float:
+        value = segment.get(name)
+        if value is None:
+            return neutral
+        parsed = float(value)
+        return neutral if parsed < 0 else parsed
+
     values = {
         "quality": min(1.0, max(0.0, float(segment.get("quality_score") or 0) / 99)),
         "audio": min(1.0, max(0.0, float(segment.get("audio_event_score") or 0) / 20)),
@@ -117,10 +152,10 @@ def preference_features(segment: dict) -> dict:
         "visual": min(1.0, max(0.0, float(segment.get("vision_score") or 0) / 20)),
         "chat": min(1.0, max(0.0, float(segment.get("chat_reaction_score") or 0) / 20)),
         "chat_joy": min(1.0, max(0.0, float(segment.get("chat_joy_score") or 0) / 20)),
-        "logical_sense": min(1.0, max(0.0, float(segment.get("logical_sense_score") or 50) / 100)),
-        "context": min(1.0, max(0.0, float(segment.get("context_score") or 50) / 100)),
-        "self_contained": min(1.0, max(0.0, float(segment.get("self_contained_score") or 50) / 100)),
-        "extended_completeness": min(1.0, max(0.0, float(segment.get("extended_completeness_score") or 50) / 100)),
+        "logical_sense": min(1.0, max(0.0, known_score("logical_sense_score") / 100)),
+        "context": min(1.0, max(0.0, known_score("context_score") / 100)),
+        "self_contained": min(1.0, max(0.0, known_score("self_contained_score") / 100)),
+        "extended_completeness": min(1.0, max(0.0, known_score("extended_completeness_score") / 100)),
         "chat_question_match": min(1.0, max(0.0, float(segment.get("chat_question_match_score") or 0) / 100)),
         "moment_reaction": min(1.0, max(0.0, float(segment.get("moment_reaction_score") or 0) / 30)),
         "reading": min(1.0, max(0.0, float(segment.get("reading_likelihood") or 0))),
@@ -134,16 +169,8 @@ def _vectors(rows: list[dict]) -> np.ndarray:
     return np.asarray([json.loads(item["embedding"]) for item in rows], dtype=np.float32)
 
 
-def _legacy_preference_vectors() -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    accepted = db.rows("SELECT embedding FROM segments WHERE rating='accepted' AND embedding IS NOT NULL ORDER BY created_at DESC LIMIT 160")
-    rejected = db.rows("SELECT embedding, review_reason FROM segments WHERE rating='rejected' AND review_reason != '' AND embedding IS NOT NULL ORDER BY created_at DESC LIMIT 200")
-    by_reason: dict[str, list[dict]] = defaultdict(list)
-    for item in rejected:
-        by_reason[item["review_reason"]].append(item)
-    return _vectors(accepted), {reason: _vectors(items) for reason, items in by_reason.items()}
-
-
-def _profile_feedback(profile: str) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray], list[dict], list[dict]]:
+@lru_cache(maxsize=16)
+def _profile_feedback_cached(profile: str) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray], list[dict], list[dict]]:
     rows = db.rows(
         "SELECT decision, review_reason, embedding, features FROM preference_feedback WHERE profile=? ORDER BY updated_at DESC LIMIT 240",
         (profile,),
@@ -157,26 +184,59 @@ def _profile_feedback(profile: str) -> tuple[np.ndarray, np.ndarray, dict[str, n
     return _vectors(accepted_rows), _vectors(rejected_rows), {reason: _vectors(items) for reason, items in by_reason.items()}, accepted_rows, rejected_rows
 
 
+def _profile_feedback(profile: str) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray], list[dict], list[dict]]:
+    """Reuse the bounded training matrix until a human snapshot changes."""
+    return _profile_feedback_cached(profile)
+
+
+def invalidate_profile_feedback_cache(_profile: str | None = None) -> None:
+    """Discard learned ranking inputs after a review/snapshot write.
+
+    The cache is intentionally tiny, so clearing all profiles is simpler and
+    safer than retaining a stale cross-profile matrix.
+    """
+    _profile_feedback_cached.cache_clear()
+
+
 def _feature_distance(candidate: dict, examples: list[dict]) -> float | None:
     if not examples:
         return None
     target = preference_features(candidate)["values"]
     example_values = [json.loads(item["features"]).get("values", {}) for item in examples]
-    centroid = {key: float(np.mean([float(values.get(key, 0)) for values in example_values])) for key in PREFERENCE_FEATURES}
+    # Older feedback rows do not contain newly introduced features. Missing
+    # values are unknown, not evidence for a real zero.
+    centroid = {key: float(np.mean([float(values.get(key, 0.5)) for values in example_values])) for key in PREFERENCE_FEATURES}
     return float(np.mean([abs(float(target[key]) - centroid[key]) for key in PREFERENCE_FEATURES]))
 
 
-def _tag_preference(candidate: dict, accepted: list[dict], rejected: list[dict]) -> float:
+def _profile_tag_affinity(candidate: dict, accepted: list[dict], rejected: list[dict]) -> float:
     if len(accepted) < 4 or len(rejected) < 4:
         return 0.0
-    accepted_tags = [tag for item in accepted for tag in json.loads(item["features"]).get("tags", [])]
-    rejected_tags = [tag for item in rejected for tag in json.loads(item["features"]).get("tags", [])]
+    accepted_tags = [tag for item in accepted for tag in _decoded_tags(json.loads(item["features"]).get("tags", []))]
+    rejected_tags = [tag for item in rejected for tag in _decoded_tags(json.loads(item["features"]).get("tags", []))]
     score = 0.0
     for tag in preference_features(candidate)["tags"]:
         accepted_rate = (accepted_tags.count(tag) + 1) / (len(accepted) + 4)
         rejected_rate = (rejected_tags.count(tag) + 1) / (len(rejected) + 4)
         score += (accepted_rate - rejected_rate) * 8
     return max(-5.0, min(5.0, score))
+
+
+def _known_candidate_score(candidate: dict, name: str, neutral: float = 50.0) -> float:
+    """Keep a measured zero; only None and negative sentinels are unknown."""
+    value = candidate.get(name)
+    if value is None:
+        return neutral
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return neutral
+    return neutral if parsed < 0 else parsed
+
+
+def _bounded_component(name: str, value: float) -> float:
+    lower, upper = RANKING_COMPONENT_LIMITS[name]
+    return max(lower, min(upper, float(value)))
 
 
 def _mean_top_similarity(vector: np.ndarray, examples: np.ndarray, count: int = 8) -> float:
@@ -217,7 +277,12 @@ def _duration_adjustment(candidate: dict, tags: list[str], chat_score: int) -> t
 
 
 def score_candidates(candidates: list[dict], reference: list[list[float]] | None = None, profile: str | None = None) -> list[dict]:
-    """Add a transparent 0-99 score using local preferences and content signals."""
+    """Add an auditable 0-99 score from bounded, non-overlapping groups.
+
+    Human decisions have exactly one active source: ``preference_feedback``.
+    Legacy segment ratings enter that table through the database backfill and
+    are never read a second time here.
+    """
     if not candidates:
         return []
     profile = profile if profile in PROFILE_DEFINITIONS else active_profile()
@@ -229,155 +294,213 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
             pattern_rows = _pattern_rows(pattern_set["id"])
             reference = [json.loads(item["embedding"]) for item in pattern_rows]
             pattern_label = pattern_set["name"]
+
     definition = PROFILE_DEFINITIONS[profile]
-    accepted, rejected_by_reason = _legacy_preference_vectors()
-    profile_accepted, profile_rejected, profile_rejected_by_reason, profile_accepted_rows, profile_rejected_rows = _profile_feedback(profile)
-    reference_matrix = np.asarray(reference, dtype=np.float32) if reference else np.empty((0, 0), dtype=np.float32)
+    accepted, rejected, rejected_by_reason, accepted_rows, rejected_rows = _profile_feedback(profile)
+    has_reference = bool(reference)
+    reference_matrix = np.asarray(reference, dtype=np.float32) if has_reference else np.empty((0, 0), dtype=np.float32)
+    pattern_tags = {tag for item in pattern_rows for tag in _decoded_tags(item.get("tags"))}
     ranked: list[dict] = []
+
     for candidate in candidates:
         vector = np.asarray(json.loads(candidate["embedding"]), dtype=np.float32)
-        prompt_match = _mean_top_similarity(vector, reference_matrix) if reference else 0.0
+        prompt_match = _mean_top_similarity(vector, reference_matrix) if has_reference else 0.0
         approval_match = _mean_top_similarity(vector, accepted)
-        rejection_matches = {reason: _mean_top_similarity(vector, values, 4) for reason, values in rejected_by_reason.items()}
-        strongest_rejection_reason, strongest_rejection = max(rejection_matches.items(), key=lambda item: item[1], default=("", 0.0))
-        profile_approval_match = _mean_top_similarity(vector, profile_accepted)
-        profile_rejection_match = _mean_top_similarity(vector, profile_rejected, 4)
-        profile_rejection_matches = {reason: _mean_top_similarity(vector, values, 4) for reason, values in profile_rejected_by_reason.items()}
-        profile_rejection_reason, profile_reason_match = max(profile_rejection_matches.items(), key=lambda item: item[1], default=("", 0.0))
-        quality = int(candidate.get("quality_score") or 0)
-        audio = int(candidate.get("audio_event_score") or 0)
-        game_reaction = int(candidate.get("game_reaction_score") or 0)
-        voice_expression = int(candidate.get("voice_expression_score") or 0)
-        visual = int(candidate.get("vision_score") or 0)
-        chat = int(candidate.get("chat_reaction_score") or 0)
-        chat_joy = int(candidate.get("chat_joy_score") or 0)
+        rejection_match = _mean_top_similarity(vector, rejected, 4)
+        rejection_matches = {
+            reason: _mean_top_similarity(vector, values, 4)
+            for reason, values in rejected_by_reason.items()
+        }
+        rejection_reason, reason_match = max(
+            rejection_matches.items(), key=lambda item: item[1], default=("", 0.0),
+        )
+
+        quality = _known_candidate_score(candidate, "quality_score")
+        logical_sense = _known_candidate_score(candidate, "logical_sense_score")
+        context = _known_candidate_score(candidate, "context_score")
+        self_contained = _known_candidate_score(candidate, "self_contained_score")
+        completeness = _known_candidate_score(candidate, "extended_completeness_score")
+        # Question matching is optional evidence. Unknown and a measured zero
+        # both give no bonus, while zero remains distinguishable in stored
+        # preference features.
+        question_match = _known_candidate_score(candidate, "chat_question_match_score")
+        audio = _known_candidate_score(candidate, "audio_event_score", 0.0)
+        game_reaction = _known_candidate_score(candidate, "game_reaction_score", 0.0)
+        voice_expression = _known_candidate_score(candidate, "voice_expression_score", 0.0)
+        visual = _known_candidate_score(candidate, "vision_score", 0.0)
+        chat = _known_candidate_score(candidate, "chat_reaction_score", 0.0)
+        chat_joy = _known_candidate_score(candidate, "chat_joy_score", 0.0)
+        moment_reaction = _known_candidate_score(candidate, "moment_reaction_score", 0.0)
         chat_messages = int(candidate.get("chat_message_count") or 0)
         chat_authors = int(candidate.get("chat_unique_authors") or 0)
-        reading = float(candidate.get("reading_likelihood") or 0)
-        logical_sense = int(candidate.get("logical_sense_score") or 0)
-        if logical_sense <= 0:
-            logical_sense = 50
-        context = int(candidate.get("context_score") or 0)
-        if context <= 0:
-            context = 50
-        self_contained = int(candidate.get("self_contained_score") or 0)
-        if self_contained <= 0:
-            self_contained = 50
-        completeness = int(candidate.get("extended_completeness_score") or 0)
-        if completeness <= 0:
-            completeness = context
-        question_match = int(candidate.get("chat_question_match_score") or 0)
-        moment_reaction = int(candidate.get("moment_reaction_score") or 0)
-        moment_stage = candidate.get("moment_reaction_stage") or ""
-        tags = json.loads(candidate.get("tags") or "[]")
+        reading = max(0.0, float(candidate.get("reading_likelihood") or 0.0))
+        moment_stage = str(candidate.get("moment_reaction_stage") or "")
+        tags = _decoded_tags(candidate.get("tags"))
         quality_signals = json.loads(candidate.get("quality_signals") or "[]")
-        tag_bonus = sum(weight for tag, weight in definition["tag_weights"].items() if tag in tags)
-        if "reakcja na grę" in tags:
-            tag_bonus += {"general": 6, "soulslike": 10, "horror": 8}.get(profile, 4)
-        # Tags are useful labels, not independent proof of quality.  Several
-        # overlapping labels previously pushed ordinary clips to the 99 cap.
-        tag_bonus = min(8.0, float(tag_bonus))
+        duration = max(
+            0.0,
+            float(candidate.get("end_seconds", candidate.get("end", 0)) or 0)
+            - float(candidate.get("start_seconds", candidate.get("start", 0)) or 0),
+        )
         excluded_reading = is_disallowed_reading(candidate)
-        duration_adjustment, duration_reason = _duration_adjustment(candidate, tags, chat)
-        reading_penalty = reading * (52 if excluded_reading else 10)
-        # Suggested score is deliberately calibrated in bounded groups rather
-        # than as an open-ended sum.  A score of 99 should be exceptional, not
-        # the result of a normal clip collecting several correlated bonuses.
-        quality_component = quality * 0.28                         # 0..27.7
-        reaction_component = min(15.0, audio * 0.20 + visual * 0.22 + chat * 0.30 + moment_reaction * 0.20 + max(game_reaction, voice_expression) * 0.20)
-        logic_component = max(-6.0, min(4.0, (logical_sense - 50) * 0.09))
-        context_component = max(-4.0, min(4.0, (context - 50) * 0.08))
-        standalone_component = max(-6.0, min(6.0, (self_contained - 50) * 0.12))
-        completeness_component = max(-4.0, min(3.0, (completeness - 50) * 0.06))
-        question_component = min(4.0, question_match * 0.04)
-        score = 10 + quality_component + reaction_component + logic_component + context_component + standalone_component + completeness_component + question_component + tag_bonus + duration_adjustment - reading_penalty
+        duration_value, duration_reason = _duration_adjustment(candidate, tags, int(chat))
+
+        # Editorial quality is the stable backbone. It intentionally contains
+        # the baseline so components always sum to the raw score shown in
+        # diagnostics.
+        editorial = _bounded_component("editorial", 12.0 + quality * 0.30)
+
+        # Four structural scores describe one property: whether the thought is
+        # understandable. They share one cap rather than accumulating as four
+        # independent bonuses.
+        coherence_raw = (
+            (logical_sense - 50.0) * 0.075
+            + (context - 50.0) * 0.050
+            + (self_contained - 50.0) * 0.075
+            + (completeness - 50.0) * 0.045
+            + max(0.0, question_match - 50.0) * 0.035
+        )
         strong_emotion = bool({"humor", "gniew", "zaskoczenie", "radość", "złość"}.intersection(tags)) or game_reaction >= 7 or voice_expression >= 9
         happy_chat = chat_joy >= 4 and chat >= 5
-        context_penalty = 0
-        context_bonus = 0
-        if not strong_emotion:
-            if logical_sense < 42:
-                if happy_chat:
-                    context_bonus = min(12, 4 + chat_joy)
-                else:
-                    context_penalty = min(22, 8 + round((42 - logical_sense) * 0.45))
-            elif logical_sense >= 68:
-                context_bonus = 4
-            if (context <= 38 or self_contained <= 35) and not happy_chat:
-                context_penalty += 5
-        score += context_bonus - context_penalty
-        if profile == "game_quote_reaction":
-            # The current local analysis identifies a game-audio cue followed
-            # by speech on the microphone track. Downrank clips without that
-            # order, so unconnected loud game audio does not dominate here.
-            if moment_stage in {"game -> voice", "game -> voice -> chat"}:
-                score += 7 + min(4, game_reaction * 0.25)
+        if not strong_emotion and logical_sense < 42:
+            if happy_chat:
+                # An absurd fragment which demonstrably entertained viewers is
+                # not treated like a random contextless sentence.
+                coherence_raw = max(coherence_raw, -4.0) + min(3.0, chat_joy * 0.25)
             else:
-                score -= 12
-        if reference:
-            score += prompt_match * 10
-        if pattern_rows:
-            pattern_tags = {tag for item in pattern_rows for tag in json.loads(item.get("tags") or "[]")}
-            overlap = len(set(tags).intersection(pattern_tags))
-            score += min(3, overlap)
-        if len(accepted):
-            score += approval_match * 4
-        if strongest_rejection >= 0.42:
-            score -= strongest_rejection * 18
-        feedback_bonus = 0.0
-        if len(profile_accepted) >= 3:
-            feedback_bonus += profile_approval_match * 5
-        if len(profile_rejected) >= 3 and profile_rejection_match >= 0.38:
-            feedback_bonus -= profile_rejection_match * 7
-        accepted_distance = _feature_distance(candidate, profile_accepted_rows) if len(profile_accepted_rows) >= 4 else None
-        rejected_distance = _feature_distance(candidate, profile_rejected_rows) if len(profile_rejected_rows) >= 4 else None
+                coherence_raw -= min(5.0, (42.0 - logical_sense) * 0.15)
+        coherence = _bounded_component("coherence", coherence_raw)
+
+        # Audio/game/moment are correlated stages of one event. Chat and image
+        # form two other channels. Use the strongest channel plus only 25% of
+        # the runner-up instead of adding every sensor reading.
+        game_channel = max(
+            min(7.0, audio * 0.35),
+            min(13.0, game_reaction * 0.65),
+            min(14.0, moment_reaction / 30.0 * 14.0),
+        )
+        chat_channel = max(min(11.0, chat * 0.55), min(9.0, chat_joy * 0.65))
+        visual_channel = min(7.0, visual * 0.35)
+        engagement_channels = sorted((game_channel, chat_channel, visual_channel), reverse=True)
+        engagement = _bounded_component(
+            "engagement", engagement_channels[0] + engagement_channels[1] * 0.25,
+        )
+        delivery = _bounded_component(
+            "delivery",
+            min(4.0, max(0.0, voice_expression) * 0.25)
+            - min(6.0, max(0.0, -voice_expression) * 0.65),
+        )
+
+        tag_value = sum(
+            weight for tag, weight in definition["tag_weights"].items() if tag in tags
+        )
+        if "reakcja na grę" in tags:
+            tag_value += {"general": 6, "soulslike": 10, "horror": 8}.get(profile, 4)
+        tag_value = min(8.0, float(tag_value))
+        profile_value = tag_value
+        if profile == "game_quote_reaction":
+            if moment_stage in {"game -> voice", "game -> voice -> chat"}:
+                profile_value += 7.0 + min(4.0, game_reaction * 0.25)
+            else:
+                profile_value -= 12.0
+        profile_component = _bounded_component("profile", profile_value)
+
+        # All views of the user's decisions share one bounded component. The
+        # minimum sample thresholds prevent one click from being amplified by
+        # embedding, feature and tag comparisons simultaneously.
+        feedback_value = 0.0
+        if len(accepted) >= 3:
+            feedback_value += max(0.0, (approval_match - 0.25) * 8.0)
+        if len(rejected) >= 3 and rejection_match >= 0.38:
+            feedback_value -= rejection_match * 7.0
+        accepted_distance = _feature_distance(candidate, accepted_rows) if len(accepted_rows) >= 4 else None
+        rejected_distance = _feature_distance(candidate, rejected_rows) if len(rejected_rows) >= 4 else None
         if accepted_distance is not None and rejected_distance is not None:
-            feedback_bonus += max(-4.0, min(4.0, (rejected_distance - accepted_distance) * 12))
-        tag_feedback = _tag_preference(candidate, profile_accepted_rows, profile_rejected_rows)
-        feedback_bonus += tag_feedback
-        feedback_bonus = max(-9.0, min(7.0, feedback_bonus))
-        score += feedback_bonus
+            feedback_value += max(-4.0, min(4.0, (rejected_distance - accepted_distance) * 12.0))
+        feedback_value += _profile_tag_affinity(candidate, accepted_rows, rejected_rows)
+        feedback_value = max(-9.0, min(7.0, feedback_value))
+
+        reference_value = max(0.0, prompt_match) * 10.0 if has_reference else 0.0
+        if pattern_tags:
+            reference_value = max(reference_value, min(3.0, len(set(tags).intersection(pattern_tags))))
+        preference_component = _bounded_component(
+            "preference", reference_value + feedback_value,
+        )
+        duration_component = _bounded_component("duration", duration_value)
+        reading_component = _bounded_component(
+            "reading", -reading * (52.0 if excluded_reading else 10.0),
+        )
+
+        components = {
+            "editorial": round(editorial, 3),
+            "coherence": round(coherence, 3),
+            "engagement": round(engagement, 3),
+            "delivery": round(delivery, 3),
+            "profile": round(profile_component, 3),
+            "preference": round(preference_component, 3),
+            "duration": round(duration_component, 3),
+            "reading": round(reading_component, 3),
+        }
+        raw_score = round(sum(components.values()), 3)
+
+        exceptional = (
+            quality >= 92
+            and logical_sense >= 86
+            and context >= 80
+            and self_contained >= 86
+            and completeness >= 82
+            and 8 <= duration <= 28
+            and reading < 0.20
+            and (engagement >= 12 or voice_expression >= 10 or question_match >= 75)
+            and not excluded_reading
+        )
+        rounded_score = max(1, round(raw_score))
+        if rounded_score >= 99 and not exceptional:
+            rounded_score = 98
+        else:
+            rounded_score = min(99, rounded_score)
         if excluded_reading:
-            # It remains accessible under the reading tag for manual checking,
-            # but cannot become a suggested best clip.
-            score = min(score, 18)
-        if reference:
+            # Preserve the existing hard cap for game note/task reading.
+            rounded_score = min(rounded_score, 18)
+
+        if has_reference:
             candidate["similarity"] = round(prompt_match, 4)
         candidate["approval_match"] = round(approval_match, 4)
-        candidate["profile_feedback_score"] = round(feedback_bonus, 2)
+        candidate["profile_feedback_score"] = round(feedback_value, 2)
         candidate["excluded_from_discovery"] = excluded_reading
-        candidate["ranking_score"] = max(1, min(99, round(score)))
-        reasons = [f"quality {quality}/99"]
-        reasons.append(duration_reason)
-        if reference:
+        candidate["ranking_components"] = components
+        candidate["ranking_raw_score"] = raw_score
+        candidate["ranking_exceptional"] = exceptional
+        candidate["ranking_score"] = rounded_score
+
+        reasons = [f"quality {round(quality)}/99", duration_reason]
+        if has_reference:
             source = f"discovery patterns: {pattern_label}" if pattern_label else "prompt"
             reasons.insert(0, f"matches {source} {round(max(0, prompt_match) * 100)}%")
-        if len(accepted) >= 4 and approval_match >= 0.30:
-            reasons.append("matches your approvals")
-        if len(profile_accepted) >= 3 and profile_approval_match >= 0.30:
+        if len(accepted) >= 3 and approval_match >= 0.30:
             reasons.append(f"matches your {profile} approvals")
-        if len(profile_rejected) >= 3 and profile_rejection_match >= 0.42:
-            suffix = f": {profile_rejection_reason}" if profile_reason_match >= 0.42 and profile_rejection_reason else ""
+        if len(rejected) >= 3 and rejection_match >= 0.42:
+            suffix = f": {rejection_reason}" if reason_match >= 0.42 and rejection_reason else ""
             reasons.append(f"similar to your {profile} rejections{suffix}")
-        elif len(profile_accepted_rows) >= 4 and len(profile_rejected_rows) >= 4 and feedback_bonus >= 3:
+        elif len(accepted_rows) >= 4 and len(rejected_rows) >= 4 and feedback_value >= 3:
             reasons.append(f"fits your {profile} review pattern")
         if game_reaction >= 7:
             reasons.append("game event followed by microphone reaction")
-        elif voice_expression >= 7 and audio >= 7:
-            reasons.append("expressive microphone delivery")
+        elif voice_expression >= 7:
+            reasons.append("expressive vocal delivery")
+        elif voice_expression <= -7:
+            reasons.append("monotonous vocal delivery")
         if visual >= 7:
             reasons.append("visual action")
         if chat >= 7:
             people = f" / {chat_authors} viewers" if chat_authors else ""
             reasons.append(f"chat reacted: {chat_messages} messages{people}")
-        if "pytanie" in tags:
-            reasons.append("answers a viewer question")
         if question_match >= 40:
-            reasons.append(f"viewer question matched {question_match}/99")
+            reasons.append(f"viewer question matched {round(question_match)}/99")
         if moment_stage == "game -> voice -> chat":
-            reasons.append(f"game moment -> voice -> chat {moment_reaction}/30")
+            reasons.append(f"game moment -> voice -> chat {round(moment_reaction)}/30")
         elif moment_reaction >= 7:
-            reasons.append(f"game moment -> voice {moment_reaction}/30")
+            reasons.append(f"game moment -> voice {round(moment_reaction)}/30")
         if profile == "game_quote_reaction":
             reasons.append("game cue before microphone reaction" if moment_stage in {"game -> voice", "game -> voice -> chat"} else "no game cue -> microphone reaction sequence")
         if context >= 72:
@@ -388,9 +511,13 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
             reasons.append("works without prior context")
         elif self_contained <= 35 and not happy_chat:
             reasons.append("needs surrounding conversation to make sense")
-        if int(candidate.get("extended_completeness_score") or -1) >= 0:
-            reasons.append(f"extended completeness {completeness}/99")
-        boundary_signals = [signal for signal in quality_signals if signal in {"start aligned to sentence", "end aligned to sentence", "extended to punchline"}]
+        raw_completeness = candidate.get("extended_completeness_score")
+        if raw_completeness is not None and float(raw_completeness) >= 0:
+            reasons.append(f"extended completeness {round(completeness)}/99")
+        boundary_signals = [
+            signal for signal in quality_signals
+            if signal in {"start aligned to sentence", "end aligned to sentence", "extended to punchline"}
+        ]
         if boundary_signals:
             reasons.append("smart boundaries: " + ", ".join(boundary_signals))
         if not strong_emotion and logical_sense >= 68:
@@ -399,10 +526,10 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
             reasons.append("chat enjoyed an unexpected or absurd moment")
         elif not strong_emotion and logical_sense < 42:
             reasons.append("contextless or incomplete speech without chat reaction")
-        if tag_bonus >= 7:
+        if tag_value >= 7:
             reasons.append("matches active content profile")
-        if strongest_rejection >= 0.42:
-            reasons.append(f"similar to rejection: {strongest_rejection_reason}")
+        if exceptional and rounded_score == 99:
+            reasons.append("exceptional complete evidence")
         if excluded_reading:
             reasons.append("likely task/note reading - excluded from best clips")
         elif reading >= 0.48:
@@ -429,10 +556,7 @@ def suppress_duplicate_groups(candidates: list[dict], keep_alternatives: bool = 
 
 def _best_of_tags(candidate: dict) -> set[str]:
     """Return the meaningful tag types used to keep a Best of list varied."""
-    try:
-        tags = json.loads(candidate.get("tags") or "[]")
-    except (TypeError, ValueError):
-        tags = []
+    tags = _decoded_tags(candidate.get("tags"))
     return {
         str(tag) for tag in tags
         if str(tag).startswith(("forma:", "emocja:", "reakcja:", "kontekst:", "moment:"))
@@ -479,7 +603,9 @@ def best_of_stream(candidates: list[dict], limit: int = 10) -> list[dict]:
     return selected
 
 
-def assign_duplicate_groups(records: list[dict], threshold: float = 0.88) -> None:
+def assign_duplicate_groups(
+    records: list[dict], threshold: float = 0.88, overlap_similarity: float = 0.70, overlap_ratio: float = 0.55,
+) -> None:
     """Assign groups of semantically near-identical moments from one recording."""
     if len(records) < 2:
         return
@@ -506,7 +632,7 @@ def assign_duplicate_groups(records: list[dict], threshold: float = 0.88) -> Non
             shorter = max(0.1, min(left_end - left_start, right_end - right_start))
             # Generated candidates for one sentence often share the same
             # start.  They are alternatives, not three different moments.
-            overlapping_variant = overlap / shorter >= 0.55 and similarities[left, right] >= 0.70
+            overlapping_variant = overlap / shorter >= overlap_ratio and similarities[left, right] >= overlap_similarity
             if overlapping_variant or similarities[left, right] >= threshold:
                 union(left, right)
     groups: dict[int, list[int]] = defaultdict(list)
