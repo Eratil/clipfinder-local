@@ -28,6 +28,8 @@ PORT = 8000
 APP_URL = f"http://{HOST}:{PORT}/"
 HEALTH_URL = f"{APP_URL}api/health"
 _bundled_dll_directories: list[object] = []
+_single_instance_mutex: object | None = None
+_SINGLE_INSTANCE_MUTEX_NAME = r"Local\ClipFinderDesktopSingleton"
 LOADING_PAGE = """<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>ClipFinder</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0e121a;color:#edf2fa;font:16px Segoe UI,Arial,sans-serif}.card{display:grid;justify-items:center;gap:18px;text-align:center}.spinner{width:38px;height:38px;border:4px solid #2b374a;border-top-color:#77e3c0;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}h1{margin:0;font-size:28px}p{max-width:420px;margin:0;color:#9eacc0;line-height:1.5}</style></head><body><div class=\"card\"><div class=\"spinner\"></div><h1>Starting ClipFinder</h1><p>Preparing your local library. This can take a little longer after an update.</p></div></body></html>"""
 
 
@@ -92,6 +94,63 @@ def show_error(title: str, text: str) -> None:
         ctypes.windll.user32.MessageBoxW(0, text, title, 0x10)
     except Exception:
         print(f"{title}: {text}")
+
+
+def acquire_single_instance_lock() -> bool:
+    """Claim the per-user Windows mutex used by the desktop application.
+
+    The local API always uses a fixed port, so allowing a second desktop
+    process only creates a confusing extra window.  A named mutex protects the
+    whole startup path, including the short period before the API is ready.
+    ``Local`` deliberately scopes this to the interactive user session rather
+    than interfering with a different Windows user on the same computer.
+    """
+    global _single_instance_mutex
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        mutex = kernel32.CreateMutexW(None, False, _SINGLE_INSTANCE_MUTEX_NAME)
+        if not mutex:
+            raise OSError("Windows could not create the ClipFinder instance lock.")
+        # ERROR_ALREADY_EXISTS means another ClipFinder desktop process owns
+        # this named mutex.  Close only our newly-created handle in that case.
+        if ctypes.get_last_error() == 183:
+            kernel32.CloseHandle(mutex)
+            return False
+        _single_instance_mutex = mutex
+        return True
+    except OSError:
+        # Do not prevent a user from opening the application if Windows itself
+        # cannot provide this optional protection.  The existing port check is
+        # still a safe final guard in that unusual case.
+        return True
+
+
+def release_single_instance_lock() -> None:
+    """Release the desktop mutex when this process has finished."""
+    global _single_instance_mutex
+    if _single_instance_mutex is None or os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle(_single_instance_mutex)
+    except OSError:
+        pass
+    finally:
+        _single_instance_mutex = None
 
 
 def play_close_confirmation_sound() -> None:
@@ -301,50 +360,59 @@ def run_gpu_runtime_probe(cuda_bin: str, cudnn_bin: str) -> int:
 
 
 def run() -> None:
-    try:
-        import webview
-    except ImportError:
+    if not acquire_single_instance_lock():
         show_error(
-            "ClipFinder desktop window",
-            "The desktop window component is missing. Repair the installed application "
-            "or install the source-project requirements, then reopen ClipFinder.",
+            "ClipFinder is already running",
+            "ClipFinder is already open. Switch to the existing window instead of starting another instance.",
         )
         return
-
-    server_state: dict[str, uvicorn.Server | threading.Thread | None] = {"server": None, "thread": None}
     try:
-        window = webview.create_window(
-            "ClipFinder",
-            html=LOADING_PAGE,
-            width=1500,
-            height=950,
-            min_size=(1024, 700),
-            confirm_close=False,
-            background_color="#0e121a",
-        )
-        window.events.closing += confirm_application_close
-        window.events.closed += lambda *_: stop_server(server_state["server"], server_state["thread"])
+        try:
+            import webview
+        except ImportError:
+            show_error(
+                "ClipFinder desktop window",
+                "The desktop window component is missing. Repair the installed application "
+                "or install the source-project requirements, then reopen ClipFinder.",
+            )
+            return
 
-        def start_backend() -> None:
-            try:
-                server, thread = start_local_server()
-                server_state["server"] = server
-                server_state["thread"] = thread
-                window.load_url(APP_URL)
-            except Exception as exc:
-                show_error("ClipFinder desktop window", str(exc))
-                safe_error = html.escape(str(exc))
-                window.load_html(
-                    "<html><body style='background:#0e121a;color:#edf2fa;font:16px Segoe UI;padding:40px'>"
-                    f"<h2>ClipFinder could not start</h2><p>{safe_error}</p>"
-                    r"<p>Check %LOCALAPPDATA%\ClipFinder\data\logs\clipfinder.log and "
-                    r"%LOCALAPPDATA%\ClipFinder\setup-status.txt.</p></body></html>"
-                )
+        server_state: dict[str, uvicorn.Server | threading.Thread | None] = {"server": None, "thread": None}
+        try:
+            window = webview.create_window(
+                "ClipFinder",
+                html=LOADING_PAGE,
+                width=1500,
+                height=950,
+                min_size=(1024, 700),
+                confirm_close=False,
+                background_color="#0e121a",
+            )
+            window.events.closing += confirm_application_close
+            window.events.closed += lambda *_: stop_server(server_state["server"], server_state["thread"])
 
-        webview.start(start_backend, icon=str(bundled_asset_path("assets/clipfinder.ico")))
-    except Exception as exc:
-        show_error("ClipFinder desktop window", str(exc))
-        stop_server(server_state["server"], server_state["thread"])
+            def start_backend() -> None:
+                try:
+                    server, thread = start_local_server()
+                    server_state["server"] = server
+                    server_state["thread"] = thread
+                    window.load_url(APP_URL)
+                except Exception as exc:
+                    show_error("ClipFinder desktop window", str(exc))
+                    safe_error = html.escape(str(exc))
+                    window.load_html(
+                        "<html><body style='background:#0e121a;color:#edf2fa;font:16px Segoe UI;padding:40px'>"
+                        f"<h2>ClipFinder could not start</h2><p>{safe_error}</p>"
+                        r"<p>Check %LOCALAPPDATA%\ClipFinder\data\logs\clipfinder.log and "
+                        r"%LOCALAPPDATA%\ClipFinder\setup-status.txt.</p></body></html>"
+                    )
+
+            webview.start(start_backend, icon=str(bundled_asset_path("assets/clipfinder.ico")))
+        except Exception as exc:
+            show_error("ClipFinder desktop window", str(exc))
+            stop_server(server_state["server"], server_state["thread"])
+    finally:
+        release_single_instance_lock()
 
 
 if __name__ == "__main__":

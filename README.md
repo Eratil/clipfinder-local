@@ -32,7 +32,7 @@ For later backups use `git add .`, `git commit -m "Describe the change"`, then `
 On the build computer, install Inno Setup 6, then run:
 
 ```powershell
-$version = "0.2.0" # must match app/version.py
+$version = "0.2.1" # must match app/version.py
 .\Build-Installer.ps1 -Version $version
 ```
 

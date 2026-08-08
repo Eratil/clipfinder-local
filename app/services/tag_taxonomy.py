@@ -13,6 +13,9 @@ from typing import Any
 
 
 GAME_REACTION_TAG = "reakcja na grę"
+# This label represents a verified game -> microphone sequence, not merely a
+# loud sound on the stream.
+GAME_REACTION_MIN_SCORE = 11
 CHAT_QUESTION_TAG = "pytanie"
 CHAT_QUESTION_ANSWER_TAG = "odpowiedź na pytanie widza"
 READING_TAG = "format: czytanie"
@@ -131,4 +134,3 @@ def tag_category(value: Any) -> str:
         if lowered.startswith(prefix):
             return f"diagnostic:{prefix.rstrip(': ')}"
     return f"tag:{lowered}"
-

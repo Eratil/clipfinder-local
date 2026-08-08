@@ -62,9 +62,9 @@ def test_chat_rescore_uses_full_segment_and_revision_guard(monkeypatch, timed_wo
         "analysis_mode": "default",
     }
     messages = [
-        {"seconds": 16.0, "author": "a", "message": "HAHA!"},
-        {"seconds": 17.0, "author": "b", "message": "ale dobre xD"},
-        {"seconds": 18.0, "author": "c", "message": "LOL"},
+        {"seconds": 22.0, "author": "a", "message": "HAHA!"},
+        {"seconds": 23.0, "author": "b", "message": "ale dobre xD"},
+        {"seconds": 24.0, "author": "c", "message": "LOL"},
     ]
 
     def fake_row(query, _parameters=()):
@@ -126,3 +126,9 @@ def test_empty_chat_rescore_scope_performs_no_segment_query(monkeypatch):
 
     assert chat.apply_chat_reactions("video-1", []) == 0
     assert not any("FROM segments" in query for query in queries)
+
+
+def test_chat_alerts_and_commands_are_not_reaction_evidence():
+    assert chat._is_meaningful_chat_reaction({"message": "!gra horror"}) is False
+    assert chat._is_meaningful_chat_reaction({"message": "BlayniBear jest już 7 raz pierwszy"}) is False
+    assert chat._is_meaningful_chat_reaction({"message": "HAHA ale dobre xD"}) is True

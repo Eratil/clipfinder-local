@@ -56,6 +56,8 @@ def candidate_factory() -> Callable[..., dict]:
             "context_score": values.pop("context_score", 72),
             "self_contained_score": values.pop("self_contained_score", 78),
             "extended_completeness_score": values.pop("extended_completeness_score", 76),
+            "opening_clarity_score": values.pop("opening_clarity_score", -1),
+            "extended_punchline_score": values.pop("extended_punchline_score", -1),
             "chat_question_match_score": values.pop("chat_question_match_score", 0),
             "review_reason": values.pop("review_reason", ""),
             "rating": values.pop("rating", "unrated"),

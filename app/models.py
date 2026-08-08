@@ -19,6 +19,13 @@ class SegmentTimingUpdate(BaseModel):
     end_seconds: float = Field(gt=0)
 
 
+class ComposerCaptionRefresh(BaseModel):
+    """A one-off caption transcription for the Composer's unsaved range."""
+
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+
+
 class SegmentTranscriptUpdate(BaseModel):
     transcript: str = Field(max_length=5000)
 
@@ -34,6 +41,15 @@ class SegmentPauseTrimUpdate(BaseModel):
 class TagFeedbackUpdate(BaseModel):
     tag: str = Field(min_length=1, max_length=80)
     verdict: str = Field(pattern="^(correct|incorrect|unmarked)$")
+
+
+class PublicationFeedbackUpdate(BaseModel):
+    platform: str = Field(default="", max_length=32)
+    published_url: str = Field(default="", max_length=2000)
+    views: int = Field(default=0, ge=0)
+    average_watch_percent: float = Field(default=0, ge=0, le=1000)
+    shares: int = Field(default=0, ge=0)
+    comments: int = Field(default=0, ge=0)
 
 
 class ChatDelayUpdate(BaseModel):
@@ -76,7 +92,7 @@ class RemotePreviewSave(BaseModel):
 
 class DiscoveryPatternSetCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    profile: str = Field(default="general", pattern="^(general|soulslike|conversation|horror|game_quote_reaction)$")
+    profile: str = Field(default="general", pattern="^(general|soulslike|conversation|horror|game_quote_reaction|funny_moments|game_reactions|chat_interactions|opinions)$")
 
 
 class SavedPromptCreate(BaseModel):
@@ -92,6 +108,9 @@ class RemoteVideoCreate(BaseModel):
 class ExportRequest(BaseModel):
     lead_in_seconds: float = Field(default=0, ge=0, le=10)
     lead_out_seconds: float = Field(default=0, ge=0, le=10)
+    start_seconds: float | None = Field(default=None, ge=0)
+    end_seconds: float | None = Field(default=None, ge=0)
+    hook_seconds: float = Field(default=0, ge=0)
     captions_preset: str = Field(default="none", pattern="^(none|clean|highlight|minimal|boxed_pop|neon_gaming|cinematic|karaoke_punch|minimal_center)$")
     caption_position: str = Field(default="bottom", pattern="^(top|two_fifths|middle|four_fifths|bottom)$")
     base_color: str = Field(default="#FFFFFF", pattern="^#[0-9A-Fa-f]{6}$")
@@ -101,8 +120,14 @@ class ExportRequest(BaseModel):
     outline_color: str = Field(default="#000000", pattern="^#[0-9A-Fa-f]{6}$")
     glow_enabled: bool = False
     opacity: int = Field(default=100, ge=20, le=100)
+    max_lines: int = Field(default=2, ge=1, le=4)
     layout: str = Field(default="original", pattern="^(original|portrait_camera|portrait_game|portrait_split)$")
     audio_track: int = Field(default=1, ge=1, le=4)
+    censor_profanity: bool | None = None
+    remove_pauses: bool | None = None
+    microphone_enhancement: bool = False
+    normalize_loudness: bool = False
+    volume_gain_db: float = Field(default=0, ge=-12, le=12)
     camera_x: float = Field(default=0.78, ge=0, le=1)
     camera_y: float = Field(default=0.03, ge=0, le=1)
     camera_width: float = Field(default=0.11, gt=0.02, le=1)
@@ -112,6 +137,10 @@ class ExportRequest(BaseModel):
     game_width: float = Field(default=0.56, gt=0.02, le=1)
     game_height: float = Field(default=1.0, gt=0.02, le=1)
     filename: str = Field(default="", max_length=120)
+    # Composer can refresh captions for an unsaved timing range. Keep those
+    # words in the export request instead of overwriting the analysed clip.
+    caption_text: str | None = Field(default=None, max_length=50000)
+    caption_word_timestamps: list[dict] | None = None
 
 
 class CaptionDefaultsUpdate(BaseModel):
@@ -123,6 +152,7 @@ class CaptionDefaultsUpdate(BaseModel):
     outline_color: str = Field(default="#000000", pattern="^#[0-9A-Fa-f]{6}$")
     glow_enabled: bool = False
     opacity: int = Field(default=100, ge=20, le=100)
+    max_lines: int = Field(default=2, ge=1, le=4)
 
 
 class ExportDefaultsUpdate(BaseModel):
@@ -153,7 +183,7 @@ class AnalysisAudioDefaultsUpdate(BaseModel):
 
 
 class DiscoveryDefaultsUpdate(BaseModel):
-    active_profile: str = Field(default="general", pattern="^(general|soulslike|conversation|horror|game_quote_reaction)$")
+    active_profile: str = Field(default="general", pattern="^(general|soulslike|conversation|horror|game_quote_reaction|funny_moments|game_reactions|chat_interactions|opinions)$")
     pattern_set_id: str = Field(default="", max_length=80)
     profanity_filter: str = Field(default="allow", pattern="^(allow|one|none)$")
 

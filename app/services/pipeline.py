@@ -21,6 +21,7 @@ from app.services.media import audio_track_count, duration_seconds, extract_audi
 from app.services.pipeline_cache import PipelineCache, canonical_json, fingerprint_source_file
 from app.services.model_catalog import whisper_identity, whisper_model_source
 from app.services.scenes import detect_boundaries
+from app.services.tag_taxonomy import GAME_REACTION_MIN_SCORE
 from app.services.tagging import infer_tags
 from app.services.chat import apply_chat_reactions
 from app.services.analysis_store import (
@@ -511,24 +512,30 @@ def game_reaction_scores(game_energies: np.ndarray, microphone_energies: np.ndar
     """Reward a game/stream event only when a stronger microphone response follows it.
 
     A roar, alert or jumpscare by itself gets no boost. A dynamic game sound must
-    happen first and be followed within three seconds by a clear rise in the
-    microphone track.
+    happen immediately before, or at the beginning of, a candidate and be
+    followed by a clear rise in the microphone track. Video activity is never
+    an input to this calculation.
     """
     if len(game_energies) < 4 or len(microphone_energies) < 4:
         return [0] * len(candidates)
     length = min(len(game_energies), len(microphone_energies))
     game_energies, microphone_energies = game_energies[:length], microphone_energies[:length]
-    _game_base, game_high, game_peak = np.percentile(game_energies, [55, 92, 99])
-    microphone_base, microphone_high, microphone_peak = np.percentile(microphone_energies, [55, 90, 99])
+    _game_base, game_high, game_peak = np.percentile(game_energies, [55, 95, 99])
+    _microphone_base, microphone_high, microphone_peak = np.percentile(microphone_energies, [55, 93, 99])
     game_spread = max(1.0, game_peak - game_high)
     microphone_spread = max(1.0, microphone_peak - microphone_high)
     scores: list[int] = []
-    response_limit = max(1, round(3.0 / window_seconds))
+    response_limit = max(1, round(2.0 / window_seconds))
+    event_after_start_limit = max(1, round(3.0 / window_seconds))
     for candidate in candidates:
         response_left = max(0, int(candidate["start"] / window_seconds))
         left = max(0, response_left - round(lead_seconds / window_seconds))
         right = min(length, max(left + 1, int(np.ceil(candidate["end"] / window_seconds))))
-        game_section = game_energies[left:right]
+        # A long clip must not receive the tag merely because an unrelated game
+        # sound happened much later. The event needs to be close to the start
+        # of the spoken reaction.
+        event_right = min(right, response_left + event_after_start_limit)
+        game_section = game_energies[left:event_right]
         if not len(game_section) or float(game_section.max()) < game_high:
             scores.append(0)
             continue
@@ -540,14 +547,17 @@ def game_reaction_scores(game_energies: np.ndarray, microphone_energies: np.ndar
             event_energy = float(game_energies[event_index])
             if event_energy < game_high:
                 continue
-            response_start = event_index + 1
+            # The microphone rise itself must occur inside this candidate. An
+            # event shortly before it is valid only when the reaction begins
+            # in the clip, not in preceding context.
+            response_start = max(response_left, event_index + 1)
             response_end = min(right, response_start + response_limit)
             if response_end <= response_start or response_end <= response_left:
                 continue
             response_peak = float(microphone_energies[response_start:response_end].max())
             before_start = max(left, event_index - 4)
             before_level = float(np.median(microphone_energies[before_start:event_index + 1]))
-            if response_peak < microphone_high or response_peak <= before_level * 1.08:
+            if response_peak < microphone_high or response_peak <= before_level * 1.16:
                 continue
             game_strength = max(0.0, (event_energy - game_high) / game_spread)
             response_strength = max(0.0, (response_peak - microphone_high) / microphone_spread)
@@ -1119,12 +1129,13 @@ def _analyse(
         report(74, f"Reading {label}")
         energies, _tones = cached_audio_features(track, 8000, False)
         event_energies.append((label, energies))
-    # Prefer the clean game track. The all-sounds mix is a fallback for users
-    # who only have one combined stream track.
-    reaction_sources = [item for item in event_energies if item[0] == "game-audio event"] or event_energies
+    # Only a dedicated game track can establish a game -> microphone sequence.
+    # The all-sounds mix also contains alerts, music and browser audio, so it
+    # must never create reaction-to-game evidence by itself.
+    reaction_sources = [item for item in event_energies if item[0] == "game-audio event"]
     reaction_scores = [0] * len(candidates)
     for _label, energies in reaction_sources:
-        reaction_scores = [max(current, incoming) for current, incoming in zip(reaction_scores, game_reaction_scores(energies, microphone_energies, candidates, lead_seconds=12.0))]
+        reaction_scores = [max(current, incoming) for current, incoming in zip(reaction_scores, game_reaction_scores(energies, microphone_energies, candidates, lead_seconds=2.5))]
     embedding_texts = [item["text"] or "bez wypowiedzi" for item in candidates]
     embedding_parameters = {
         "stage_version": EMBEDDING_CACHE_VERSION,
@@ -1178,7 +1189,7 @@ def _analyse(
             "boundary_signals": candidate.get("boundary_signals") or [],
             "analysis_mode": analysis_mode,
             "extended_completeness_score": -1,
-            "audio_event_score": game_reaction_score if game_reaction_score >= 7 else 0,
+            "audio_event_score": game_reaction_score if game_reaction_score >= GAME_REACTION_MIN_SCORE else 0,
             "game_reaction_score": game_reaction_score,
             "voice_expression_score": voice_expression_score,
             "vision_score": 0,

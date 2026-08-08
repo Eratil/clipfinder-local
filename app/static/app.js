@@ -1,20 +1,22 @@
-const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', pattern_set_id:'', profanity_filter:'allow', pattern_sets:[], profiles:[] }, chat: null, resultMode: 'all', activeResults: null, loadedReadyVideoId: null, previewAudio: null, listeningSegment: null, listenAudioTrack: 1, quickReview: { clips: [], index: 0, saving: false, previewKey: '' }, remotePreview: { jobId:null, completedJobId:null, poll:null }, editingSegment: null, clipEditorOpen: false, editorTab: 'edit', captionPositions: {}, exportNames: {}, globalCaption: { captions_preset: 'highlight', base_color: '#FFFFFF', active_color: '#FFFF00', outline_enabled: true, outline_color: '#000000', glow_enabled: false, opacity: 100 }, globalExport: { layout: 'original', layout_preset_id: '', audio_track: 1, camera_x:.78, camera_y:.03, camera_width:.11, camera_height:.11, game_x:.22, game_y:0, game_width:.56, game_height:1 }, layoutPresets: [], layoutCalibration: { mode:'camera', drawing:null }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, discoveryDirty: false, statusErrorUntil: 0, updateDownloadId: null, updatePollTimer: null, updatePollGeneration: 0, appVersion: '', videoRequestGeneration: 0, segmentRequestGeneration: 0, chatRequestGeneration: 0, importRequestGeneration: 0, resultRequestGeneration: 0, quickReviewRequestGeneration: 0, listeningRequestGeneration: 0, dashboardRefreshPromise: null, runtimeStatusPromise: null, storage: null, storageLoadedAt: 0, videoRenderSignature: '', importRenderSignature: '', hasActiveVideoJobs: false, hasActiveImports: false };
+const state = { videoId: null, collectionId: null, collectionName: '', videos: [], rejectionReasons: [], analysisAudio: { mode:'split', single_track:1, microphone_track:2, all_sounds_track:1, game_track:3, use_all_sounds:true, use_game:true }, discovery: { active_profile:'general', pattern_set_id:'', profanity_filter:'allow', pattern_sets:[], profiles:[] }, chat: null, resultMode: 'all', activeResults: null, loadedReadyVideoId: null, previewAudio: null, listeningSegment: null, listenAudioTrack: 1, quickReview: { clips: [], index: 0, saving: false, previewKey: '' }, remotePreview: { jobId:null, completedJobId:null, poll:null }, editingSegment: null, clipComposer: { segmentId:null, start:0, end:0, originalStart:0, originalEnd:0, caption:{}, audio:{}, timing:{ loop:false, hook_seconds:0 }, previewPhase:'body', previewTransition:false, baseLayout:{}, layout:{}, tab:'captions', layoutFrameHandle:null, layoutFrameType:'' }, captionFavorites: [], clipEditorOpen: false, editorTab: 'edit', exportNames: {}, globalCaption: { captions_preset: 'highlight', caption_position: 'bottom', base_color: '#FFFFFF', active_color: '#FFFF00', outline_enabled: true, outline_color: '#000000', glow_enabled: false, opacity: 100, max_lines: 2 }, globalExport: { layout: 'original', layout_preset_id: '', audio_track: 1, camera_x:.78, camera_y:.03, camera_width:.11, camera_height:.11, game_x:.22, game_y:0, game_width:.56, game_height:1 }, layoutPresets: [], layoutCalibration: { mode:'camera', drawing:null }, captionDirty: false, exportDirty: false, analysisAudioDirty: false, discoveryDirty: false, statusErrorUntil: 0, updateDownloadId: null, updatePollTimer: null, updatePollGeneration: 0, appVersion: '', videoRequestGeneration: 0, segmentRequestGeneration: 0, chatRequestGeneration: 0, importRequestGeneration: 0, resultRequestGeneration: 0, quickReviewRequestGeneration: 0, listeningRequestGeneration: 0, dashboardRefreshPromise: null, runtimeStatusPromise: null, storage: null, storageLoadedAt: 0, videoRenderSignature: '', importRenderSignature: '', hasActiveVideoJobs: false, hasActiveImports: false };
 // One preview definition per export preset. Add a new entry here when adding a
 // caption preset, so the settings preview stays in sync without a new CSS rule.
 const captionPreviewPresets = {
   none: { showText:false, hint:'Captions are disabled for export.' },
-  clean: { size:'25px', weight:'700', active:false, activeScale:'1', activeWeight:'700', outline:3, hint:'Clean: medium text with a strong outline. The active-word colour is not used by this preset.' },
-  highlight: { size:'29px', weight:'700', active:true, activeScale:'1.12', activeWeight:'900', outline:4, hint:'Word highlight: the currently spoken word changes colour and becomes larger.' },
-  minimal: { size:'19px', weight:'400', active:false, activeScale:'1', activeWeight:'400', outline:2, hint:'Minimal: smaller, lighter text with a subtle outline. The active-word colour is not used by this preset.' },
-  boxed_pop: { size:'26px', weight:'800', active:false, activeScale:'1', activeWeight:'800', outline:2, variant:'boxed', hint:'Boxed Pop: bold text in a compact caption card.' },
-  neon_gaming: { size:'28px', weight:'800', active:true, activeScale:'1.16', activeWeight:'900', outline:2, variant:'neon', hint:'Neon Gaming: gaming-style text; the spoken word is larger and uses the active colour.' },
-  cinematic: { size:'22px', weight:'400', active:false, activeScale:'1', activeWeight:'400', outline:2, variant:'cinematic', hint:'Cinematic: understated text on a dark subtitle band.' },
-  karaoke_punch: { size:'30px', weight:'800', active:true, activeScale:'1.24', activeWeight:'900', outline:4, variant:'karaoke', hint:'Karaoke Punch: each spoken word uses a stronger bounce and active colour.' },
-  minimal_center: { size:'20px', weight:'400', active:false, activeScale:'1', activeWeight:'400', outline:2, variant:'minimal-center', hint:'Minimal Center: quiet, centered text. This preset forces the center position in exported clips.' }
+  clean: { size:'25px', exportSize:46, weight:'700', active:false, activeScale:'1', activeWeight:'700', outline:3, hint:'Clean: medium text with a strong outline. The active-word colour is not used by this preset.' },
+  highlight: { size:'29px', exportSize:52, weight:'700', active:true, activeScale:'1.12', activeWeight:'900', outline:4, hint:'Word highlight: the currently spoken word changes colour and becomes larger.' },
+  minimal: { size:'19px', exportSize:34, weight:'400', active:false, activeScale:'1', activeWeight:'400', outline:2, hint:'Minimal: smaller, lighter text with a subtle outline. The active-word colour is not used by this preset.' },
+  boxed_pop: { size:'26px', exportSize:46, weight:'800', active:false, activeScale:'1', activeWeight:'800', outline:5, variant:'boxed', hint:'Boxed Pop: bold text in a compact caption card.' },
+  neon_gaming: { size:'28px', exportSize:50, weight:'800', active:true, activeScale:'1.16', activeWeight:'900', outline:2, variant:'neon', hint:'Neon Gaming: gaming-style text; the spoken word is larger and uses the active colour.' },
+  cinematic: { size:'22px', exportSize:42, weight:'400', active:false, activeScale:'1', activeWeight:'400', outline:10, variant:'cinematic', hint:'Cinematic: understated text on a dark subtitle band.' },
+  karaoke_punch: { size:'30px', exportSize:54, weight:'800', active:true, activeScale:'1.24', activeWeight:'900', outline:4, variant:'karaoke', hint:'Karaoke Punch: each spoken word uses a stronger bounce and active colour.' },
+  minimal_center: { size:'20px', exportSize:32, weight:'400', active:false, activeScale:'1', activeWeight:'400', outline:2, variant:'minimal-center', hint:'Minimal Center: quiet, centered text. This preset forces the center position in exported clips.' }
 };
-const captionPreviewWords = ['These', 'are', 'test', 'captions'];
+const captionPreviewWords = ['These', 'are', 'test', 'captions', 'shown', 'across', 'several', 'short', 'lines'];
 const captionPreviewFontFamilies = Object.fromEntries(['Inter', 'Montserrat', 'Poppins', 'Lato', 'Roboto Condensed', 'Oswald', 'Nunito', 'Noto Sans', 'Bungee', 'Cinzel', 'Pixelify Sans'].map((name) => [name, `"ClipFinder ${name}", Arial, sans-serif`]));
 let captionPreviewTimer = null;
+let composerAudioGraph = null;
+let composerExactAudioUrl = '';
 const $ = (selector) => document.querySelector(selector);
 const APP_LANGUAGE_KEY = 'clipfinder-interface-language';
 const polishText = {
@@ -24,17 +26,19 @@ const polishText = {
   'Reference collections':'Kolekcje wzorców', 'Create collection':'Utwórz kolekcję', 'Clip collections':'Kolekcje klipów', 'Find similar to active collection':'Znajdź podobne w aktywnej kolekcji', 'Generate prompt from active collection':'Wygeneruj prompt z aktywnej kolekcji', 'Folder with ready-made clips':'Folder z gotowymi klipami', 'Include subfolders':'Uwzględnij podfoldery', 'Save folder and import':'Zapisz folder i zaimportuj', 'Destination collection':'Kolekcja docelowa', 'Import link as reference':'Zaimportuj link jako wzorzec',
   'Single Short/video preview':'Podgląd pojedynczego Shorta/filmu', 'Analyze temporary preview':'Przeanalizuj tymczasowy podgląd',
   'Discovery profile':'Profil wyszukiwania', 'Changes how candidates are ranked. It uses your approvals and rejection reasons too.':'Zmienia sposób rankingu kandydatów. Uwzględnia także Twoje akceptacje i powody odrzucenia.', 'Content type':'Typ treści', 'Pattern add-on':'Dodatek wzorców', 'Profanity in search':'Wulgaryzmy w wyszukiwaniu', 'Allow all':'Dopuszczaj wszystkie', 'Allow up to one per clip':'Dopuszczaj maksymalnie jedno na klip', 'Hide all clips with profanity':'Ukryj wszystkie klipy z wulgaryzmami', 'Save discovery profile':'Zapisz profil wyszukiwania', 'Create pattern set':'Utwórz zestaw wzorców', 'Saved pattern sets':'Zapisane zestawy wzorców', 'A pattern set stores only conclusions from reviewed Shorts: semantic vector, tags and scores. It never stores the source video, audio or frame.':'Zestaw wzorców zapisuje wyłącznie wnioski z przejrzanych Shortów: wektor semantyczny, tagi i oceny. Nigdy nie zapisuje źródłowego filmu, audio ani klatki.',
+  'Funny moments - setup and punchline':'Funny moments - setup i puenta', 'Game reactions - event then your response':'Reakcje na grę - zdarzenie i Twoja odpowiedź', 'Chat interactions - question and response':'Interakcje z czatem - pytanie i odpowiedź', 'Opinions - thesis, argument and conclusion':'Opinie - teza, argument i wniosek',
   'Custom rejection reasons':'Własne powody odrzucenia', 'Saved reasons appear in the rejection list on every clip.':'Zapisane powody pojawiają się na liście odrzucenia każdego klipu.', 'Save reason':'Zapisz powód', 'Saved rejection reasons':'Zapisane powody odrzucenia',
   'Caption defaults':'Domyślne napisy', 'Used for exports in the current session and restored when ClipFinder is reopened. Save a named favorite below to keep a reusable preset.':'Używane przy eksporcie w bieżącej sesji i przywracane po ponownym otwarciu ClipFindera. Zapisz niżej nazwany ulubiony preset, aby używać go ponownie.', 'Caption type':'Typ napisów', 'Caption font':'Czcionka napisów', 'Sentence colour':'Kolor zdania', 'Spoken word colour':'Kolor wypowiadanego słowa', 'Add outline':'Dodaj obrys', 'Outline colour':'Kolor obrysu', 'Add light glow':'Dodaj lekką poświatę', 'Text opacity':'Przezroczystość tekstu', 'Preview background':'Tło podglądu', 'Custom background colour':'Własny kolor tła', 'Save current colours as favorite':'Zapisz bieżące kolory jako ulubione', 'Saved caption colours and fonts':'Zapisane kolory i czcionki napisów',
   'Export defaults':'Domyślne ustawienia eksportu', 'Used for exports in the current session and restored when ClipFinder is reopened. Save a named layout below to keep a reusable preset.':'Używane przy eksporcie w bieżącej sesji i przywracane po ponownym otwarciu ClipFindera. Zapisz niżej nazwany układ, aby używać go ponownie.', 'Clip layout':'Układ klipu', 'Original audio track':'Oryginalna ścieżka dźwiękowa', 'Layout calibration and preview':'Kalibracja i podgląd układu', 'Select a recording, pause on a representative frame, choose an area and drag a rectangle. The preview is shown before export.':'Wybierz nagranie, zatrzymaj je na reprezentatywnej klatce, wybierz obszar i przeciągnij prostokąt. Podgląd jest widoczny przed eksportem.', 'Use selected recording':'Użyj wybranego nagrania', 'Draw camera area':'Zaznacz obszar kamery', 'Draw gameplay area':'Zaznacz obszar gry', 'Choose a recording first.':'Najpierw wybierz nagranie.', 'Save current layout':'Zapisz bieżący układ', 'Saved layouts':'Zapisane układy', 'Analysis audio sources':'Źródła audio analizy', 'Used for the next analysis or reanalysis. Captions and prompt search always use the selected transcription track.':'Używane przy następnej analizie lub reanalizie. Napisy i wyszukiwanie promptów zawsze korzystają z wybranej ścieżki transkrypcji.', 'One track - legacy analysis':'Jedna ścieżka - analiza klasyczna', 'Separate microphone and sound tracks':'Oddzielne ścieżki mikrofonu i dźwięku', 'Single track for transcription':'Jedna ścieżka do transkrypcji', 'Only microphone - transcription track':'Tylko mikrofon - ścieżka transkrypcji', 'Use all sounds for event scoring':'Użyj wszystkich dźwięków do oceny zdarzeń', 'All sounds track':'Ścieżka wszystkich dźwięków', 'Use only game sounds for event scoring':'Użyj tylko dźwięków gry do oceny zdarzeń', 'Only game track':'Tylko ścieżka gry', 'Save analysis audio settings':'Zapisz ustawienia audio analizy',
   'Application language':'Język aplikacji', 'Interface language':'Język interfejsu', 'Software updates':'Aktualizacje programu', 'Check for updates':'Sprawdź aktualizacje', 'Download update':'Pobierz aktualizację', 'Download manually':'Pobierz ręcznie', 'Open diagnostic report':'Otwórz raport diagnostyczny',
-  'Review statistics':'Statystyki decyzji', 'All locally analysed recordings. Use this to see what the ranking gets right or wrong.':'Wszystkie lokalnie przeanalizowane nagrania. Użyj tego widoku, aby sprawdzić, co ranking wybiera poprawnie, a co błędnie.', 'Refresh':'Odśwież', 'Why clips are rejected':'Dlaczego klipy są odrzucane', 'Approved vs rejected scores':'Oceny: zaakceptowane kontra odrzucone', 'A large gap means this score helps selection. A small or reversed gap is a signal that it needs tuning.':'Duża różnica oznacza, że dana ocena pomaga w selekcji. Mała lub odwrócona różnica sugeruje konieczność dostrojenia.', 'Tags and decisions':'Tagi i decyzje', 'Shows the most frequent tags and how often clips with that tag are approved or rejected.':'Pokazuje najczęstsze tagi oraz to, jak często klipy z danym tagiem są zatwierdzane lub odrzucane.', 'Analysis modes and reading filter':'Tryby analizy i filtr czytania',
+  'Review statistics':'Statystyki decyzji', 'All locally analysed recordings. Use this to see what the ranking gets right or wrong.':'Wszystkie lokalnie przeanalizowane nagrania. Użyj tego widoku, aby sprawdzić, co ranking wybiera poprawnie, a co błędnie.', 'Refresh':'Odśwież', 'Why clips are rejected':'Dlaczego klipy są odrzucane', 'Approved vs rejected scores':'Oceny: zaakceptowane kontra odrzucone', 'A large gap means this score helps selection. A small or reversed gap is a signal that it needs tuning.':'Duża różnica oznacza, że dana ocena pomaga w selekcji. Mała lub odwrócona różnica sugeruje konieczność dostrojenia.', 'Calibration report':'Raport kalibracyjny', 'This compares reviewed clips only. It indicates which scores currently separate your approvals from rejections.':'Porównuje wyłącznie przejrzane klipy. Pokazuje, które oceny obecnie rozróżniają Twoje akceptacje i odrzucenia.', 'Collecting data':'Zbieranie danych', 'Strong signal':'Mocny sygnał', 'Weak signal':'Słaby sygnał', 'Needs tuning':'Wymaga dostrojenia', 'difference':'różnica', 'Logical sense':'Spójność wypowiedzi', 'Tags and decisions':'Tagi i decyzje', 'Shows the most frequent tags and how often clips with that tag are approved or rejected.':'Pokazuje najczęstsze tagi oraz to, jak często klipy z danym tagiem są zatwierdzane lub odrzucane.', 'Analysis modes and reading filter':'Tryby analizy i filtr czytania',
   'New recording':'Nowe nagranie', 'Analysis mode':'Tryb analizy', 'Upload and analyze':'Wgraj i analizuj', 'Download link and analyze':'Pobierz link i analizuj', 'Paste a public YouTube link or Twitch VOD URL only when you are allowed to download it. The page can be closed after upload or link submission; keep the launcher window open while processing runs.':'Wklej publiczny link YouTube lub Twitch VOD tylko wtedy, gdy masz prawo go pobrać. Stronę można zamknąć po wysłaniu pliku lub linku, ale okno uruchamiające musi pozostać otwarte podczas przetwarzania.', 'Recordings':'Nagrania', 'Refresh now':'Odśwież', 'Candidates':'Kandydaci',
   'Chat reaction analysis':'Analiza reakcji czatu', 'Import a chat transcript with timestamps from the start of the recording. Messages are scored after your clip, using the delay below.':'Zaimportuj transkrypcję czatu ze znacznikami czasu liczonymi od początku nagrania. Wiadomości są oceniane po klipie z uwzględnieniem opóźnienia poniżej.', 'Chat transcript (.json, .csv, .tsv or .txt)':'Transkrypcja czatu (.json, .csv, .tsv lub .txt)', 'Expected chat delay (seconds)':'Przewidywane opóźnienie czatu (sekundy)', 'Import chat and score clips':'Zaimportuj czat i oceń klipy', 'Save delay and recalculate':'Zapisz opóźnienie i przelicz',
   'Tag':'Tag', 'All tags':'Wszystkie tagi', 'Possible reading':'Możliwe czytanie', 'Hide possible reading':'Ukryj możliwe czytanie', 'Show similar alternatives':'Pokaż podobne warianty', 'Find tag':'Znajdź tag', 'Clip status':'Status klipu', 'All clips':'Wszystkie klipy', 'Approved clips':'Zaakceptowane klipy', 'Not reviewed':'Nieprzejrzane', 'Rejected clips':'Odrzucone klipy', 'Filter status':'Filtruj status', 'Sort results':'Sortuj wyniki', 'Best of stream':'Najlepsze ze streama', 'Show Best of stream':'Pokaż najlepsze ze streama', 'Quick selection':'Szybka selekcja',
   'Open in full recording':'Otwórz w całym nagraniu', 'Approve clip':'Zatwierdź klip', 'Reject':'Odrzuć', 'Listen':'Odsłuchaj', 'Add as reference':'Dodaj jako wzorzec', 'Click this clip to edit it in the right panel.':'Kliknij klip, aby edytować go w prawym panelu.',
   'Clip editor':'Edytor klipu', 'Detailed scoring':'Szczegółowa ocena', 'Click any candidate card to edit its range, captions, review status and export.':'Kliknij dowolną kartę kandydata, aby edytować zakres, napisy, status i eksport.', 'Start (seconds)':'Początek (sekundy)', 'End (seconds)':'Koniec (sekundy)', 'Save range':'Zapisz zakres', 'Caption position':'Pozycja napisów', 'Bottom':'Dół', 'Middle':'Środek', 'Top':'Góra', 'Clip status':'Status klipu', 'Not reviewed':'Nieprzejrzane', 'Approved':'Zatwierdzone', 'Rejected':'Odrzucone', 'Reason if rejected':'Powód odrzucenia', 'Not interesting enough':'Niewystarczająco ciekawe', 'Reading notes / item text':'Czytanie notatek / tekstu przedmiotu', 'Game dialogue / cutscene':'Dialog z gry / przerywnik', 'Not enough emotion':'Za mało emocji', 'No clear point or punchline':'Brak wyraźnej myśli lub puenty', 'Bad transcription':'Błędna transkrypcja', 'Save status':'Zapisz status', 'Caption text (you can correct the transcription)':'Tekst napisów (możesz poprawić transkrypcję)', 'Save caption text':'Zapisz tekst napisów', 'Mute profanity from mid-word in exported audio and mask it in captions':'Wycisz wulgaryzmy od środka słowa w eksporcie audio i zamaskuj je w napisach', 'Remove long pauses from preview and exported video':'Usuń długie pauzy z podglądu i eksportowanego filmu', 'Export file name (optional)':'Nazwa pliku eksportu (opcjonalnie)', 'Approve before export':'Zatwierdź przed eksportem',
-  'Suggested score':'Ocena sugerowana', 'Quality':'Jakość', 'Short potential':'Potencjał shorta', 'Context':'Kontekst', 'Self-contained':'Samowystarczalność', 'Extended completeness':'Pełność rozszerzona', 'These scores explain the selected clip. They do not replace your approval decision.':'Te oceny wyjaśniają wybrany klip. Nie zastępują Twojej decyzji o zatwierdzeniu.', 'Legend':'Legenda',
+  'Suggested score':'Ocena sugerowana', 'Quality':'Jakość', 'Short potential':'Potencjał shorta', 'Context':'Kontekst', 'Self-contained':'Samowystarczalność', 'Extended completeness':'Pełność rozszerzona', 'Opening clarity':'Jasność otwarcia', 'Punchline / outcome':'Puenta / wynik', 'These scores explain the selected clip. They do not replace your approval decision.':'Te oceny wyjaśniają wybrany klip. Nie zastępują Twojej decyzji o zatwierdzeniu.', 'Legend':'Legenda',
+  'Published clip results':'Wyniki opublikowanego klipu', 'Optional manual feedback. Save results after publishing so future calibration can compare predicted quality with real performance.':'Opcjonalne dane ręczne. Zapisz wyniki po publikacji, aby przyszła kalibracja mogła porównać przewidywaną jakość z rzeczywistym wynikiem.', 'Platform':'Platforma', 'Not published yet':'Jeszcze nieopublikowany', 'Published URL':'Link do publikacji', 'Views':'Wyświetlenia', 'Average watch (%)':'Średnie oglądanie (%)', 'Shares':'Udostępnienia', 'Comments':'Komentarze', 'Save published results':'Zapisz wyniki publikacji', 'Published clip results saved.':'Wyniki opublikowanego klipu zapisane.', 'Published clips':'Opublikowane klipy', 'Published results':'Wyniki publikacji', 'views':'wyświetleń', 'median watch':'mediana oglądania', 'shares':'udostępnień',
   'Based on your active discovery profile, prompt/reference similarity, previous approvals and rejections, and relevant reactions from game, voice and chat.':'Bazuje na aktywnym profilu wyszukiwania, podobieństwie do promptów/wzorców, wcześniejszych akceptacjach i odrzuceniach oraz istotnych reakcjach gry, głosu i czatu.', 'Rewards natural speaking pace, usable clip length, emotion or a verified game-to-voice reaction. Reading cues, static text-heavy game screens and incomplete speech lower it.':'Premiuje naturalne tempo wypowiedzi, użyteczną długość klipu, emocję albo potwierdzoną reakcję gra → głos. Obniżają ją sygnały czytania, statyczne ekrany gry z dużą ilością tekstu i urwana wypowiedź.', 'Rewards a short-friendly length, a clear standalone thought, a hook, payoff, emotion and chat engagement. It is strongly reduced by reading aloud, very long clips or missing context.':'Premiuje długość odpowiednią dla shorta, jasną samodzielną myśl, hook, puentę, emocje i zaangażowanie czatu. Jest mocno obniżana przez czytanie na głos, bardzo długie klipy lub brak kontekstu.', 'Compares the surrounding speech before and after the fragment. A score falls when the clip begins or ends in the middle of a thought.':'Porównuje wypowiedź przed i po fragmencie. Ocena spada, gdy klip zaczyna się lub kończy w środku myśli.',
   'Measures whether a new viewer can understand the clip without previous conversation. Complete sentences and an understandable point increase it.':'Sprawdza, czy nowy widz zrozumie klip bez wcześniejszej rozmowy. Pełne zdania i czytelna myśl podnoszą wynik.', 'Available after Extended analysis. It performs an extra check of sentence boundaries, a complete ending and whether the clip reaches its point or punchline.':'Dostępne po analizie rozszerzonej. Dodatkowo sprawdza granice zdań, pełne zakończenie oraz to, czy klip dochodzi do swojej myśli lub puenty.',
   'Use':'Użyj', 'Delete':'Usuń', 'Use collection':'Użyj kolekcji', 'Reimport folder':'Zaimportuj folder ponownie', 'No recordings yet.':'Brak nagrań.', 'No candidates yet. Analysis may still be running.':'Brak kandydatów. Analiza może nadal trwać.', 'No rejected clips with saved reasons yet.':'Brak odrzuconych klipów z zapisanym powodem.', 'No analysed tags yet.':'Brak przeanalizowanych tagów.',
@@ -54,9 +58,66 @@ const polishText = {
   'Learning data for this profile':'Dane uczące dla tego profilu', 'analysed Shorts':'przeanalizowanych Shortów', 'Default mode':'Tryb domyślny', 'no additional Short patterns':'brak dodatkowych wzorców Shortów', 'General - best mixed clips':'Ogólny - najlepsze różnorodne klipy', 'Game quote/event -> your reaction':'Cytat/wydarzenie z gry → Twoja reakcja',
   'self-contained':'samowystarczalny', 'short-friendly length':'długość odpowiednia dla shorta', 'usable short length':'użyteczna długość shorta', 'too long for a short':'za długi na shorta', 'long for a short':'długi jak na shorta', 'very brief clip':'bardzo krótki klip', 'stands on its own':'jest zrozumiały bez kontekstu', 'mostly self-contained':'w większości samowystarczalny', 'needs surrounding context':'wymaga otaczającego kontekstu', 'complete thought':'pełna myśl', 'unclear thought':'niejasna myśl', 'verified complete ending':'zweryfikowane pełne zakończenie', 'incomplete ending':'niepełne zakończenie', 'clear content hook':'wyraźny hook treści', 'answer with context':'odpowiedź z kontekstem', 'game moment to reaction':'moment w grze → reakcja', 'expressive voice':'ekspresyjny głos', 'chat reacted':'reakcja czatu', 'chat amusement':'rozbawienie czatu', 'not enough spoken content':'za mało wypowiedzianej treści', 'too much spoken content':'za dużo wypowiedzianej treści', 'likely reading aloud':'prawdopodobne czytanie na głos', 'reading cues':'sygnały czytania', 'exceptional short criteria met':'spełnia kryteria wyjątkowego shorta', 'exceptional quality criteria met':'spełnia kryteria wyjątkowej jakości', 'game -> voice':'gra → głos', 'game -> voice -> chat':'gra → głos → czat'
 };
+Object.assign(polishText, {
+  'Clip composer':'Kompozytor klipu',
+  'Refresh captions':'Popraw napisy',
+  'Refreshing captions...':'Poprawianie napisów...',
+  'Captions match the current clip range.':'Napisy pasują do aktualnego zakresu klipu.',
+  'Captions still match the previous range. Refresh them when the final range is ready.':'Napisy nadal dotyczą poprzedniego zakresu. Popraw je, gdy wybierzesz ostateczny zakres.',
+  'Captions refreshed for the selected range.':'Napisy zostały poprawione dla wybranego zakresu.',
+  'Unable to refresh captions.':'Nie udało się poprawić napisów.',
+  'Refresh captions for the selected range before exporting.':'Przed eksportem popraw napisy dla wybranego zakresu.',
+  'Open Clip composer':'Otwórz kompozytor klipu',
+  'Focused clip preview':'Podgląd wybranego klipu',
+  'Preview position':'Pozycja podglądu',
+  'Open a focused preview of this clip to prepare its timing, layout, captions and future edits.':'Otwórz skupiony podgląd tego klipu, aby przygotować jego czas, układ, napisy i przyszłe edycje.',
+  'The preview is limited to the selected clip. Timing, reordering fragments, effects and audio tools will be added here without changing the original recording.':'Podgląd jest ograniczony do wybranego klipu. Narzędzia czasu, zmiany kolejności fragmentów, efektów i audio będą dodawane tutaj bez zmiany oryginalnego nagrania.',
+  'Captions':'Napisy', 'Starts with the current Global caption settings. Changes here affect only this composer preview.':'Rozpoczyna od bieżących globalnych ustawień napisów. Zmiany tutaj dotyczą wyłącznie tego podglądu kompozytora.',
+  'Layout':'Układ', 'Starts with the current Global layout. Changes here only affect this composer preview.':'Rozpoczyna od bieżącego globalnego układu. Zmiany tutaj dotyczą wyłącznie podglądu kompozytora.', 'The preview uses the saved camera and gameplay areas from Global settings. It does not change export settings.':'Podgląd korzysta z zapisanych obszarów kamery i gry z ustawień globalnych. Nie zmienia ustawień eksportu.', 'Play preview':'Odtwórz podgląd', 'Pause preview':'Wstrzymaj podgląd',
+  'Layout calibration for this clip':'Kalibracja układu dla tego klipu',
+  'Uses this recording and the current frame from the selected clip. Pause or seek the preview, then capture the frame and draw camera or gameplay areas.':'Korzysta z tego nagrania i aktualnej klatki wybranego klipu. Zatrzymaj lub przewiń podgląd, przechwyć klatkę, a potem zaznacz obszar kamery lub gry.',
+  'Capture current frame':'Przechwyć aktualną klatkę', 'The selected clip frame will be used for calibration.':'Do kalibracji zostanie użyta klatka wybranego klipu.',
+  'Save this layout':'Zapisz ten układ', 'Layout name, e.g. game camera bottom':'Nazwa układu, np. kamera gry na dole',
+  'Capture a clip frame before drawing a layout area.':'Najpierw przechwyć klatkę klipu, aby zaznaczyć obszar układu.', 'Unable to save this layout.':'Nie udało się zapisać tego układu.', 'Layout saved.':'Układ został zapisany.',
+  'Clip timeline':'Oś czasu klipu', 'This preview is masked to the selected clip. Future cut, hook, effect and sound tools will appear here.':'Ten podgląd jest ograniczony do wybranego klipu. W przyszłości pojawią się tutaj narzędzia cięcia, hooka, efektów i dźwięku.',
+  'Choose a saved favourite':'Wybierz zapisany ulubiony preset',
+  'Export from composer':'Eksport z kompozytora',
+  'Exports with this composer\'s caption and layout settings. Unreviewed clips are approved automatically.':'Eksportuje z ustawieniami napisów i układu z kompozytora. Nieprzejrzane klipy są automatycznie zatwierdzane.',
+  'Maximum caption lines':'Maksymalna liczba linii napisów',
+  '1 line':'1 linia', '2 lines':'2 linie', '3 lines':'3 linie', '4 lines':'4 linie',
+  'Export file name (optional)':'Nazwa pliku eksportu (opcjonalnie)',
+  'Approve and export MP4':'Zatwierdź i eksportuj MP4',
+  'Unable to export this clip.':'Nie udało się wyeksportować tego klipu.',
+  'Audio':'D\u017awi\u0119k',
+  'These settings affect only the MP4 exported from this Composer. The interactive preview keeps the original audio so it remains responsive.':'Te ustawienia dotycz\u0105 tylko MP4 eksportowanego z tego kompozytora. Interaktywny podgl\u0105d zachowuje oryginalny d\u017awi\u0119k, aby pozosta\u0142 szybki.',
+  'Mute profanity from the middle of the word and mask it in captions':'Wycisz wulgaryzmy od \u015brodka s\u0142owa i zamaskuj je w napisach',
+  'Remove long pauses from the exported video':'Usu\u0144 d\u0142ugie pauzy z eksportowanego filmu',
+  'Improve voice clarity':'Popraw czytelno\u015b\u0107 g\u0142osu',
+  'Voice clarity removes low rumble, softens harsh high frequencies and gently controls loud peaks. On a mixed track it also changes game audio.':'Czytelno\u015b\u0107 g\u0142osu usuwa niskie dudnienie, \u0142agodzi ostre wysokie cz\u0119stotliwo\u015bci i delikatnie ogranicza g\u0142o\u015bne szczyty. Na \u015bcie\u017cce miksu zmienia te\u017c d\u017awi\u0119k gry.',
+  'Normalize loudness for Shorts':'Wyr\u00f3wnaj g\u0142o\u015bno\u015b\u0107 dla Short\u00f3w',
+  'Volume correction':'Korekta g\u0142o\u015bno\u015bci',
+  'Changes to voice clarity and volume are heard live in the video preview.':'Zmiany czytelno\u015bci g\u0142osu i g\u0142o\u015bno\u015bci s\u0105 s\u0142yszalne na \u017cywo w podgl\u0105dzie wideo.',
+  'Live audio effects are unavailable in this browser. You can still render the exact audio preview.':'Efekty audio na \u017cywo nie s\u0105 dost\u0119pne w tej przegl\u0105darce. Nadal mo\u017cesz wyrenderowa\u0107 dok\u0142adny podgl\u0105d audio.',
+  'Voice clarity, loudness and volume correction are heard live. Pause removal and profanity muting are applied while the preview plays.':'Czytelno\u015b\u0107 g\u0142osu, wyr\u00f3wnanie i korekta g\u0142o\u015bno\u015bci s\u0105 s\u0142yszalne na \u017cywo. Usuwanie pauz i wyciszanie wulgaryzm\u00f3w dzia\u0142aj\u0105 podczas odtwarzania.',
+  'Render exact audio preview':'Wyrenderuj dok\u0142adny podgl\u0105d audio',
+  'Rendering exact audio preview…':'Renderowanie dok\u0142adnego podgl\u0105du audio…',
+  'Exact exported-audio preview is ready.':'Dok\u0142adny podgl\u0105d audio eksportu jest gotowy.',
+  'Unable to render audio preview.':'Nie uda\u0142o si\u0119 wyrenderowa\u0107 podgl\u0105du audio.',
+  'Timing':'Czas', 'Clip timing':'Czas klipu', 'These edits affect only this Composer preview and its export. Your saved analysis stays unchanged.':'Te zmiany dotycz\u0105 tylko podgl\u0105du i eksportu z Kompozytora. Zapisana analiza pozostaje bez zmian.',
+  'Start (seconds)':'Pocz\u0105tek (sekundy)', 'End (seconds)':'Koniec (sekundy)', 'Extend start −10 s':'Wyd\u0142u\u017c pocz\u0105tek −10 s', 'Trim start +1 s':'Skr\u00f3\u0107 pocz\u0105tek +1 s', 'Trim end −1 s':'Skr\u00f3\u0107 koniec −1 s', 'Extend end +10 s':'Wyd\u0142u\u017c koniec +10 s',
+  'Opening hook from the end':'Hook z ko\u0144ca na pocz\u0105tek', 'Keep chronological order':'Zachowaj kolejno\u015b\u0107 chronologiczn\u0105', 'Move last 2 seconds to the start':'Przenie\u015b ostatnie 2 sekundy na pocz\u0105tek', 'Move last 3 seconds to the start':'Przenie\u015b ostatnie 3 sekundy na pocz\u0105tek', 'Move last 5 seconds to the start':'Przenie\u015b ostatnie 5 sekund na pocz\u0105tek', 'Move last 8 seconds to the start':'Przenie\u015b ostatnie 8 sekund na pocz\u0105tek', 'Move last 10 seconds to the start':'Przenie\u015b ostatnie 10 sekund na pocz\u0105tek',
+  'Loop final preview':'Zap\u0119tl gotowy podgl\u0105d', 'The clip plays in chronological order.':'Klip odtwarzany jest w kolejno\u015bci chronologicznej.',
+  'Clip range on the recording':'Zakres klipu na nagraniu', 'Start':'Pocz\u0105tek', 'End':'Koniec', 'Off':'Wy\u0142ączony', 'Opening hook duration':'Długość hooka na początku', 'Opening hook start':'Początek hooka', 'Clip start':'Początek klipu', 'Clip end':'Koniec klipu', 'Go to clip start':'Przejdź na początek klipu', 'Go to hook start':'Przejdź na początek hooka'
+});
 const originalLocalizedText = new WeakMap();
 const originalLocalizedAttributes = new WeakMap();
-function translateForLanguage(value, language = state.interfaceLanguage) { const text = String(value ?? ''); return language === 'pl' ? (polishText[text] || text) : text; }
+// All UI languages live in `languageCatalog` below. English is the source
+// language and intentionally has an empty message map: a missing translation
+// always falls back to the original English text instead of breaking the UI.
+function translateForLanguage(value, language = state.interfaceLanguage) {
+  const text = String(value ?? '');
+  return languageCatalog?.[language]?.messages?.[text] || text;
+}
 function t(value) { return translateForLanguage(value); }
 function localizedNodeValue(original, language) {
   const trimmed = original.trim(); const translated = translateForLanguage(trimmed, language);
@@ -107,11 +168,42 @@ const interfaceText = {
     updates:'Aktualizacje programu', checkUpdates:'Sprawdź aktualizacje', downloadUpdate:'Pobierz aktualizację', manualDownload:'Pobierz ręcznie', diagnostics:'Otwórz raport diagnostyczny'
   }
 };
+
+/*
+  Adding a language:
+  1. Add one entry below with its native `label`, BCP-47 `locale`, interface
+     labels and a `messages` dictionary keyed by the original English text.
+  2. No HTML or translation-engine changes are needed. The selector is built
+     from this catalog automatically and missing strings fall back to English.
+*/
+const languageCatalog = {
+  en: {
+    label:'English', locale:'en', interface:interfaceText.en, messages:{},
+    captionPreviewWords:captionPreviewWords,
+  },
+  pl: {
+    label:'Polski', locale:'pl', interface:interfaceText.pl, messages:polishText,
+    captionPreviewWords:['To', 'są', 'napisy', 'testowe', 'pokazane', 'w', 'krótszych', 'liniach'],
+  },
+};
+
+function renderInterfaceLanguageOptions(selectedLanguage) {
+  const select = $('#application-language');
+  if (!select) return;
+  select.replaceChildren(...Object.entries(languageCatalog).map(([code, language]) => {
+    const option = document.createElement('option');
+    option.value = code;
+    option.textContent = language.label;
+    return option;
+  }));
+  select.value = selectedLanguage;
+}
+
 function setInterfaceLanguage(value, persist = true) {
   const previousLanguage = state.interfaceLanguage || 'en';
-  const language = value === 'pl' ? 'pl' : 'en'; const text = interfaceText[language];
-  state.interfaceLanguage = language; document.documentElement.lang = language; document.title = text.title;
-  const select = $('#application-language'); if (select) select.value = language;
+  const language = languageCatalog[value] ? value : 'en'; const text = languageCatalog[language].interface;
+  state.interfaceLanguage = language; document.documentElement.lang = languageCatalog[language].locale; document.title = text.title;
+  renderInterfaceLanguageOptions(language);
   if (persist) try { localStorage.setItem(APP_LANGUAGE_KEY, language); } catch { /* Optional local preference only. */ }
   localizeTree(document.body, previousLanguage);
   if ($('#selection-summary')) updateSelectionSummary();
@@ -343,6 +435,852 @@ function clearFullRecordingPreview() {
   player.load();
 }
 
+function composerRangeText(start, end, position = start) {
+  return `${fmt(position)} / ${fmt(start)} - ${fmt(end)}`;
+}
+
+function composerCaptionSettingsFromControls() {
+  return {
+    captions_preset: $('#composer-caption-preset').value,
+    base_color: $('#composer-caption-base-color').value,
+    active_color: $('#composer-caption-active-color').value,
+    font_family: $('#composer-caption-font-family').value,
+    outline_enabled: $('#composer-caption-outline-enabled').checked,
+    outline_color: $('#composer-caption-outline-color').value,
+    glow_enabled: $('#composer-caption-glow-enabled').checked,
+    opacity: Number($('#composer-caption-opacity').value),
+    max_lines: Number($('#composer-caption-max-lines').value)
+  };
+}
+
+const composerLayoutFields = ['layout', 'camera_x', 'camera_y', 'camera_width', 'camera_height', 'game_x', 'game_y', 'game_width', 'game_height'];
+function composerLayoutOutput() { return state.clipComposer.layout || state.globalExport; }
+function composerLayoutBase() { return state.clipComposer.baseLayout || state.globalExport; }
+function composerLayoutRect(kind) {
+  const output = composerLayoutOutput();
+  return kind === 'camera'
+    ? { x:Number(output.camera_x), y:Number(output.camera_y), width:Number(output.camera_width), height:Number(output.camera_height) }
+    : { x:Number(output.game_x), y:Number(output.game_y), width:Number(output.game_width), height:Number(output.game_height) };
+}
+function syncComposerLayoutSelect() {
+  const select = $('#composer-layout'); const global = $('#global-layout');
+  if (!select || !global) return;
+  const value = select.value;
+  select.replaceChildren(...[...global.options].map((option) => {
+    const copy = new Option(option.textContent, option.value, false, false);
+    copy.dataset.layoutPreset = option.dataset.layoutPreset || '';
+    return copy;
+  }));
+  const output = composerLayoutOutput();
+  const presetValue = output.layout_preset_id ? layoutPresetValue(output.layout_preset_id) : '';
+  const desired = presetValue && select.querySelector(`option[value="${presetValue}"]`) ? presetValue : output.layout || value || 'original';
+  select.value = desired;
+}
+function setComposerTab(tab) {
+  state.clipComposer.tab = tab;
+  document.querySelectorAll('[data-composer-tab]').forEach((button) => {
+    const active = button.dataset.composerTab === tab;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
+  document.querySelectorAll('[data-composer-pane]').forEach((pane) => { pane.hidden = pane.dataset.composerPane !== tab; });
+  if (tab === 'layout') window.requestAnimationFrame(() => captureComposerLayoutFrame(false));
+}
+function updateComposerPlayButton() {
+  const player = $('#clip-composer-video'); const button = $('#clip-composer-play-toggle');
+  if (!player || !button) return;
+  button.textContent = player.paused ? t('Play preview') : t('Pause preview');
+}
+function renderComposerLayoutPreview() {
+  const player = $('#clip-composer-video'); const stage = document.querySelector('.clip-composer-stage');
+  const frame = $('#clip-composer-layout-frame'); const canvas = $('#clip-composer-layout-preview');
+  if (!player || !stage || !frame || !canvas) return;
+  const output = composerLayoutOutput(); const layout = output.layout || 'original'; const vertical = layout !== 'original';
+  canvas.hidden = !vertical;
+  player.classList.toggle('composer-layout-source', vertical);
+  const stageWidth = stage.clientWidth; const stageHeight = stage.clientHeight;
+  if (!stageWidth || !stageHeight || !player.videoWidth || !player.videoHeight) return;
+  if (!vertical) {
+    const sourceAspect = player.videoWidth / player.videoHeight;
+    const stageAspect = stageWidth / stageHeight;
+    const width = sourceAspect >= stageAspect ? stageWidth : stageHeight * sourceAspect;
+    const height = sourceAspect >= stageAspect ? stageWidth / sourceAspect : stageHeight;
+    Object.assign(frame.style, { left:`${Math.max(0, (stageWidth - width) / 2)}px`, top:`${Math.max(0, (stageHeight - height) / 2)}px`, right:'auto', bottom:'auto', width:`${width}px`, height:`${height}px` });
+    return;
+  }
+  const height = Math.min(stageHeight, stageWidth * 16 / 9); const width = height * 9 / 16;
+  Object.assign(frame.style, { left:`${Math.max(0, (stageWidth - width) / 2)}px`, top:`${Math.max(0, (stageHeight - height) / 2)}px`, right:'auto', bottom:'auto', width:`${width}px`, height:`${height}px` });
+  const ctx = canvas.getContext('2d'); const camera = composerLayoutRect('camera'); const game = composerLayoutRect('game');
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'low';
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  try {
+    if (layout === 'portrait_camera') drawCroppedCover(ctx, player, camera, {x:0,y:0,width:canvas.width,height:canvas.height});
+    else if (layout === 'portrait_game') drawCroppedCover(ctx, player, game, {x:0,y:0,width:canvas.width,height:canvas.height});
+    else if (layout === 'portrait_split') {
+      drawCroppedContain(ctx, player, camera, {x:0,y:0,width:canvas.width,height:canvas.height / 3});
+      drawCroppedCover(ctx, player, game, {x:0,y:canvas.height / 3,width:canvas.width,height:canvas.height * 2 / 3});
+    }
+  } catch { /* A video frame is not available yet. */ }
+}
+function stopComposerLayoutFrameLoop() {
+  const player = $('#clip-composer-video'); const handle = state.clipComposer.layoutFrameHandle;
+  if (handle !== null) {
+    if (state.clipComposer.layoutFrameType === 'video' && typeof player?.cancelVideoFrameCallback === 'function') player.cancelVideoFrameCallback(handle);
+    else if (state.clipComposer.layoutFrameType === 'animation') cancelAnimationFrame(handle);
+  }
+  state.clipComposer.layoutFrameHandle = null;
+  state.clipComposer.layoutFrameType = '';
+}
+function scheduleComposerLayoutFrame() {
+  const player = $('#clip-composer-video');
+  if (!player || player.paused || !$('#clip-composer-dialog')?.open || composerLayoutOutput().layout === 'original' || state.clipComposer.layoutFrameHandle !== null) return;
+  const draw = () => {
+    state.clipComposer.layoutFrameHandle = null;
+    state.clipComposer.layoutFrameType = '';
+    if (player.paused || !$('#clip-composer-dialog')?.open || composerLayoutOutput().layout === 'original') return;
+    renderComposerLayoutPreview();
+    syncClipComposerPosition(player.currentTime);
+    scheduleComposerLayoutFrame();
+  };
+  if (typeof player.requestVideoFrameCallback === 'function') {
+    state.clipComposer.layoutFrameType = 'video';
+    state.clipComposer.layoutFrameHandle = player.requestVideoFrameCallback(draw);
+  } else {
+    state.clipComposer.layoutFrameType = 'animation';
+    state.clipComposer.layoutFrameHandle = requestAnimationFrame(draw);
+  }
+}
+function rememberComposerLayout() {
+  const selected = $('#composer-layout').value;
+  const presetId = selected.startsWith('preset:') ? selected.slice('preset:'.length) : '';
+  const preset = presetId ? state.layoutPresets.find((item) => String(item.id) === presetId) : null;
+  const baseLayout = { ...composerLayoutBase() };
+  if (preset) {
+    const values = Object.fromEntries(composerLayoutFields.map((field) => [field, preset[field]]));
+    state.clipComposer.layout = { ...baseLayout, ...values, layout_preset_id:preset.id };
+  } else {
+    state.clipComposer.layout = { ...baseLayout, layout:selected, layout_preset_id:'' };
+  }
+  syncComposerLayoutSelect();
+  renderComposerLayoutPreview();
+  renderComposerCaption($('#clip-composer-video').currentTime || state.clipComposer.start);
+  if (composerLayoutOutput().layout === 'original') stopComposerLayoutFrameLoop();
+  else scheduleComposerLayoutFrame();
+}
+
+function composerLayoutCanvas() { return $('#composer-layout-overlay'); }
+function composerCalibrationState() {
+  if (!state.clipComposer.layoutCalibration) state.clipComposer.layoutCalibration = { mode:'camera', drawing:null, start:null, captured:false };
+  return state.clipComposer.layoutCalibration;
+}
+function resizeComposerLayoutCanvas() {
+  const capture = $('#composer-layout-capture'); const overlay = composerLayoutCanvas();
+  if (!capture || !overlay || !capture.width || !capture.height) return;
+  overlay.width = capture.width; overlay.height = capture.height;
+  overlay.style.width = '100%'; overlay.style.height = '100%';
+}
+function drawComposerLayoutOverlay() {
+  const capture = $('#composer-layout-capture'); const canvas = composerLayoutCanvas();
+  if (!capture || !canvas || !canvas.width) return;
+  const ctx = canvas.getContext('2d'); ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawRect(ctx, composerLayoutRect('camera'), '#77e3c0', 'Camera', canvas);
+  drawRect(ctx, composerLayoutRect('game'), '#6db4ff', 'Gameplay', canvas);
+  const calibration = composerCalibrationState();
+  if (calibration.drawing) drawRect(ctx, calibration.drawing, '#ffd166', `New ${calibration.mode}`, canvas);
+}
+function composerCalibrationPoint(event) {
+  const canvas = composerLayoutCanvas(); const box = canvas.getBoundingClientRect();
+  return { x:Math.max(0, Math.min(1, (event.clientX - box.left) / box.width)), y:Math.max(0, Math.min(1, (event.clientY - box.top) / box.height)) };
+}
+function captureComposerLayoutFrame(pause = true, force = false) {
+  const player = $('#clip-composer-video'); const capture = $('#composer-layout-capture'); const wrap = $('#composer-layout-capture-wrap');
+  if (!player?.videoWidth || !capture || !wrap) return;
+  if (!force && composerCalibrationState().captured) return;
+  if (pause) player.pause();
+  const width = 640; const height = Math.max(1, Math.round(width * player.videoHeight / player.videoWidth));
+  capture.width = width; capture.height = height;
+  capture.getContext('2d').drawImage(player, 0, 0, width, height);
+  wrap.hidden = false;
+  const calibration = composerCalibrationState(); calibration.captured = true; calibration.drawing = null; calibration.start = null;
+  composerLayoutCanvas().classList.remove('drawing');
+  resizeComposerLayoutCanvas(); drawComposerLayoutOverlay();
+  $('#composer-layout-calibration-status').textContent = `Using frame at ${fmt(player.currentTime)} from this clip. Choose an area to redraw.`;
+}
+function setComposerCalibrationMode(mode) {
+  const capture = $('#composer-layout-capture');
+  if (!capture?.width || $('#composer-layout-capture-wrap').hidden) {
+    message('Capture a clip frame before drawing a layout area.', true); return;
+  }
+  const calibration = composerCalibrationState(); calibration.mode = mode;
+  $('#composer-layout-calibration-status').textContent = `Drawing ${mode} area: drag over the captured clip frame.`;
+  composerLayoutCanvas().classList.add('drawing');
+}
+function storeComposerCalibratedRect(kind, rect) {
+  const output = { ...composerLayoutOutput() };
+  if (kind === 'camera') Object.assign(output, { camera_x:rect.x, camera_y:rect.y, camera_width:rect.width, camera_height:rect.height });
+  else Object.assign(output, { game_x:rect.x, game_y:rect.y, game_width:rect.width, game_height:rect.height });
+  output.layout_preset_id = '';
+  state.clipComposer.layout = output;
+  syncComposerLayoutSelect();
+  renderComposerLayoutPreview();
+  renderComposerCaption($('#clip-composer-video').currentTime || state.clipComposer.start);
+  if (composerLayoutOutput().layout !== 'original') scheduleComposerLayoutFrame();
+}
+async function saveComposerLayoutPreset(event) {
+  event.preventDefault();
+  const input = $('#composer-layout-preset-name'); const name = input.value.trim();
+  if (!name) return;
+  try {
+    const output = composerLayoutOutput();
+    const preset = await api('/layout-presets', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ ...Object.fromEntries(composerLayoutFields.map((field) => [field, output[field]])), name }) });
+    state.clipComposer.layout = { ...output, ...Object.fromEntries(composerLayoutFields.map((field) => [field, preset[field]])), layout_preset_id:preset.id };
+    input.value = '';
+    await loadLayoutPresets();
+    syncComposerLayoutSelect();
+    message('Layout saved.');
+  } catch (error) { message(error.message || 'Unable to save this layout.', true); }
+}
+
+function composerCaptionWords(segment) {
+  const hasRefreshedCaption = typeof state.clipComposer.captionTranscript === 'string';
+  const transcript = hasRefreshedCaption
+    ? state.clipComposer.captionTranscript
+    : ($('#editor-transcript').value.trim() || segment?.transcript || '');
+  const tokens = transcript.match(/\S+/g) || [];
+  let timestamps = hasRefreshedCaption
+    ? state.clipComposer.captionWordTimestamps
+    : (segment?.word_timestamps || []);
+  if (typeof timestamps === 'string') {
+    try { timestamps = JSON.parse(timestamps); } catch { timestamps = []; }
+  }
+  return { tokens, timestamps: Array.isArray(timestamps) ? timestamps : [] };
+}
+
+function composerCaptionSentenceWindow(tokens, activeIndex) {
+  const sentenceEnd = (token) => /[.!?…][”"')\]]*$/.test(token || '');
+  let first = activeIndex;
+  while (first > 0 && !sentenceEnd(tokens[first - 1])) first -= 1;
+  let last = activeIndex + 1;
+  while (last < tokens.length && !sentenceEnd(tokens[last - 1])) last += 1;
+  // Whisper can occasionally produce a long run without punctuation. In that
+  // case use stable blocks, changing only after a full block rather than on
+  // every spoken word like a scrolling ticker.
+  const punctuationWasFound = first > 0 || last < tokens.length || sentenceEnd(tokens[last - 1]);
+  if (!punctuationWasFound || last - first > 22) {
+    const blockSize = 12;
+    first = Math.floor(activeIndex / blockSize) * blockSize;
+    last = Math.min(tokens.length, first + blockSize);
+  }
+  if (last - first < 4 && last < tokens.length) {
+    let nextLast = last;
+    while (nextLast < tokens.length && !sentenceEnd(tokens[nextLast - 1])) nextLast += 1;
+    last = Math.min(tokens.length, nextLast);
+  }
+  return { first, last };
+}
+
+function captionCharactersPerLine(preset) {
+  return Math.max(14, Math.floor(1000 / (Number(preset.exportSize || 46) * 0.78)));
+}
+
+function captionLineGroups(tokens, first, last, maxLines, preset) {
+  const limit = captionCharactersPerLine(preset);
+  const visualLines = [];
+  let line = [];
+  let length = 0;
+  for (let index = first; index < last; index += 1) {
+    const word = tokens[index];
+    const nextLength = length + (line.length ? 1 : 0) + word.length;
+    if (line.length && nextLength > limit) {
+      visualLines.push(line);
+      line = [index];
+      length = word.length;
+    } else {
+      line.push(index);
+      length = nextLength;
+    }
+  }
+  if (line.length) visualLines.push(line);
+  const groups = [];
+  for (let offset = 0; offset < visualLines.length; offset += maxLines) groups.push(visualLines.slice(offset, offset + maxLines));
+  return groups;
+}
+
+function composerCaptionDisplayWindow(tokens, activeIndex, settings, preset) {
+  const sentence = composerCaptionSentenceWindow(tokens, activeIndex);
+  const groups = captionLineGroups(tokens, sentence.first, sentence.last, Math.max(1, Math.min(4, Number(settings.max_lines || 2))), preset);
+  const lines = groups.find((group) => group.some((line) => line.includes(activeIndex))) || groups[0] || [[activeIndex]];
+  const first = lines[0][0];
+  const last = lines.at(-1).at(-1) + 1;
+  return { first, last, lineEnds:new Set(lines.slice(0, -1).map((line) => line.at(-1))) };
+}
+
+function renderComposerCaption(position) {
+  const segment = state.editingSegment;
+  const caption = $('#clip-composer-caption');
+  if (!segment || !caption) return;
+  const settings = state.clipComposer.caption || composerCaptionSettingsFromControls();
+  const preset = captionPreviewPresets[settings.captions_preset] || captionPreviewPresets.clean;
+  const frame = $('#clip-composer-layout-frame');
+  const player = $('#clip-composer-video');
+  const bounds = frame?.getBoundingClientRect();
+  const output = composerLayoutOutput();
+  const previewHeight = Math.max(1, Number(bounds?.height || 0));
+  const previewWidth = Math.max(1, Number(bounds?.width || 0));
+  // The composer is a scaled view of the final pixel frame. Font size follows
+  // its horizontal scale (for a vertical export: preview width / 1080), not
+  // the height of the preview pane. The latter made captions visibly larger
+  // than in the exported MP4.
+  const outputWidth = output.layout === 'original' ? Math.max(1, Number(player?.videoWidth || 1920)) : 1080;
+  const outputHeight = output.layout === 'original' ? Math.max(1, Number(player?.videoHeight || 1080)) : 1920;
+  const exportScale = previewWidth / outputWidth;
+  const verticalScale = previewHeight / outputHeight;
+  // libass renders our 1920x1080 ASS canvas slightly wider once it is placed
+  // on a 1080x1920 layout. Browsers keep the font's native proportions, so a
+  // small, calibrated X correction is needed to make the Composer endpoint
+  // line up with the already-exported portrait MP4.
+  const portraitTextScaleX = output.layout === 'original' ? 1 : 1.21;
+  caption.dataset.preset = settings.captions_preset;
+  caption.dataset.variant = preset.variant || '';
+  caption.dataset.position = state.clipComposer.captionPosition || state.globalCaption.caption_position || 'bottom';
+  caption.style.setProperty('--caption-preview-base', settings.base_color);
+  caption.style.setProperty('--caption-preview-active', settings.active_color);
+  caption.style.setProperty('--caption-preview-active-display', preset.active ? settings.active_color : settings.base_color);
+  caption.style.setProperty('--caption-preview-font', captionPreviewFontFamilies[settings.font_family] || captionPreviewFontFamilies.Inter);
+  caption.style.setProperty('--caption-preview-size', `${(Number(preset.exportSize || 46) * exportScale).toFixed(2)}px`);
+  caption.style.setProperty('--caption-preview-weight', preset.weight || '700');
+  caption.style.setProperty('--caption-preview-active-scale', preset.activeScale || '1');
+  // ASS changes the active glyph's actual scale, so it also takes up more
+  // horizontal room in the exported line. Use a real font-size here rather
+  // than CSS transform; transforms do not participate in inline spacing.
+  caption.style.setProperty('--caption-preview-active-size', `${(Number(preset.exportSize || 46) * Number(preset.activeScale || 1) * exportScale).toFixed(2)}px`);
+  caption.style.setProperty('--caption-preview-active-weight', preset.weight || '700');
+  caption.style.setProperty('--caption-preview-x-scale', String(portraitTextScaleX));
+  caption.style.setProperty('--caption-preview-margin-x', `${(42 * exportScale).toFixed(2)}px`);
+  caption.style.setProperty('--caption-preview-margin-y', `${(32 * verticalScale).toFixed(2)}px`);
+  const outline = previewOutlineShadow((preset.outline || 0) * exportScale, settings.outline_color, settings.outline_enabled);
+  const glow = settings.glow_enabled ? `0 0 ${(7 * exportScale).toFixed(2)}px ${preset.active ? settings.active_color : settings.base_color}, 0 0 ${(15 * exportScale).toFixed(2)}px ${preset.active ? settings.active_color : settings.base_color}` : '';
+  caption.style.setProperty('--caption-preview-shadow', [outline, glow].filter(Boolean).join(', ') || 'none');
+  caption.style.setProperty('--caption-preview-opacity', String(Math.max(.2, Math.min(1, Number(settings.opacity || 100) / 100))));
+  if (settings.captions_preset === 'none') { caption.replaceChildren(); return; }
+  const { tokens, timestamps } = composerCaptionWords(segment);
+  if (!tokens.length) { caption.replaceChildren(); return; }
+  let activeIndex = timestamps.findIndex((word) => Number(word?.start) <= position && Number(word?.end) >= position);
+  if (activeIndex < 0 && timestamps.length) activeIndex = Math.min(tokens.length - 1, Math.max(0, timestamps.findIndex((word) => Number(word?.start) > position)));
+  if (activeIndex < 0) activeIndex = Math.min(tokens.length - 1, Math.max(0, Math.floor(((position - state.clipComposer.start) / Math.max(.1, state.clipComposer.end - state.clipComposer.start)) * tokens.length)));
+  const { first, last, lineEnds } = composerCaptionDisplayWindow(tokens, activeIndex, settings, preset);
+  const key = `${settings.captions_preset}:${settings.max_lines}:${first}:${last}:${[...lineEnds].join(',')}:${tokens.slice(first, last).join(' ')}`;
+  let text = caption.querySelector('.caption-preview-text');
+  if (caption.dataset.windowKey !== key || !text) {
+    caption.dataset.windowKey = key;
+    text = make('p', 'caption-preview-text');
+    let previewLine = make('span', 'caption-preview-line');
+    tokens.slice(first, last).forEach((word, index) => {
+      const absoluteIndex = first + index;
+      const node = make('span', 'caption-preview-word', word);
+      node.dataset.wordIndex = String(absoluteIndex);
+      previewLine.append(node);
+      if (lineEnds.has(absoluteIndex) || absoluteIndex === last - 1) {
+        text.append(previewLine);
+        previewLine = make('span', 'caption-preview-line');
+      } else previewLine.append(document.createTextNode(' '));
+    });
+    caption.replaceChildren(text);
+  }
+  text.querySelectorAll('.caption-preview-word').forEach((node) => node.classList.toggle('is-active', preset.active && Number(node.dataset.wordIndex) === activeIndex));
+}
+
+function syncComposerCaptionControls(settings) {
+  const normalized = {
+    captions_preset: settings.captions_preset || 'highlight',
+    base_color: settings.base_color || '#FFFFFF', active_color: settings.active_color || '#FFFF00',
+    font_family: settings.font_family || 'Inter', outline_enabled: Boolean(settings.outline_enabled),
+    outline_color: settings.outline_color || '#000000', glow_enabled: Boolean(settings.glow_enabled),
+    opacity: Number(settings.opacity ?? 100),
+    max_lines: Math.max(1, Math.min(4, Number(settings.max_lines ?? 2)))
+  };
+  state.clipComposer.caption = normalized;
+  $('#composer-caption-preset').value = normalized.captions_preset;
+  $('#composer-caption-font-family').value = normalized.font_family;
+  $('#composer-caption-base-color').value = normalized.base_color.toLowerCase();
+  $('#composer-caption-active-color').value = normalized.active_color.toLowerCase();
+  $('#composer-caption-outline-enabled').checked = normalized.outline_enabled;
+  $('#composer-caption-outline-color').value = normalized.outline_color.toLowerCase();
+  $('#composer-caption-glow-enabled').checked = normalized.glow_enabled;
+  $('#composer-caption-opacity').value = String(normalized.opacity);
+  $('#composer-caption-max-lines').value = String(normalized.max_lines);
+  $('#composer-caption-opacity-value').textContent = `${normalized.opacity}%`;
+}
+
+function rememberComposerCaption() {
+  state.clipComposer.caption = composerCaptionSettingsFromControls();
+  $('#composer-caption-opacity-value').textContent = `${state.clipComposer.caption.opacity}%`;
+  renderComposerCaption($('#clip-composer-video').currentTime || state.clipComposer.start);
+}
+
+function composerAudioSettingsFromControls() {
+  return {
+    censor_profanity: $('#composer-audio-censor-profanity').checked,
+    remove_pauses: $('#composer-audio-remove-pauses').checked,
+    microphone_enhancement: $('#composer-audio-microphone-enhancement').checked,
+    normalize_loudness: $('#composer-audio-normalize-loudness').checked,
+    volume_gain_db: Number($('#composer-audio-volume-gain').value || 0)
+  };
+}
+
+function syncComposerAudioControls(settings = {}) {
+  const normalized = {
+    censor_profanity: Boolean(settings.censor_profanity),
+    remove_pauses: Boolean(settings.remove_pauses),
+    microphone_enhancement: Boolean(settings.microphone_enhancement),
+    normalize_loudness: Boolean(settings.normalize_loudness),
+    volume_gain_db: Math.max(-12, Math.min(12, Number(settings.volume_gain_db || 0)))
+  };
+  state.clipComposer.audio = normalized;
+  $('#composer-audio-censor-profanity').checked = normalized.censor_profanity;
+  $('#composer-audio-remove-pauses').checked = normalized.remove_pauses;
+  $('#composer-audio-microphone-enhancement').checked = normalized.microphone_enhancement;
+  $('#composer-audio-normalize-loudness').checked = normalized.normalize_loudness;
+  $('#composer-audio-volume-gain').value = String(normalized.volume_gain_db);
+  $('#composer-audio-volume-value').textContent = `${normalized.volume_gain_db > 0 ? '+' : ''}${normalized.volume_gain_db} dB`;
+}
+
+function rememberComposerAudio() {
+  state.clipComposer.audio = composerAudioSettingsFromControls();
+  const gain = state.clipComposer.audio.volume_gain_db;
+  $('#composer-audio-volume-value').textContent = `${gain > 0 ? '+' : ''}${gain} dB`;
+  refreshComposerLiveAudio();
+}
+
+function composerProfanityWord(value) {
+  const word = String(value || '').toLocaleLowerCase('pl-PL').replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '');
+  return /^(?:kurw\p{L}*|jeba\p{L}*|pierdol\p{L}*|chuj\p{L}*|zajeb\p{L}*|skurw\p{L}*|pizd\p{L}*|pojeb\p{L}*|suk\p{L}*|fuck\p{L}*)$/u.test(word);
+}
+
+function composerPauseSkipTarget(position) {
+  if (!state.clipComposer.audio?.remove_pauses) return null;
+  const segment = state.editingSegment;
+  const { timestamps } = composerCaptionWords(segment);
+  const words = timestamps.filter((word) => Number.isFinite(Number(word?.start)) && Number.isFinite(Number(word?.end))).sort((a, b) => Number(a.start) - Number(b.start));
+  if (words.length < 2) return null;
+  let previousEnd = Number(words[0].end);
+  for (const word of words.slice(1)) {
+    const nextStart = Number(word.start);
+    const left = previousEnd + .12;
+    const right = nextStart - .12;
+    if (nextStart - previousEnd >= .85 && position >= left && position < right) return right;
+    previousEnd = Math.max(previousEnd, Number(word.end));
+  }
+  return null;
+}
+
+function ensureComposerAudioGraph() {
+  if (composerAudioGraph) return composerAudioGraph;
+  const player = $('#clip-composer-video');
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!player || !AudioContextClass) return null;
+  try {
+    const context = new AudioContextClass();
+    const source = context.createMediaElementSource(player);
+    const highpass = context.createBiquadFilter(); highpass.type = 'highpass';
+    const lowpass = context.createBiquadFilter(); lowpass.type = 'lowpass';
+    const compressor = context.createDynamicsCompressor();
+    const gain = context.createGain(); const censor = context.createGain();
+    source.connect(highpass); highpass.connect(lowpass); lowpass.connect(compressor); compressor.connect(gain); gain.connect(censor); censor.connect(context.destination);
+    composerAudioGraph = { context, highpass, lowpass, compressor, gain, censor };
+    return composerAudioGraph;
+  } catch (error) {
+    $('#composer-audio-live-status').textContent = 'Live audio effects are unavailable in this browser. You can still render the exact audio preview.';
+    return null;
+  }
+}
+
+function refreshComposerLiveAudio(position = $('#clip-composer-video')?.currentTime || 0) {
+  const graph = ensureComposerAudioGraph();
+  if (!graph) return;
+  const settings = state.clipComposer.audio || {};
+  const now = graph.context.currentTime;
+  const voice = Boolean(settings.microphone_enhancement);
+  const normalize = Boolean(settings.normalize_loudness);
+  graph.highpass.frequency.setTargetAtTime(voice ? 80 : 10, now, .015);
+  graph.lowpass.frequency.setTargetAtTime(voice ? 14000 : 22000, now, .015);
+  graph.compressor.threshold.setTargetAtTime(normalize ? -24 : voice ? -18 : 0, now, .015);
+  graph.compressor.ratio.setTargetAtTime(normalize ? 3.2 : voice ? 2.2 : 1, now, .015);
+  graph.compressor.attack.setTargetAtTime(normalize ? .01 : .012, now, .015);
+  graph.compressor.release.setTargetAtTime(normalize ? .18 : .18, now, .015);
+  graph.gain.gain.setTargetAtTime(Math.pow(10, Number(settings.volume_gain_db || 0) / 20), now, .015);
+  const { timestamps } = composerCaptionWords(state.editingSegment);
+  const muted = Boolean(settings.censor_profanity) && timestamps.some((word) => composerProfanityWord(word?.word) && position >= Number(word.start) + (Number(word.end) - Number(word.start)) / 2 && position <= Number(word.end));
+  graph.censor.gain.setTargetAtTime(muted ? 0 : 1, now, .008);
+  const liveStatus = $('#composer-audio-live-status');
+  if (liveStatus) liveStatus.textContent = 'Voice clarity, loudness and volume correction are heard live. Pause removal and profanity muting are applied while the preview plays.';
+}
+
+async function renderComposerExactAudioPreview() {
+  const segment = selectedEditorSegment();
+  const button = $('#composer-audio-render-preview'); const player = $('#composer-audio-exact-preview'); const status = $('#composer-audio-render-status');
+  if (!segment || segment.id !== state.clipComposer.segmentId) return;
+  const settings = state.clipComposer.audio || composerAudioSettingsFromControls();
+  button.disabled = true; status.textContent = 'Rendering exact audio preview…';
+  try {
+    const query = new URLSearchParams({ audio_track:String(composerLayoutOutput().audio_track || 1), censor_profanity:String(Boolean(settings.censor_profanity)), remove_pauses:String(Boolean(settings.remove_pauses)), microphone_enhancement:String(Boolean(settings.microphone_enhancement)), normalize_loudness:String(Boolean(settings.normalize_loudness)), volume_gain_db:String(Number(settings.volume_gain_db || 0)) });
+    const response = await fetch(`/api/segments/${segment.id}/composer-audio-preview?${query}`);
+    if (!response.ok) throw new Error((await response.text()) || 'Unable to render audio preview.');
+    const blob = await response.blob();
+    if (composerExactAudioUrl) URL.revokeObjectURL(composerExactAudioUrl);
+    composerExactAudioUrl = URL.createObjectURL(blob);
+    player.pause(); player.src = composerExactAudioUrl; player.hidden = false; player.load();
+    status.textContent = 'Exact exported-audio preview is ready.';
+    await player.play();
+  } catch (error) {
+    status.textContent = error.message || 'Unable to render audio preview.';
+  } finally { button.disabled = false; }
+}
+
+function renderComposerCaptionFavorites() {
+  const select = $('#composer-caption-favorite');
+  if (!select) return;
+  const selected = select.value;
+  select.replaceChildren(make('option', '', 'Choose a saved favourite'));
+  select.firstChild.value = '';
+  for (const favorite of state.captionFavorites || []) {
+    const option = make('option', '', `${favorite.name} (${favorite.captions_preset})`);
+    option.value = favorite.id;
+    select.append(option);
+  }
+  if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+}
+
+function syncClipComposerPosition(position) {
+  const { start, end } = state.clipComposer;
+  const safePosition = Math.min(Math.max(Number(position) || start, start), end);
+  const scrubber = $('#clip-composer-scrubber');
+  scrubber.value = safePosition.toFixed(2);
+  $('#clip-composer-range').textContent = composerRangeText(start, end, safePosition);
+  renderComposerCaption(safePosition);
+}
+
+function composerMaximumEnd() {
+  const segment = state.editingSegment;
+  const video = state.videos.find((item) => item.id === segment?.video_id);
+  const duration = Number(video?.duration_seconds);
+  return Number.isFinite(duration) && duration > 0 ? duration : Math.max(state.clipComposer.end, Number($('#clip-composer-video')?.duration) || 0);
+}
+
+function composerHookSeconds() {
+  const duration = Math.max(0, state.clipComposer.end - state.clipComposer.start);
+  return Math.min(Math.max(0, Number(state.clipComposer.timing?.hook_seconds) || 0), Math.max(0, duration - .5));
+}
+
+function syncComposerTimingControls() {
+  const { start, end } = state.clipComposer;
+  const timing = state.clipComposer.timing || { loop:false, hook_seconds:0 };
+  const maxEnd = composerMaximumEnd();
+  const axisStart = Math.max(0, Number(state.clipComposer.originalStart) - 10);
+  const axisEnd = Math.min(maxEnd, Number(state.clipComposer.originalEnd) + 10);
+  const axisDuration = Math.max(.1, axisEnd - axisStart);
+  const rangeStart = $('#composer-timing-start-range');
+  const rangeEnd = $('#composer-timing-end-range');
+  rangeStart.min = String(axisStart); rangeEnd.min = String(axisStart);
+  rangeStart.max = String(axisEnd); rangeEnd.max = String(axisEnd);
+  rangeStart.value = String(start); rangeEnd.value = String(end);
+  $('#composer-range-axis').style.setProperty('--range-start', `${((start - axisStart) / axisDuration) * 100}%`);
+  $('#composer-range-axis').style.setProperty('--range-end', `${((end - axisStart) / axisDuration) * 100}%`);
+  $('#composer-timing-start').textContent = fmt(start);
+  $('#composer-timing-end').textContent = fmt(end);
+  const duration = Math.max(.1, end - start);
+  const maxHook = Math.max(0, duration - .5);
+  timing.hook_seconds = Math.min(Math.max(0, Number(timing.hook_seconds) || 0), maxHook);
+  const hookStart = end - timing.hook_seconds;
+  const hookRange = $('#composer-hook-range');
+  hookRange.min = String(start); hookRange.max = String(end); hookRange.value = String(hookStart);
+  $('#composer-hook-axis').style.setProperty('--hook-start', `${((hookStart - start) / duration) * 100}%`);
+  $('#composer-hook-value').textContent = timing.hook_seconds > 0 ? `${timing.hook_seconds.toFixed(1)} s` : 'Off';
+  $('#composer-loop-preview').checked = Boolean(timing.loop);
+  const hook = composerHookSeconds();
+  const rewind = $('#clip-composer-rewind');
+  if (rewind) rewind.textContent = hook > 0 ? t('Go to hook start') : t('Go to clip start');
+  const pauseToggle = $('#composer-audio-remove-pauses');
+  if (pauseToggle) pauseToggle.disabled = hook > 0;
+  $('#composer-hook-status').textContent = hook > 0
+    ? `The last ${hook.toFixed(hook % 1 ? 1 : 0)} seconds play first, then the clip continues from its start.`
+    : 'The clip plays in chronological order.';
+}
+
+function setComposerTiming(start, end) {
+  const maxEnd = composerMaximumEnd();
+  let safeStart = Math.max(0, Number(start) || 0);
+  let safeEnd = Number(end) || 0;
+  if (maxEnd > 0) safeEnd = Math.min(maxEnd, safeEnd);
+  if (safeEnd - safeStart < .5) {
+    if (safeStart + .5 <= maxEnd || !maxEnd) safeEnd = safeStart + .5;
+    else safeStart = Math.max(0, safeEnd - .5);
+  }
+  state.clipComposer.start = safeStart;
+  state.clipComposer.end = safeEnd;
+  state.clipComposer.previewPhase = 'body';
+  state.clipComposer.previewTransition = false;
+  const player = $('#clip-composer-video');
+  const scrubber = $('#clip-composer-scrubber');
+  scrubber.min = String(safeStart); scrubber.max = String(safeEnd);
+  // When editing while paused, restart the local preview at the newly chosen
+  // beginning. This makes an extended range immediately visible on Play.
+  if (player.paused || player.currentTime < safeStart || player.currentTime > safeEnd) player.currentTime = safeStart;
+  $('#clip-composer-title').textContent = `${fmt(safeStart)} - ${fmt(safeEnd)}`;
+  syncComposerTimingControls();
+  syncComposerCaptionRefreshStatus();
+  syncClipComposerPosition(player.currentTime || safeStart);
+}
+
+function composerCaptionsMatchCurrentRange() {
+  const { start, end, captionRangeStart, captionRangeEnd } = state.clipComposer;
+  return Math.abs(Number(captionRangeStart) - Number(start)) < .05
+    && Math.abs(Number(captionRangeEnd) - Number(end)) < .05;
+}
+
+function syncComposerCaptionRefreshStatus() {
+  const status = $('#composer-caption-refresh-status');
+  if (!status) return;
+  status.textContent = composerCaptionsMatchCurrentRange()
+    ? t('Captions match the current clip range.')
+    : t('Captions still match the previous range. Refresh them when the final range is ready.');
+}
+
+async function refreshComposerCaptions() {
+  const segment = selectedEditorSegment();
+  const button = $('#composer-refresh-captions');
+  if (!segment || segment.id !== state.clipComposer.segmentId) return;
+  if (segment.source_removed) { message(t('MP4 export unavailable after source removal.'), true); return; }
+  button.disabled = true;
+  const originalLabel = button.textContent;
+  button.textContent = t('Refreshing captions...');
+  try {
+    const refreshed = await api(`/segments/${segment.id}/composer-captions`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ start_seconds:state.clipComposer.start, end_seconds:state.clipComposer.end })
+    });
+    state.clipComposer.captionTranscript = String(refreshed.transcript || '');
+    state.clipComposer.captionWordTimestamps = Array.isArray(refreshed.word_timestamps) ? refreshed.word_timestamps : [];
+    state.clipComposer.captionRangeStart = Number(refreshed.start_seconds);
+    state.clipComposer.captionRangeEnd = Number(refreshed.end_seconds);
+    renderComposerCaption($('#clip-composer-video').currentTime || state.clipComposer.start);
+    syncComposerCaptionRefreshStatus();
+    message(t('Captions refreshed for the selected range.'));
+  } catch (error) {
+    message(error.message || t('Unable to refresh captions.'), true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalLabel;
+  }
+}
+
+function beginComposerPreview(player) {
+  const hook = composerHookSeconds();
+  const { start, end } = state.clipComposer;
+  if (hook > 0 && (player.currentTime <= start + .12 || player.currentTime >= end - .12)) {
+    state.clipComposer.previewPhase = 'hook';
+    player.currentTime = end - hook;
+  } else state.clipComposer.previewPhase = hook > 0 && player.currentTime >= end - hook ? 'hook' : 'body';
+}
+
+function jumpComposerPreview(player, position, phase) {
+  state.clipComposer.previewPhase = phase;
+  state.clipComposer.previewTransition = true;
+  player.currentTime = position;
+  // A seek to an already-decoded frame can occasionally omit `seeked` in
+  // WebView2. The timeout is a safe fallback; it never changes the position.
+  window.setTimeout(() => {
+    if (state.clipComposer.previewTransition && Math.abs(player.currentTime - position) < .25) {
+      state.clipComposer.previewTransition = false;
+      syncClipComposerPosition(player.currentTime);
+    }
+  }, 250);
+}
+
+function rewindComposerPreview() {
+  const player = $('#clip-composer-video');
+  const hook = composerHookSeconds();
+  player.pause();
+  jumpComposerPreview(player, hook > 0 ? state.clipComposer.end - hook : state.clipComposer.start, hook > 0 ? 'hook' : 'body');
+}
+
+function composerExportPayload(segment) {
+  const caption = state.clipComposer.caption || composerCaptionSettingsFromControls();
+  const audio = state.clipComposer.audio || composerAudioSettingsFromControls();
+  const output = composerLayoutOutput();
+  const position = state.clipComposer.captionPosition || state.globalCaption.caption_position || 'bottom';
+  const filename = $('#clip-composer-export-name').value.trim();
+  const hook = composerHookSeconds();
+  const { transcript, timestamps } = composerCaptionWords(segment);
+  return {
+    start_seconds:state.clipComposer.start, end_seconds:state.clipComposer.end, hook_seconds:hook,
+    captions_preset:caption.captions_preset, caption_position:position,
+    base_color:caption.base_color, active_color:caption.active_color,
+    outline_enabled:caption.outline_enabled, outline_color:caption.outline_color,
+    glow_enabled:caption.glow_enabled, opacity:caption.opacity, font_family:caption.font_family,
+    max_lines:caption.max_lines, layout:output.layout, audio_track:output.audio_track,
+    censor_profanity:audio.censor_profanity, remove_pauses:audio.remove_pauses,
+    microphone_enhancement:audio.microphone_enhancement, normalize_loudness:audio.normalize_loudness,
+    volume_gain_db:audio.volume_gain_db, filename,
+    camera_x:output.camera_x, camera_y:output.camera_y, camera_width:output.camera_width, camera_height:output.camera_height,
+    game_x:output.game_x, game_y:output.game_y, game_width:output.game_width, game_height:output.game_height,
+    caption_text:transcript, caption_word_timestamps:timestamps,
+  };
+}
+
+async function exportFromClipComposer() {
+  const segment = selectedEditorSegment();
+  const button = $('#clip-composer-export');
+  if (!segment || segment.id !== state.clipComposer.segmentId) return;
+  if (segment.source_removed) { message(t('MP4 export unavailable after source removal.'), true); return; }
+  button.disabled = true;
+  try {
+    const caption = state.clipComposer.caption || composerCaptionSettingsFromControls();
+    if (caption.captions_preset !== 'none' && !composerCaptionsMatchCurrentRange()) {
+      throw new Error(t('Refresh captions for the selected range before exporting.'));
+    }
+    if (segment.rating !== 'accepted') {
+      await saveSegmentRating(segment, 'accepted');
+      renderClipEditor();
+    }
+    const response = await fetch(`/api/segments/${segment.id}/export`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(composerExportPayload(segment))
+    });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.detail || 'Unable to export this clip.');
+    }
+    const download = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = download;
+    link.download = ($('#clip-composer-export-name').value.trim() || 'clip') + '.mp4';
+    document.body.append(link); link.click(); link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(download), 1000);
+  } catch (error) {
+    message(error.message || 'Unable to export this clip.', true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function disposeClipComposer() {
+  const player = $('#clip-composer-video');
+  const exactAudio = $('#composer-audio-exact-preview');
+  stopComposerLayoutFrameLoop();
+  // Detach events before pausing.  Otherwise `pause` can schedule another
+  // redraw while the modal is being torn down.
+  player.onloadedmetadata = null;
+  player.ontimeupdate = null;
+  player.onseeking = null;
+  player.onseeked = null;
+  player.onplay = null;
+  player.onpause = null;
+  player.pause();
+  // Do not call HTMLMediaElement.load() here.  On some Windows WebView2
+  // builds it blocks while the hardware decoder is released, leaving the
+  // modal visibly open even though the user clicked Close.  Assigning a new
+  // source on the next open performs the required reset asynchronously.
+  player.removeAttribute('src');
+  exactAudio?.pause();
+  if (exactAudio) { exactAudio.removeAttribute('src'); exactAudio.hidden = true; }
+  if (composerExactAudioUrl) { URL.revokeObjectURL(composerExactAudioUrl); composerExactAudioUrl = ''; }
+  $('#composer-audio-render-status').textContent = '';
+  $('#clip-composer-layout-frame')?.removeAttribute('style');
+  $('#clip-composer-layout-preview').hidden = true;
+  state.clipComposer = { segmentId:null, start:0, end:0, originalStart:0, originalEnd:0, captionRangeStart:0, captionRangeEnd:0, captionTranscript:null, captionWordTimestamps:null, caption:{}, audio:{}, timing:{ loop:false, hook_seconds:0 }, previewPhase:'body', previewTransition:false, captionPosition:'bottom', baseLayout:{}, layout:{}, tab:'captions', layoutFrameHandle:null, layoutFrameType:'' };
+}
+
+function closeClipComposer() {
+  const dialog = $('#clip-composer-dialog');
+  // The close event below owns cleanup. Doing it here as well used to run
+  // two video reloads for every click and made the Composer appear frozen.
+  if (dialog.open) dialog.close();
+  else disposeClipComposer();
+}
+
+function openClipComposer(segment) {
+  if (!segment) return;
+  if (segment.source_removed) {
+    message(t('MP4 export unavailable after source removal.'), true);
+    return;
+  }
+  const startInput = Number($('#editor-start').value);
+  const endInput = Number($('#editor-end').value);
+  const start = Number.isFinite(startInput) ? startInput : Number(segment.start_seconds);
+  const end = Number.isFinite(endInput) && endInput > start ? endInput : Number(segment.end_seconds);
+  const dialog = $('#clip-composer-dialog');
+  const player = $('#clip-composer-video');
+  const scrubber = $('#clip-composer-scrubber');
+  const baseLayout = { ...state.globalExport, layout_preset_id:'' };
+  state.clipComposer = { segmentId:segment.id, start, end, originalStart:start, originalEnd:end, captionRangeStart:start, captionRangeEnd:end, captionTranscript:null, captionWordTimestamps:null, caption:{}, audio:{ censor_profanity:Boolean(segment.censor_profanity), remove_pauses:Boolean(segment.remove_pauses), microphone_enhancement:false, normalize_loudness:false, volume_gain_db:0 }, timing:{ loop:false, hook_seconds:0 }, previewPhase:'body', previewTransition:false, captionPosition:state.globalCaption.caption_position || 'bottom', baseLayout, layout:{ ...state.globalExport }, tab:'captions', layoutFrameHandle:null, layoutFrameType:'' };
+  $('#clip-composer-title').textContent = `${fmt(start)} - ${fmt(end)}`;
+  $('#clip-composer-export-name').value = state.exportNames[segment.id] || $('#editor-export-name').value || '';
+  syncComposerCaptionControls({ ...state.globalCaption });
+  syncComposerAudioControls(state.clipComposer.audio);
+  syncComposerTimingControls();
+  syncComposerCaptionRefreshStatus();
+  $('#composer-caption-position').value = state.clipComposer.captionPosition;
+  $('#composer-layout-capture-wrap').hidden = true;
+  $('#composer-layout-preset-name').value = '';
+  $('#composer-layout-calibration-status').textContent = 'The selected clip frame will be used for calibration.';
+  syncComposerLayoutSelect();
+  setComposerTab('captions');
+  renderComposerLayoutPreview();
+  renderComposerCaptionFavorites();
+  scrubber.min = String(start);
+  scrubber.max = String(end);
+  scrubber.step = '0.1';
+  syncClipComposerPosition(start);
+  player.pause();
+  // Do not use a media-fragment (#t=start,end) here. Browsers may treat it as
+  // a hard seek boundary, which prevented Composer range extensions and the
+  // reordered hook from being previewed.
+  player.src = `/api/videos/${segment.video_id}/stream`;
+  player.onloadedmetadata = () => { player.currentTime = start; renderComposerLayoutPreview(); refreshComposerLiveAudio(start); syncClipComposerPosition(start); updateComposerPlayButton(); };
+  player.ontimeupdate = () => {
+    if (state.clipComposer.previewTransition) return;
+    const skipTo = composerPauseSkipTarget(player.currentTime);
+    if (skipTo !== null) { player.currentTime = skipTo; return; }
+    const { start: previewStart, end: previewEnd } = state.clipComposer;
+    if (player.currentTime >= previewEnd) {
+      const hook = composerHookSeconds();
+      if (hook > 0 && state.clipComposer.previewPhase === 'hook') {
+        jumpComposerPreview(player, previewStart, 'body'); return;
+      }
+      if (state.clipComposer.timing?.loop) {
+        jumpComposerPreview(player, hook > 0 ? previewEnd - hook : previewStart, hook > 0 ? 'hook' : 'body');
+        return;
+      }
+      player.pause(); player.currentTime = previewEnd;
+    }
+    refreshComposerLiveAudio(player.currentTime);
+    syncClipComposerPosition(player.currentTime);
+  };
+  player.onseeking = () => {
+    const { start: previewStart, end: previewEnd } = state.clipComposer;
+    if (player.currentTime < previewStart || player.currentTime > previewEnd) player.currentTime = Math.min(Math.max(player.currentTime, previewStart), previewEnd);
+    renderComposerLayoutPreview();
+    refreshComposerLiveAudio(player.currentTime);
+    syncClipComposerPosition(player.currentTime);
+  };
+  player.onseeked = () => {
+    state.clipComposer.previewTransition = false;
+    refreshComposerLiveAudio(player.currentTime);
+    syncClipComposerPosition(player.currentTime);
+    if (state.clipComposer.tab === 'layout') captureComposerLayoutFrame(false);
+  };
+  player.onplay = () => {
+    const hook = composerHookSeconds();
+    if (hook > 0 && player.currentTime <= state.clipComposer.start + .12 && state.clipComposer.previewPhase !== 'hook') {
+      jumpComposerPreview(player, state.clipComposer.end - hook, 'hook');
+    }
+    ensureComposerAudioGraph()?.context.resume().catch(() => {});
+    refreshComposerLiveAudio(player.currentTime); updateComposerPlayButton(); scheduleComposerLayoutFrame();
+  };
+  player.onpause = () => { stopComposerLayoutFrameLoop(); updateComposerPlayButton(); };
+  if (!dialog.open) dialog.showModal();
+}
+
 function setClipEditorOpen(open) {
   state.clipEditorOpen = open;
   document.body.classList.toggle('clip-editor-closed', !open);
@@ -481,7 +1419,7 @@ async function loadVideos(forceStorage = false) {
 
 async function selectVideo(video) {
   state.resultRequestGeneration += 1; state.quickReviewRequestGeneration += 1;
-  state.videoId = video.id; state.resultMode = 'all'; state.activeResults = null; state.loadedReadyVideoId = video.status === 'ready' ? video.id : null; state.captionPositions = {}; state.exportNames = {}; clearClipEditor(); $('#workspace').hidden = false; $('#selected-title').textContent = `Candidates: ${video.original_name}`;
+  state.videoId = video.id; state.resultMode = 'all'; state.activeResults = null; state.loadedReadyVideoId = video.status === 'ready' ? video.id : null; state.exportNames = {}; clearClipEditor(); $('#workspace').hidden = false; $('#selected-title').textContent = `Candidates: ${video.original_name}`;
   updateSelectionSummary();
   try { await Promise.all([loadVideos(), loadSegments(), loadChatSummary()]); }
   catch (error) { message(error.message, true); }
@@ -583,6 +1521,8 @@ function renderDetailedScoring(segment) {
     ['Context', segment.context_score, '99'],
     ['Self-contained', segment.self_contained_score, '99'],
     ['Extended completeness', segment.extended_completeness_score, '99'],
+    ['Opening clarity', segment.opening_clarity_score, '99'],
+    ['Punchline / outcome', segment.extended_punchline_score, '99'],
   ];
   for (const [label, raw, max] of values) {
     const value = Number(raw);
@@ -614,8 +1554,6 @@ function selectClipForEditor(segment, openPanel = true) {
   $('#clip-editor-form').hidden = false;
   $('#editor-start').value = Number(segment.start_seconds).toFixed(1);
   $('#editor-end').value = Number(segment.end_seconds).toFixed(1);
-  $('#editor-caption-position').value = state.captionPositions[segment.id] || 'bottom';
-  renderEditorCaptionPositionPreview($('#editor-caption-position').value);
   $('#editor-rating-select').value = segment.rating || 'unrated';
   const reviewReason = $('#editor-review-reason'); addRejectionReasons(reviewReason);
   if ([...reviewReason.options].some((option) => option.value === segment.review_reason)) reviewReason.value = segment.review_reason;
@@ -624,8 +1562,9 @@ function selectClipForEditor(segment, openPanel = true) {
   const pauseToggle = $('#editor-remove-pauses');
   pauseToggle.checked = Boolean(segment.remove_pauses);
   $('#editor-export-name').value = state.exportNames[segment.id] || '';
+  void loadPublicationFeedback(segment.id);
   const sourceRemoved = Boolean(segment.source_removed);
-  for (const selector of ['#editor-start', '#editor-end', '#editor-save-range']) $(selector).disabled = sourceRemoved;
+  for (const selector of ['#editor-start', '#editor-end', '#editor-save-range', '#open-clip-composer']) $(selector).disabled = sourceRemoved;
   pauseToggle.disabled = sourceRemoved;
   pauseToggle.title = sourceRemoved ? t('Pause removal cannot be changed after the source recording is removed.') : '';
   const exportButton = $('#editor-export');
@@ -635,6 +1574,24 @@ function selectClipForEditor(segment, openPanel = true) {
   renderTagFeedback(segment);
   setEditorTab(state.editorTab);
   document.querySelectorAll('.segment').forEach((article) => article.classList.toggle('editing', article.dataset.segmentId === segment.id));
+}
+
+function setPublicationFeedbackFields(feedback = {}) {
+  $('#editor-publication-platform').value = feedback.platform || '';
+  $('#editor-publication-url').value = feedback.published_url || '';
+  $('#editor-publication-views').value = Number(feedback.views || 0);
+  $('#editor-publication-watch').value = Number(feedback.average_watch_percent || 0);
+  $('#editor-publication-shares').value = Number(feedback.shares || 0);
+  $('#editor-publication-comments').value = Number(feedback.comments || 0);
+}
+
+async function loadPublicationFeedback(segmentId) {
+  try {
+    const feedback = await api(`/segments/${segmentId}/publication-feedback`);
+    if (state.editingSegment?.id === segmentId) setPublicationFeedbackFields(feedback);
+  } catch (error) {
+    if (state.editingSegment?.id === segmentId) setPublicationFeedbackFields();
+  }
 }
 
 async function saveSegmentRating(segment, rating) {
@@ -1016,11 +1973,14 @@ async function loadPrompts() {
 
 async function loadCaptionSettings() {
   const [defaults, favorites] = await Promise.all([api('/caption-defaults'), api('/caption-favorites')]);
+  state.captionFavorites = favorites;
+  renderComposerCaptionFavorites();
   if (!state.captionDirty) {
     const saved = state.globalSession.caption || {};
-    const settings = { ...defaults, ...saved, font_family: saved.font_family || defaults.font_family || 'Inter', outline_enabled: Boolean(saved.outline_enabled ?? Number(defaults.outline_enabled)), glow_enabled: Boolean(saved.glow_enabled ?? Number(defaults.glow_enabled)), opacity: Number(saved.opacity ?? defaults.opacity ?? 100) };
+    const settings = { ...defaults, ...saved, caption_position: saved.caption_position || defaults.caption_position || 'bottom', font_family: saved.font_family || defaults.font_family || 'Inter', outline_enabled: Boolean(saved.outline_enabled ?? Number(defaults.outline_enabled)), glow_enabled: Boolean(saved.glow_enabled ?? Number(defaults.glow_enabled)), opacity: Number(saved.opacity ?? defaults.opacity ?? 100), max_lines:Math.max(1, Math.min(4, Number(saved.max_lines ?? defaults.max_lines ?? 2))) };
     state.globalCaption = settings;
     $('#global-caption-preset').value = settings.captions_preset;
+    $('#global-caption-position').value = settings.caption_position;
     $('#global-caption-font-family').value = settings.font_family;
     $('#global-caption-base-color').value = settings.base_color.toLowerCase();
     $('#global-caption-active-color').value = settings.active_color.toLowerCase();
@@ -1028,6 +1988,7 @@ async function loadCaptionSettings() {
     $('#global-caption-outline-color').value = (settings.outline_color || '#000000').toLowerCase();
     $('#global-caption-glow-enabled').checked = settings.glow_enabled;
     $('#global-caption-opacity').value = String(settings.opacity);
+    $('#global-caption-max-lines').value = String(settings.max_lines);
     if (Object.keys(saved).length) state.captionDirty = true;
   }
   renderCaptionPreview();
@@ -1037,12 +1998,14 @@ async function loadCaptionSettings() {
     const row = make('div', 'prompt-row');
     const use = make('button', 'quiet', `${favorite.name} (${favorite.captions_preset})`);
     use.onclick = () => {
-      state.globalCaption = { captions_preset:favorite.captions_preset, base_color:favorite.base_color, active_color:favorite.active_color, font_family:favorite.font_family || 'Inter', outline_enabled:Boolean(Number(favorite.outline_enabled)), outline_color:favorite.outline_color || '#000000', glow_enabled:Boolean(Number(favorite.glow_enabled)), opacity:Number(favorite.opacity || 100) };
+      state.globalCaption = { captions_preset:favorite.captions_preset, caption_position:state.globalCaption.caption_position || 'bottom', base_color:favorite.base_color, active_color:favorite.active_color, font_family:favorite.font_family || 'Inter', outline_enabled:Boolean(Number(favorite.outline_enabled)), outline_color:favorite.outline_color || '#000000', glow_enabled:Boolean(Number(favorite.glow_enabled)), opacity:Number(favorite.opacity || 100), max_lines:Math.max(1, Math.min(4, Number(favorite.max_lines || 2))) };
       state.captionDirty = true;
       $('#global-caption-preset').value = state.globalCaption.captions_preset; $('#global-caption-font-family').value = state.globalCaption.font_family;
+      $('#global-caption-position').value = state.globalCaption.caption_position;
       $('#global-caption-base-color').value = state.globalCaption.base_color.toLowerCase(); $('#global-caption-active-color').value = state.globalCaption.active_color.toLowerCase();
       $('#global-caption-outline-enabled').checked = state.globalCaption.outline_enabled; $('#global-caption-outline-color').value = state.globalCaption.outline_color.toLowerCase();
       $('#global-caption-glow-enabled').checked = state.globalCaption.glow_enabled; $('#global-caption-opacity').value = String(state.globalCaption.opacity);
+      $('#global-caption-max-lines').value = String(state.globalCaption.max_lines);
       rememberGlobalSession(); renderCaptionPreview(); message(`Caption favorite “${favorite.name}” applied for this session.`);
     };
     const remove = make('button', 'quiet collection-delete', 'Delete');
@@ -1100,6 +2063,7 @@ async function loadLayoutPresets() {
     rememberGlobalSession();
   }
   syncLayoutSelect();
+  if ($('#clip-composer-dialog')?.open) syncComposerLayoutSelect();
   const box = $('#layout-presets'); box.replaceChildren();
   setSavedListCount('#layout-presets-count', presets.length);
   for (const preset of presets) {
@@ -1341,17 +2305,29 @@ async function loadStatistics() {
     const stats = await api('/statistics'); const data = stats.overview || {};
     overview.replaceChildren();
     const metrics = [['Reviewed', data.reviewed || 0], ['Approved', data.accepted || 0], ['Rejected', data.rejected || 0], ['Approval rate', data.approval_rate === null || data.approval_rate === undefined ? '—' : `${data.approval_rate}%`]];
+    metrics.splice(3, 0, ['Published clips', data.published || 0]);
     for (const [label, value] of metrics) { const card = make('div', 'statistics-metric'); card.append(make('strong', '', String(value)), make('span', '', label)); overview.append(card); }
     const reasons = $('#statistics-reasons'); reasons.replaceChildren();
     if (stats.rejection_reasons?.length) for (const item of stats.rejection_reasons) reasons.append(statRow(item.reason, `${item.count} ${t('rejected')}`));
     else reasons.append(make('p', 'statistics-empty', 'No rejected clips with saved reasons yet.'));
     const scores = $('#statistics-scores'); scores.replaceChildren();
-    const labels = { quality:'Quality', short_potential:'Short potential', self_contained:'Self-contained', extended_completeness:'Extended completeness' };
+    const labels = { quality:'Quality', short_potential:'Short potential', logical_sense:'Logical sense', context:'Context', self_contained:'Self-contained', extended_completeness:'Extended completeness', opening_clarity:'Opening clarity', punchline:'Punchline / outcome' };
     for (const [key, values] of Object.entries(stats.score_comparison || {})) scores.append(statRow(t(labels[key] || key), `${t('approved')} ${statAverage(values.accepted)} · ${t('rejected')} ${statAverage(values.rejected)}`));
+    const calibration = $('#statistics-calibration'); calibration.replaceChildren();
+    const verdicts = { collecting_data:'Collecting data', strong_signal:'Strong signal', weak_signal:'Weak signal', needs_tuning:'Needs tuning' };
+    for (const item of stats.calibration || []) {
+      const delta = item.delta === null || item.delta === undefined ? '—' : `${item.delta >= 0 ? '+' : ''}${item.delta}/99`;
+      calibration.append(statRow(t(labels[item.score] || item.score), `${t(verdicts[item.verdict] || item.verdict)} · ${t('difference')} ${delta} · n=${item.sample_size || 0}`));
+    }
     const tags = $('#statistics-tags'); tags.replaceChildren();
     if (stats.tags?.length) for (const item of stats.tags) { const rate = item.approval_rate === null || item.approval_rate === undefined ? t('no decisions') : `${item.approval_rate}% ${t('approved')}`; tags.append(statRow(item.tag, `${item.accepted} ${t('approved')} · ${item.rejected} ${t('rejected')} · ${rate}`)); }
     else tags.append(make('p', 'statistics-empty', 'No analysed tags yet.'));
     const diagnostics = $('#statistics-diagnostics'); diagnostics.replaceChildren();
+    const performance = stats.published_performance || {};
+    if (performance.count) {
+      const watch = performance.median_watch_percent === null || performance.median_watch_percent === undefined ? '—' : `${performance.median_watch_percent}%`;
+      diagnostics.append(statRow(t('Published results'), `${performance.views || 0} ${t('views')} · ${watch} ${t('median watch')} · ${performance.shares || 0} ${t('shares')}`));
+    }
     for (const item of stats.analysis_modes || []) diagnostics.append(statRow(`${t({ fast:'Fast', default:'Default', extended:'Extended' }[item.mode] || item.mode)} ${t('analysis')}`, `${item.accepted} ${t('approved')} · ${item.rejected} ${t('rejected')} · ${item.unrated} ${t('unreviewed')}`));
     const reading = stats.reading_flags || {}; diagnostics.append(statRow(t('Possible reading'), `${reading.accepted || 0} ${t('approved')} · ${reading.rejected || 0} ${t('rejected')} · ${reading.unrated || 0} ${t('unreviewed')}`));
   } catch (error) { overview.replaceChildren(make('p', 'statistics-empty', `Statistics could not be loaded: ${error.message}`)); }
@@ -1385,15 +2361,20 @@ function selectedEditorSegment() {
   message('Select a clip first.', true); return null;
 }
 
-function renderEditorCaptionPositionPreview(position) {
-  const preview = $('#editor-caption-position-preview');
-  if (!preview) return;
-  preview.dataset.position = position || 'bottom';
-  const labels = { top:'Top', two_fifths:'2/5 height', middle:'Middle', four_fifths:'4/5 height', bottom:'Bottom' };
-  preview.setAttribute('aria-label', `Caption height preview: ${labels[position] || labels.bottom}`);
-}
-$('#editor-caption-position').onchange = () => { const segment = selectedEditorSegment(); if (segment) state.captionPositions[segment.id] = $('#editor-caption-position').value; renderEditorCaptionPositionPreview($('#editor-caption-position').value); };
 $('#editor-export-name').oninput = () => { const segment = selectedEditorSegment(); if (segment) state.exportNames[segment.id] = $('#editor-export-name').value; };
+$('#editor-save-publication-feedback').onclick = async () => {
+  const segment = selectedEditorSegment(); if (!segment) return;
+  const number = (selector) => Math.max(0, Number($(selector).value) || 0);
+  const button = $('#editor-save-publication-feedback'); button.disabled = true;
+  try {
+    const saved = await api(`/segments/${segment.id}/publication-feedback`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+      platform:$('#editor-publication-platform').value, published_url:$('#editor-publication-url').value,
+      views:Math.round(number('#editor-publication-views')), average_watch_percent:number('#editor-publication-watch'),
+      shares:Math.round(number('#editor-publication-shares')), comments:Math.round(number('#editor-publication-comments')),
+    }) });
+    setPublicationFeedbackFields(saved); refreshStatisticsIfVisible(); message('Published clip results saved.');
+  } catch (error) { message(error.message, true); } finally { button.disabled = false; }
+};
 $('#editor-save-range').onclick = async () => {
   const segment = selectedEditorSegment(); if (!segment) return;
   const start_seconds = Number($('#editor-start').value); const end_seconds = Number($('#editor-end').value);
@@ -1423,8 +2404,8 @@ $('#editor-remove-pauses').onchange = async () => {
 };
 $('#editor-export').onclick = () => {
   const segment = selectedEditorSegment(); if (!segment || segment.rating !== 'accepted') return;
-  const position = state.captionPositions[segment.id] || $('#editor-caption-position').value; const settings = state.globalCaption; const output = state.globalExport; const filename = state.exportNames[segment.id] || $('#editor-export-name').value;
-  window.location.href = `/api/segments/${segment.id}/export?captions_preset=${encodeURIComponent(settings.captions_preset)}&caption_position=${encodeURIComponent(position)}&base_color=${encodeURIComponent(settings.base_color)}&active_color=${encodeURIComponent(settings.active_color)}&outline_enabled=${encodeURIComponent(settings.outline_enabled)}&outline_color=${encodeURIComponent(settings.outline_color)}&glow_enabled=${encodeURIComponent(settings.glow_enabled)}&opacity=${encodeURIComponent(settings.opacity)}&layout=${encodeURIComponent(output.layout)}&audio_track=${encodeURIComponent(output.audio_track)}&filename=${encodeURIComponent(filename)}${exportLayoutQuery(output)}`;
+  const settings = state.globalCaption; const position = settings.caption_position || 'bottom'; const output = state.globalExport; const filename = state.exportNames[segment.id] || $('#editor-export-name').value;
+  window.location.href = `/api/segments/${segment.id}/export?captions_preset=${encodeURIComponent(settings.captions_preset)}&caption_position=${encodeURIComponent(position)}&base_color=${encodeURIComponent(settings.base_color)}&active_color=${encodeURIComponent(settings.active_color)}&outline_enabled=${encodeURIComponent(settings.outline_enabled)}&outline_color=${encodeURIComponent(settings.outline_color)}&glow_enabled=${encodeURIComponent(settings.glow_enabled)}&opacity=${encodeURIComponent(settings.opacity)}&font_family=${encodeURIComponent(settings.font_family)}&max_lines=${encodeURIComponent(settings.max_lines || 2)}&layout=${encodeURIComponent(output.layout)}&audio_track=${encodeURIComponent(output.audio_track)}&filename=${encodeURIComponent(filename)}${exportLayoutQuery(output)}`;
 };
 const globalAudioPlayer = $('#global-audio-player');
 globalAudioPlayer.onplay = () => { if (state.previewAudio && state.previewAudio !== globalAudioPlayer) state.previewAudio.pause(); state.previewAudio = globalAudioPlayer; };
@@ -1491,30 +2472,41 @@ function captionPreviewBackground() {
 function captionSettingsFromControls() {
   return {
     captions_preset: $('#global-caption-preset').value,
+    caption_position: $('#global-caption-position').value,
     base_color: $('#global-caption-base-color').value,
     active_color: $('#global-caption-active-color').value,
     font_family: $('#global-caption-font-family').value,
     outline_enabled: $('#global-caption-outline-enabled').checked,
     outline_color: $('#global-caption-outline-color').value,
     glow_enabled: $('#global-caption-glow-enabled').checked,
-    opacity: Number($('#global-caption-opacity').value)
+    opacity: Number($('#global-caption-opacity').value),
+    max_lines: Number($('#global-caption-max-lines').value)
   };
 }
 function previewOutlineShadow(pixels, color, enabled) {
   if (!enabled || pixels <= 0) return '';
   return `-${pixels}px -${pixels}px 0 ${color}, ${pixels}px -${pixels}px 0 ${color}, -${pixels}px ${pixels}px 0 ${color}, ${pixels}px ${pixels}px 0 ${color}`;
 }
-function currentCaptionPreviewWords() { return state.interfaceLanguage === 'pl' ? ['To', 'są', 'napisy', 'testowe'] : captionPreviewWords; }
+function currentCaptionPreviewWords() { return languageCatalog[state.interfaceLanguage]?.captionPreviewWords || captionPreviewWords; }
 function showCaptionPreviewWord(index, wordSynced) {
   const text = $('#caption-preview').querySelector('.caption-preview-text');
   text.replaceChildren();
   const previewWords = currentCaptionPreviewWords();
-  previewWords.forEach((word, wordIndex) => {
-    const node = document.createElement('span');
-    node.className = `caption-preview-word${wordSynced && wordIndex === index ? ' is-active' : ''}`;
-    node.textContent = word;
-    text.append(node);
-    if (wordIndex < previewWords.length - 1) text.append(document.createTextNode(' '));
+  const settings = captionSettingsFromControls();
+  const preset = captionPreviewPresets[settings.captions_preset] || captionPreviewPresets.clean;
+  const groups = captionLineGroups(previewWords, 0, previewWords.length, Math.max(1, Math.min(4, Number(settings.max_lines || 2))), preset);
+  const lines = groups.find((group) => group.some((line) => line.includes(index))) || groups[0] || [];
+  lines.forEach((line) => {
+    const previewLine = document.createElement('span');
+    previewLine.className = 'caption-preview-line';
+    line.forEach((wordIndex, indexInLine) => {
+      const node = document.createElement('span');
+      node.className = `caption-preview-word${wordSynced && wordIndex === index ? ' is-active' : ''}`;
+      node.textContent = previewWords[wordIndex];
+      previewLine.append(node);
+      if (indexInLine < line.length - 1) previewLine.append(document.createTextNode(' '));
+    });
+    text.append(previewLine);
   });
 }
 function captionPreviewAnimationAllowed() {
@@ -1541,6 +2533,7 @@ function renderCaptionPreview() {
   const preset = captionPreviewPresets[settings.captions_preset] || captionPreviewPresets.clean;
   preview.dataset.preset = settings.captions_preset;
   preview.dataset.variant = preset.variant || '';
+  preview.dataset.position = settings.caption_position || 'bottom';
   preview.style.setProperty('--caption-preview-background', captionPreviewBackground());
   preview.style.setProperty('--caption-preview-base', settings.base_color);
   preview.style.setProperty('--caption-preview-active', settings.active_color);
@@ -1560,8 +2553,9 @@ function renderCaptionPreview() {
   $('#global-caption-opacity-value').textContent = `${settings.opacity}%`;
   startCaptionPreviewAnimation(preset);
 }
-function rememberGlobalCaption() { state.globalCaption = captionSettingsFromControls(); state.captionDirty = true; rememberGlobalSession(); renderCaptionPreview(); }
+function rememberGlobalCaption() { state.globalCaption = captionSettingsFromControls(); state.captionDirty = true; rememberGlobalSession(); renderCaptionPreview(); if ($('#clip-composer-dialog')?.open) renderComposerCaption($('#clip-composer-video').currentTime || state.clipComposer.start); }
 $('#global-caption-preset').onchange = rememberGlobalCaption;
+$('#global-caption-position').onchange = rememberGlobalCaption;
 $('#global-caption-font-family').onchange = rememberGlobalCaption;
 $('#global-caption-base-color').oninput = rememberGlobalCaption;
 $('#global-caption-active-color').oninput = rememberGlobalCaption;
@@ -1569,6 +2563,7 @@ $('#global-caption-outline-enabled').onchange = rememberGlobalCaption;
 $('#global-caption-outline-color').oninput = rememberGlobalCaption;
 $('#global-caption-glow-enabled').onchange = rememberGlobalCaption;
 $('#global-caption-opacity').oninput = rememberGlobalCaption;
+$('#global-caption-max-lines').onchange = rememberGlobalCaption;
 $('#caption-preview-background').onchange = () => { try { localStorage.setItem('clipfinder-caption-preview-background', $('#caption-preview-background').value); } catch { /* Optional preference only. */ } renderCaptionPreview(); };
 $('#caption-preview-custom-color').oninput = () => { try { localStorage.setItem('clipfinder-caption-preview-custom-color', $('#caption-preview-custom-color').value); } catch { /* Optional preference only. */ } renderCaptionPreview(); };
 try {
@@ -1606,7 +2601,7 @@ $('#calibrate-game').onclick = () => setCalibrationMode('game');
 layoutCanvas().onpointerdown = (event) => { if (!$('#layout-source-video').videoWidth) return; const point = canvasPoint(event); state.layoutCalibration.start = point; state.layoutCalibration.drawing = {x:point.x, y:point.y, width:0, height:0}; layoutCanvas().setPointerCapture(event.pointerId); drawLayoutOverlay(); };
 layoutCanvas().onpointermove = (event) => { const start = state.layoutCalibration.start; if (!start) return; const point = canvasPoint(event); state.layoutCalibration.drawing = {x:Math.min(start.x, point.x), y:Math.min(start.y, point.y), width:Math.abs(point.x - start.x), height:Math.abs(point.y - start.y)}; drawLayoutOverlay(); };
 layoutCanvas().onpointerup = (event) => { const rect = state.layoutCalibration.drawing; if (!state.layoutCalibration.start || !rect) return; layoutCanvas().releasePointerCapture?.(event.pointerId); state.layoutCalibration.start = null; state.layoutCalibration.drawing = null; if (rect.width < .02 || rect.height < .02) { $('#layout-calibration-status').textContent = 'Area is too small. Drag a larger rectangle.'; drawLayoutOverlay(); return; } storeCalibratedRect(state.layoutCalibration.mode, rect); $('#layout-calibration-status').textContent = `${state.layoutCalibration.mode === 'camera' ? 'Camera' : 'Gameplay'} area updated for this session. Enter a name below only if you want to save it as a preset.`; layoutCanvas().classList.remove('drawing'); drawLayoutOverlay(); };
-window.addEventListener('resize', () => { resizeLayoutCanvas(); drawLayoutOverlay(); });
+window.addEventListener('resize', () => { resizeLayoutCanvas(); drawLayoutOverlay(); if ($('#clip-composer-dialog')?.open) renderComposerLayoutPreview(); });
 ['#analysis-audio-mode', '#analysis-single-track', '#analysis-microphone-track', '#analysis-all-sounds-track', '#analysis-game-track', '#analysis-use-all-sounds', '#analysis-use-game'].forEach((selector) => { $(selector).onchange = rememberAnalysisAudio; });
 $('#analysis-audio-form').onsubmit = async (event) => { event.preventDefault(); const body = { mode:$('#analysis-audio-mode').value, single_track:Number($('#analysis-single-track').value), microphone_track:Number($('#analysis-microphone-track').value), all_sounds_track:Number($('#analysis-all-sounds-track').value), game_track:Number($('#analysis-game-track').value), use_all_sounds:$('#analysis-use-all-sounds').checked, use_game:$('#analysis-use-game').checked }; try { state.analysisAudio = await api('/analysis-audio-defaults', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }); state.analysisAudioDirty = false; rememberGlobalSession(); await loadAnalysisAudioSettings(); message('Analysis audio settings saved. They apply to the next analysis or reanalysis.'); } catch (error) { message(error.message, true); } };
 $('#discovery-profile').onchange = () => { state.discoveryDirty = true; renderDiscoveryPatternSets(); updateDiscoveryPatternFeedback(); rememberGlobalSession(); };
@@ -1809,6 +2804,126 @@ $('#application-language').onchange = (event) => setInterfaceLanguage(event.targ
 $('#clip-editor-close').onclick = () => setClipEditorOpen(false);
 $('#clip-editor-toggle').onclick = () => setClipEditorOpen(true);
 document.querySelectorAll('[data-editor-tab]').forEach((button) => { button.onclick = () => setEditorTab(button.dataset.editorTab); });
+$('#open-clip-composer').onclick = () => openClipComposer(selectedEditorSegment());
+$('#close-clip-composer').onclick = closeClipComposer;
+$('#clip-composer-dialog').addEventListener('close', () => {
+  disposeClipComposer();
+});
+$('#clip-composer-dialog').addEventListener('cancel', (event) => {
+  event.preventDefault();
+  closeClipComposer();
+});
+$('#clip-composer-scrubber').oninput = (event) => {
+  const player = $('#clip-composer-video');
+  const position = Number(event.target.value);
+  if (Number.isFinite(position)) player.currentTime = position;
+  syncClipComposerPosition(position);
+};
+$('#clip-composer-export').onclick = () => void exportFromClipComposer();
+$('#clip-composer-rewind').onclick = rewindComposerPreview;
+$('#clip-composer-play-toggle').onclick = async () => {
+  const player = $('#clip-composer-video');
+  try { if (player.paused) { beginComposerPreview(player); await player.play(); } else player.pause(); }
+  catch (error) { message(error.message || 'Unable to play this preview.', true); }
+  finally { updateComposerPlayButton(); }
+};
+window.addEventListener('resize', () => {
+  if (!$('#clip-composer-dialog')?.open) return;
+  renderComposerLayoutPreview();
+  renderComposerCaption($('#clip-composer-video').currentTime || state.clipComposer.start);
+});
+document.querySelectorAll('[data-composer-tab]').forEach((button) => { button.onclick = () => setComposerTab(button.dataset.composerTab); });
+$('#composer-caption-position').onchange = () => {
+  state.clipComposer.captionPosition = $('#composer-caption-position').value;
+  renderComposerCaption($('#clip-composer-video').currentTime || state.clipComposer.start);
+};
+$('#composer-layout').onchange = rememberComposerLayout;
+$('#composer-capture-layout-frame').onclick = () => captureComposerLayoutFrame(true, true);
+$('#composer-calibrate-camera').onclick = () => setComposerCalibrationMode('camera');
+$('#composer-calibrate-game').onclick = () => setComposerCalibrationMode('game');
+$('#composer-layout-preset-form').onsubmit = (event) => void saveComposerLayoutPreset(event);
+composerLayoutCanvas().onpointerdown = (event) => {
+  const canvas = composerLayoutCanvas(); const calibration = composerCalibrationState();
+  if (!canvas.classList.contains('drawing') || !calibration.captured) return;
+  event.preventDefault();
+  canvas.setPointerCapture?.(event.pointerId);
+  calibration.start = composerCalibrationPoint(event);
+  calibration.drawing = { x:calibration.start.x, y:calibration.start.y, width:0, height:0 };
+  drawComposerLayoutOverlay();
+};
+composerLayoutCanvas().onpointermove = (event) => {
+  const canvas = composerLayoutCanvas(); const calibration = composerCalibrationState();
+  if (!canvas.classList.contains('drawing') || !calibration.start) return;
+  const point = composerCalibrationPoint(event);
+  calibration.drawing = {
+    x:Math.min(calibration.start.x, point.x), y:Math.min(calibration.start.y, point.y),
+    width:Math.abs(point.x - calibration.start.x), height:Math.abs(point.y - calibration.start.y)
+  };
+  drawComposerLayoutOverlay();
+};
+const finishComposerLayoutDrawing = (event) => {
+  const canvas = composerLayoutCanvas(); const calibration = composerCalibrationState();
+  if (!canvas.classList.contains('drawing') || !calibration.start) return;
+  canvas.releasePointerCapture?.(event.pointerId);
+  const rect = calibration.drawing;
+  calibration.start = null; calibration.drawing = null;
+  canvas.classList.remove('drawing');
+  if (!rect || rect.width < .02 || rect.height < .02) {
+    $('#composer-layout-calibration-status').textContent = 'The selected area was too small. Draw it again.';
+    drawComposerLayoutOverlay();
+    return;
+  }
+  storeComposerCalibratedRect(calibration.mode, rect);
+  $('#composer-layout-calibration-status').textContent = `${calibration.mode === 'camera' ? 'Camera' : 'Gameplay'} area updated for this Composer. Save this layout to reuse it.`;
+  drawComposerLayoutOverlay();
+};
+composerLayoutCanvas().onpointerup = finishComposerLayoutDrawing;
+composerLayoutCanvas().onpointercancel = finishComposerLayoutDrawing;
+$('#composer-timing-start-range').oninput = () => setComposerTiming(Number($('#composer-timing-start-range').value), state.clipComposer.end);
+$('#composer-timing-end-range').oninput = () => setComposerTiming(state.clipComposer.start, Number($('#composer-timing-end-range').value));
+$('#composer-refresh-captions').onclick = () => void refreshComposerCaptions();
+$('#composer-hook-range').oninput = () => {
+  const hookStart = Number($('#composer-hook-range').value);
+  state.clipComposer.timing.hook_seconds = Math.max(0, state.clipComposer.end - hookStart);
+  if (state.clipComposer.timing.hook_seconds > 0 && state.clipComposer.audio?.remove_pauses) {
+    state.clipComposer.audio.remove_pauses = false;
+    $('#composer-audio-remove-pauses').checked = false;
+    refreshComposerLiveAudio();
+    message('Pause removal was turned off because an opening hook changes the clip order.');
+  }
+  state.clipComposer.previewPhase = 'body';
+  state.clipComposer.previewTransition = false;
+  syncComposerTimingControls();
+};
+$('#composer-loop-preview').onchange = () => { state.clipComposer.timing.loop = $('#composer-loop-preview').checked; };
+['#composer-caption-preset', '#composer-caption-font-family', '#composer-caption-base-color', '#composer-caption-active-color', '#composer-caption-outline-enabled', '#composer-caption-outline-color', '#composer-caption-glow-enabled', '#composer-caption-opacity', '#composer-caption-max-lines'].forEach((selector) => {
+  $(selector).addEventListener(selector.includes('color') || selector.includes('opacity') ? 'input' : 'change', rememberComposerCaption);
+});
+['#composer-audio-censor-profanity', '#composer-audio-remove-pauses', '#composer-audio-microphone-enhancement', '#composer-audio-normalize-loudness'].forEach((selector) => { $(selector).onchange = rememberComposerAudio; });
+$('#composer-audio-volume-gain').oninput = rememberComposerAudio;
+$('#composer-audio-render-preview').onclick = () => void renderComposerExactAudioPreview();
+$('#composer-caption-favorite').onchange = () => {
+  const favorite = (state.captionFavorites || []).find((item) => item.id === $('#composer-caption-favorite').value);
+  if (favorite) syncComposerCaptionControls({ ...favorite, outline_enabled:Boolean(Number(favorite.outline_enabled)), glow_enabled:Boolean(Number(favorite.glow_enabled)), opacity:Number(favorite.opacity || 100) });
+  renderComposerCaption($('#clip-composer-video').currentTime || state.clipComposer.start);
+};
+$('#composer-caption-favorite-form').onsubmit = async (event) => {
+  event.preventDefault();
+  const input = $('#composer-caption-favorite-name');
+  const name = input.value.trim();
+  if (!name) return;
+  const button = event.currentTarget.querySelector('button'); button.disabled = true;
+  try {
+    await api('/caption-favorites', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ name, ...state.clipComposer.caption }) });
+    input.value = '';
+    await loadCaptionSettings();
+    renderComposerCaptionFavorites();
+    message('Caption favorite saved.');
+  } catch (error) { message(error.message, true); } finally { button.disabled = false; }
+};
+$('#editor-transcript').addEventListener('input', () => {
+  if ($('#clip-composer-dialog').open) renderComposerCaption($('#clip-composer-video').currentTime || state.clipComposer.start);
+});
 setClipEditorOpen(false);
 organizeSetupCards();
 const interfaceLocalizer = new MutationObserver((changes) => {

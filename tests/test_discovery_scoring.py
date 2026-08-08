@@ -13,6 +13,7 @@ from app.services.discovery import (
     preference_features,
     score_candidates,
     suppress_duplicate_groups,
+    is_disallowed_reading,
 )
 
 
@@ -25,6 +26,19 @@ def test_probable_reading_is_capped_at_18(candidate_factory, empty_discovery_fee
     ranked = _score(empty_discovery_feedback, [candidate])
     assert ranked[0]["ranking_score"] <= 18
     assert ranked[0]["excluded_from_discovery"] is True
+
+
+def test_reading_exception_requires_verified_viewer_answer(candidate_factory):
+    unrelated_chat = candidate_factory(
+        reading_likelihood=0.8, end_seconds=18,
+        chat_reaction_score=12, chat_joy_score=8, chat_question_match_score=0,
+    )
+    verified_answer = candidate_factory(
+        reading_likelihood=0.8, end_seconds=18,
+        chat_reaction_score=12, chat_joy_score=8, chat_question_match_score=55,
+    )
+    assert is_disallowed_reading(unrelated_chat) is True
+    assert is_disallowed_reading(verified_answer) is False
 
 
 def test_concise_complete_candidate_beats_long_contextless_candidate(candidate_factory, empty_discovery_feedback):
@@ -41,6 +55,27 @@ def test_expressive_delivery_beats_monotone_delivery(candidate_factory, empty_di
     ranked = _score(empty_discovery_feedback, [expressive, monotone])
     scores = {item["id"]: item["ranking_score"] for item in ranked}
     assert scores["expressive"] > scores["monotone"]
+
+
+def test_specialized_profiles_require_their_own_evidence(candidate_factory, empty_discovery_feedback):
+    game_reaction = candidate_factory(
+        id="game", tags=json.dumps(["reakcja na grę", "zaskoczenie"]),
+        game_reaction_score=14, moment_reaction_score=18,
+        moment_reaction_stage="game -> voice", end_seconds=18,
+    )
+    no_sequence = candidate_factory(
+        id="no-sequence", tags=json.dumps(["reakcja na grę", "zaskoczenie"]),
+        game_reaction_score=0, moment_reaction_score=0, end_seconds=18,
+    )
+    ranked = score_candidates([game_reaction, no_sequence], reference=[], profile="game_reactions")
+    scores = {item["id"]: item["ranking_score"] for item in ranked}
+    assert scores["game"] > scores["no-sequence"]
+
+    punchline = candidate_factory(id="punchline", tags=json.dumps(["humor"]), extended_punchline_score=78)
+    no_punchline = candidate_factory(id="no-punchline", tags=json.dumps(["humor"]), extended_punchline_score=32)
+    ranked = score_candidates([punchline, no_punchline], reference=[], profile="funny_moments")
+    scores = {item["id"]: item["ranking_score"] for item in ranked}
+    assert scores["punchline"] > scores["no-punchline"]
 
 
 def test_profanity_filters_allow_one_or_none(candidate_factory):

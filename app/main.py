@@ -42,6 +42,7 @@ from app.models import (
     DescriptionSearch,
     ExampleCreate,
     ExportDefaultsUpdate,
+    ComposerCaptionRefresh,
     LayoutPresetCreate,
     ExportRequest,
     RatingUpdate,
@@ -57,6 +58,7 @@ from app.models import (
     SegmentPauseTrimUpdate,
     SegmentTranscriptUpdate,
     TagFeedbackUpdate,
+    PublicationFeedbackUpdate,
     SimilaritySearch,
 )
 from app.services.embeddings import cosine, embed_texts
@@ -100,7 +102,7 @@ from app.services.tagging import (
     detailed_lexical_tags,
     infer_tags,
 )
-from app.services.tag_taxonomy import canonical_tag, canonicalize_tags
+from app.services.tag_taxonomy import GAME_REACTION_MIN_SCORE, canonical_tag, canonicalize_tags
 from app.services.updater import automatic_updates_available, install_downloaded_update, job_status as update_download_status, start_download as start_update_download
 from app.services.updates import update_status
 from app.services.runtime_status import runtime_status
@@ -182,6 +184,19 @@ def backfill_segment_context() -> None:
 def backfill_moment_reactions() -> None:
     """Seed the game-to-voice stage for clips analysed before the combined score."""
     items = db.rows("SELECT id, game_reaction_score FROM segments WHERE lifecycle_state='current' AND moment_reaction_score=0 AND game_reaction_score>=7")
+    for item in items:
+        _recompute_persisted_segment(item["id"], {"game_reaction_score"})
+
+
+def backfill_stricter_game_reaction_tags() -> None:
+    """Remove legacy reaction labels which do not meet the causal threshold."""
+    items = db.rows(
+        """SELECT id FROM segments
+           WHERE lifecycle_state='current'
+             AND game_reaction_score < ?
+             AND tags LIKE ?""",
+        (GAME_REACTION_MIN_SCORE, f'%"{GAME_REACTION_TAG}"%'),
+    )
     for item in items:
         _recompute_persisted_segment(item["id"], {"game_reaction_score"})
 
@@ -292,6 +307,7 @@ def run_startup_maintenance() -> None:
         ("segment-context-v1", backfill_segment_context),
         ("legacy-game-audio-v1", remove_legacy_game_audio_bonus),
         ("moment-reactions-v1", backfill_moment_reactions),
+        ("game-reaction-threshold-v2", backfill_stricter_game_reaction_tags),
         ("duplicate-groups-v1", backfill_duplicate_groups),
         ("detailed-tags-v2", backfill_detailed_tags),
         ("preference-feedback-v1", backfill_preference_feedback),
@@ -1469,12 +1485,14 @@ def app_statistics():
     rows = db.rows(
         """SELECT r.rating, r.review_reason, sr.payload_json,
                   s.tags, s.quality_score, s.short_potential_score,
-                  s.self_contained_score, s.extended_completeness_score,
-                  s.reading_likelihood, v.analysis_mode
+                  s.logical_sense_score, s.context_score, s.self_contained_score, s.extended_completeness_score, s.opening_clarity_score, s.extended_punchline_score,
+                  s.reading_likelihood, v.analysis_mode,
+                  pf.platform, pf.views, pf.average_watch_percent, pf.shares, pf.comments
            FROM segments s
            JOIN videos v ON v.id=s.video_id
            JOIN segment_reviews r ON r.segment_id=s.id
            LEFT JOIN segment_revisions sr ON sr.id=r.reviewed_revision_id
+           LEFT JOIN publication_feedback pf ON pf.segment_id=s.id
            WHERE s.lifecycle_state='current' OR r.rating IN ('accepted', 'rejected')"""
     )
     decisions = Counter({"accepted": 0, "rejected": 0, "unrated": 0})
@@ -1483,9 +1501,12 @@ def app_statistics():
     modes: dict[str, Counter[str]] = defaultdict(Counter)
     score_values: dict[str, dict[str, list[float]]] = {
         "quality": defaultdict(list), "short_potential": defaultdict(list),
+        "logical_sense": defaultdict(list), "context": defaultdict(list),
         "self_contained": defaultdict(list), "extended_completeness": defaultdict(list),
+        "opening_clarity": defaultdict(list), "punchline": defaultdict(list),
     }
     reading = Counter({"accepted": 0, "rejected": 0, "unrated": 0})
+    published_rows: list[dict] = []
     for row in rows:
         try:
             reviewed_machine = json.loads(row.get("payload_json") or "{}")
@@ -1511,10 +1532,14 @@ def app_statistics():
                 tags[tag.strip()][rating] += 1
         if float(row.get("reading_likelihood") or 0) >= 0.48:
             reading[rating] += 1
+        if row.get("platform") or int(row.get("views") or 0) or int(row.get("shares") or 0) or int(row.get("comments") or 0):
+            published_rows.append(row)
         if rating in {"accepted", "rejected"}:
             for key, column in (
                 ("quality", "quality_score"), ("short_potential", "short_potential_score"),
+                ("logical_sense", "logical_sense_score"), ("context", "context_score"),
                 ("self_contained", "self_contained_score"), ("extended_completeness", "extended_completeness_score"),
+                ("opening_clarity", "opening_clarity_score"), ("punchline", "extended_punchline_score"),
             ):
                 value = float(row.get(column) or -1)
                 if value >= 0:
@@ -1533,15 +1558,47 @@ def app_statistics():
         if reason:
             listed_reasons.append({"reason": reason, "count": reasons.pop(reason, 0), "saved": True})
     listed_reasons.extend({"reason": reason, "count": count, "saved": False} for reason, count in reasons.most_common(10))
+    score_comparison = {
+        key: {
+            "accepted": average(values["accepted"]),
+            "rejected": average(values["rejected"]),
+            "accepted_count": len(values["accepted"]),
+            "rejected_count": len(values["rejected"]),
+        }
+        for key, values in score_values.items()
+    }
+    calibration = []
+    for key, values in score_comparison.items():
+        accepted, rejected = values["accepted"], values["rejected"]
+        sample_size = min(values["accepted_count"], values["rejected_count"])
+        delta = None if accepted is None or rejected is None else accepted - rejected
+        if sample_size < 5:
+            verdict = "collecting_data"
+        elif delta is not None and delta >= 10:
+            verdict = "strong_signal"
+        elif delta is not None and delta >= 4:
+            verdict = "weak_signal"
+        else:
+            verdict = "needs_tuning"
+        calibration.append({"score": key, "delta": delta, "sample_size": sample_size, "verdict": verdict})
+
     return {
-        "overview": {"total": len(rows), "reviewed": reviewed, "accepted": decisions["accepted"], "rejected": decisions["rejected"], "approval_rate": round(decisions["accepted"] * 100 / reviewed) if reviewed else None},
+        "overview": {"total": len(rows), "reviewed": reviewed, "accepted": decisions["accepted"], "rejected": decisions["rejected"], "approval_rate": round(decisions["accepted"] * 100 / reviewed) if reviewed else None, "published": len(published_rows)},
+        "published_performance": {
+            "count": len(published_rows),
+            "views": sum(int(row.get("views") or 0) for row in published_rows),
+            "median_watch_percent": round(statistics.median([float(row.get("average_watch_percent") or 0) for row in published_rows if float(row.get("average_watch_percent") or 0) > 0]), 1) if any(float(row.get("average_watch_percent") or 0) > 0 for row in published_rows) else None,
+            "shares": sum(int(row.get("shares") or 0) for row in published_rows),
+            "comments": sum(int(row.get("comments") or 0) for row in published_rows),
+        },
         "rejection_reasons": listed_reasons,
         "tags": [
             {"tag": tag, "accepted": counts["accepted"], "rejected": counts["rejected"], "unrated": counts["unrated"], "total": sum(counts.values()), "approval_rate": round(counts["accepted"] * 100 / (counts["accepted"] + counts["rejected"])) if counts["accepted"] + counts["rejected"] else None}
             for tag, counts in sorted(tags.items(), key=lambda item: (sum(item[1].values()), item[0]), reverse=True)[:14]
         ],
         "analysis_modes": [{"mode": mode, "accepted": counts["accepted"], "rejected": counts["rejected"], "unrated": counts["unrated"]} for mode, counts in sorted(modes.items())],
-        "score_comparison": {key: {"accepted": average(values["accepted"]), "rejected": average(values["rejected"])} for key, values in score_values.items()},
+        "score_comparison": score_comparison,
+        "calibration": calibration,
         "reading_flags": dict(reading),
     }
 
@@ -2270,6 +2327,41 @@ def update_segment_timing(segment_id: str, body: SegmentTimingUpdate):
     return db.serialize_segment(updated)
 
 
+@app.post("/api/segments/{segment_id}/composer-captions")
+def refresh_composer_captions(segment_id: str, body: ComposerCaptionRefresh):
+    """Transcribe a Composer-only range without changing saved clip analysis."""
+    segment = db.row(
+        """SELECT s.id, v.path, v.duration_seconds, v.transcript_audio_track
+           FROM segments s JOIN videos v ON v.id=s.video_id WHERE s.id=?""",
+        (segment_id,),
+    )
+    if not segment:
+        not_found("Segment not found")
+    if body.end_seconds - body.start_seconds < 0.5:
+        raise HTTPException(400, "The clip must be at least 0.5 seconds long.")
+    duration = float(segment.get("duration_seconds") or 0)
+    if duration and body.end_seconds > duration:
+        raise HTTPException(400, "The end time is outside the recording.")
+    source = Path(segment["path"])
+    if not source.is_file():
+        raise HTTPException(409, "The source video was removed, so captions cannot be refreshed.")
+    try:
+        transcript, words = transcribe_clip_range(
+            source,
+            float(body.start_seconds),
+            float(body.end_seconds),
+            int(segment.get("transcript_audio_track") or 1),
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"Unable to refresh captions: {exc}") from exc
+    return {
+        "transcript": transcript,
+        "word_timestamps": words,
+        "start_seconds": float(body.start_seconds),
+        "end_seconds": float(body.end_seconds),
+    }
+
+
 @app.patch("/api/segments/{segment_id}/transcript")
 def update_segment_transcript(segment_id: str, body: SegmentTranscriptUpdate):
     segment = db.row(
@@ -2376,14 +2468,46 @@ def update_segment_tag_feedback(segment_id: str, body: TagFeedbackUpdate):
     return db.serialize_segment(updated)
 
 
+@app.get("/api/segments/{segment_id}/publication-feedback")
+def get_publication_feedback(segment_id: str):
+    if not db.row("SELECT id FROM segments WHERE id=?", (segment_id,)):
+        not_found("Segment not found")
+    saved = db.row("SELECT platform, published_url, views, average_watch_percent, shares, comments, updated_at FROM publication_feedback WHERE segment_id=?", (segment_id,))
+    return saved or {
+        "platform": "", "published_url": "", "views": 0,
+        "average_watch_percent": 0, "shares": 0, "comments": 0,
+        "updated_at": None,
+    }
+
+
+@app.put("/api/segments/{segment_id}/publication-feedback")
+def update_publication_feedback(segment_id: str, body: PublicationFeedbackUpdate):
+    if not db.row("SELECT id FROM segments WHERE id=?", (segment_id,)):
+        not_found("Segment not found")
+    platform = " ".join(body.platform.split())[:32]
+    published_url = body.published_url.strip()
+    with db.connection() as con:
+        con.execute(
+            """INSERT INTO publication_feedback
+               (segment_id, platform, published_url, views, average_watch_percent, shares, comments, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(segment_id) DO UPDATE SET
+                   platform=excluded.platform, published_url=excluded.published_url,
+                   views=excluded.views, average_watch_percent=excluded.average_watch_percent,
+                   shares=excluded.shares, comments=excluded.comments, updated_at=excluded.updated_at""",
+            (segment_id, platform, published_url, body.views, body.average_watch_percent, body.shares, body.comments, db.now()),
+        )
+    return get_publication_feedback(segment_id)
+
+
 @app.post("/api/segments/{segment_id}/export")
 def export_segment(segment_id: str, body: ExportRequest):
-    return _export_segment(segment_id, body.lead_in_seconds, body.lead_out_seconds, body.captions_preset, body.caption_position, body.base_color, body.active_color, body.layout, body.audio_track, body.filename, body.outline_enabled, body.outline_color, body.glow_enabled, body.opacity, body.font_family, body.camera_x, body.camera_y, body.camera_width, body.camera_height, body.game_x, body.game_y, body.game_width, body.game_height)
+    return _export_segment(segment_id, body.lead_in_seconds, body.lead_out_seconds, body.captions_preset, body.caption_position, body.base_color, body.active_color, body.layout, body.audio_track, body.filename, body.outline_enabled, body.outline_color, body.glow_enabled, body.opacity, body.font_family, body.max_lines, body.camera_x, body.camera_y, body.camera_width, body.camera_height, body.game_x, body.game_y, body.game_width, body.game_height, body.censor_profanity, body.remove_pauses, body.microphone_enhancement, body.normalize_loudness, body.volume_gain_db, body.start_seconds, body.end_seconds, body.hook_seconds, body.caption_text, body.caption_word_timestamps)
 
 
 @app.get("/api/segments/{segment_id}/export")
-def download_segment(segment_id: str, lead_in_seconds: float = 0, lead_out_seconds: float = 0, captions_preset: str = "none", caption_position: str = "bottom", base_color: str = "#FFFFFF", active_color: str = "#FFFF00", layout: str = "original", audio_track: int = 1, filename: str = "", outline_enabled: bool = True, outline_color: str = "#000000", glow_enabled: bool = False, opacity: int = 100, font_family: str = "Inter", camera_x: float | None = None, camera_y: float | None = None, camera_width: float | None = None, camera_height: float | None = None, game_x: float | None = None, game_y: float | None = None, game_width: float | None = None, game_height: float | None = None):
-    return _export_segment(segment_id, lead_in_seconds, lead_out_seconds, captions_preset, caption_position, base_color, active_color, layout, audio_track, filename, outline_enabled, outline_color, glow_enabled, opacity, font_family, camera_x, camera_y, camera_width, camera_height, game_x, game_y, game_width, game_height)
+def download_segment(segment_id: str, lead_in_seconds: float = 0, lead_out_seconds: float = 0, captions_preset: str = "none", caption_position: str = "bottom", base_color: str = "#FFFFFF", active_color: str = "#FFFF00", layout: str = "original", audio_track: int = 1, filename: str = "", outline_enabled: bool = True, outline_color: str = "#000000", glow_enabled: bool = False, opacity: int = 100, font_family: str = "Inter", max_lines: int = 2, camera_x: float | None = None, camera_y: float | None = None, camera_width: float | None = None, camera_height: float | None = None, game_x: float | None = None, game_y: float | None = None, game_width: float | None = None, game_height: float | None = None, censor_profanity: bool | None = None, remove_pauses: bool | None = None, microphone_enhancement: bool = False, normalize_loudness: bool = False, volume_gain_db: float = 0, start_seconds: float | None = None, end_seconds: float | None = None, hook_seconds: float = 0):
+    return _export_segment(segment_id, lead_in_seconds, lead_out_seconds, captions_preset, caption_position, base_color, active_color, layout, audio_track, filename, outline_enabled, outline_color, glow_enabled, opacity, font_family, max_lines, camera_x, camera_y, camera_width, camera_height, game_x, game_y, game_width, game_height, censor_profanity, remove_pauses, microphone_enhancement, normalize_loudness, volume_gain_db, start_seconds, end_seconds, hook_seconds)
 
 
 def _safe_export_name(value: str, fallback: str) -> str:
@@ -2409,11 +2533,11 @@ def _export_segment(*args, **kwargs):
         return _export_segment_locked(*args, **kwargs)
 
 
-def _export_segment_locked(segment_id: str, lead_in_seconds: float, lead_out_seconds: float, captions_preset: str = "none", caption_position: str = "bottom", base_color: str = "#FFFFFF", active_color: str = "#FFFF00", layout: str = "original", audio_track: int = 1, filename: str = "", outline_enabled: bool = True, outline_color: str = "#000000", glow_enabled: bool = False, opacity: int = 100, font_family: str = "Inter", camera_x: float | None = None, camera_y: float | None = None, camera_width: float | None = None, camera_height: float | None = None, game_x: float | None = None, game_y: float | None = None, game_width: float | None = None, game_height: float | None = None):
+def _export_segment_locked(segment_id: str, lead_in_seconds: float, lead_out_seconds: float, captions_preset: str = "none", caption_position: str = "bottom", base_color: str = "#FFFFFF", active_color: str = "#FFFF00", layout: str = "original", audio_track: int = 1, filename: str = "", outline_enabled: bool = True, outline_color: str = "#000000", glow_enabled: bool = False, opacity: int = 100, font_family: str = "Inter", max_lines: int = 2, camera_x: float | None = None, camera_y: float | None = None, camera_width: float | None = None, camera_height: float | None = None, game_x: float | None = None, game_y: float | None = None, game_width: float | None = None, game_height: float | None = None, censor_profanity: bool | None = None, remove_pauses: bool | None = None, microphone_enhancement: bool = False, normalize_loudness: bool = False, volume_gain_db: float = 0, start_seconds: float | None = None, end_seconds: float | None = None, hook_seconds: float = 0, caption_text: str | None = None, caption_word_timestamps: list[dict] | None = None):
     segment = db.row(
         """SELECT s.*, r.rating, r.review_reason, r.censor_profanity,
                   r.remove_pauses, sr.id AS current_revision_id,
-                  r.reviewed_revision_id, v.path, v.original_name
+                  r.reviewed_revision_id, v.path, v.original_name, v.duration_seconds
            FROM segments s
            JOIN videos v ON v.id=s.video_id
            JOIN segment_reviews r ON r.segment_id=s.id
@@ -2430,19 +2554,34 @@ def _export_segment_locked(segment_id: str, lead_in_seconds: float, lead_out_sec
         raise HTTPException(409, "This clip changed during reanalysis. Review and approve the current version before exporting MP4.")
     if not Path(segment["path"]).is_file():
         raise HTTPException(409, "The source video was removed. Analysis data and archived review audio remain available, but MP4 export is no longer possible.")
-    start = max(0, segment["start_seconds"] - min(10, max(0, lead_in_seconds)))
-    end = segment["end_seconds"] + min(10, max(0, lead_out_seconds))
+    if (start_seconds is None) != (end_seconds is None):
+        raise HTTPException(400, "Provide both custom start and end times together.")
+    if start_seconds is None:
+        start = max(0, segment["start_seconds"] - min(10, max(0, lead_in_seconds)))
+        end = segment["end_seconds"] + min(10, max(0, lead_out_seconds))
+    else:
+        start, end = max(0, float(start_seconds)), float(end_seconds)
+    duration_limit = float(segment.get("duration_seconds") or 0)
+    if duration_limit > 0:
+        end = min(end, duration_limit)
+    if end - start < 0.5:
+        raise HTTPException(400, "A clip must be at least 0.5 seconds long.")
+    hook_seconds = max(0.0, float(hook_seconds))
+    if hook_seconds and hook_seconds >= end - start - 0.49:
+        raise HTTPException(400, "The opening hook must be shorter than the selected clip.")
     if captions_preset not in {"none", "clean", "highlight", "minimal", "boxed_pop", "neon_gaming", "cinematic", "karaoke_punch", "minimal_center"}:
         raise HTTPException(400, "Unknown caption preset.")
     if layout not in {"original", "portrait_camera", "portrait_game", "portrait_split"}:
         raise HTTPException(400, "Unknown clip layout.")
     if audio_track not in {1, 2, 3, 4}:
         raise HTTPException(400, "Audio track must be between 1 and 4.")
-    if caption_position not in {"top", "two_fifths", "middle", "four_fifths", "bottom"} or font_family not in {"Inter", "Montserrat", "Poppins", "Lato", "Roboto Condensed", "Oswald", "Nunito", "Noto Sans", "Bungee", "Cinzel", "Pixelify Sans"} or not re.fullmatch(r"#[0-9A-Fa-f]{6}", base_color) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", active_color) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", outline_color) or not 20 <= opacity <= 100:
+    if caption_position not in {"top", "two_fifths", "middle", "four_fifths", "bottom"} or font_family not in {"Inter", "Montserrat", "Poppins", "Lato", "Roboto Condensed", "Oswald", "Nunito", "Noto Sans", "Bungee", "Cinzel", "Pixelify Sans"} or not re.fullmatch(r"#[0-9A-Fa-f]{6}", base_color) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", active_color) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", outline_color) or not 20 <= opacity <= 100 or not 1 <= int(max_lines) <= 4 or not -12 <= float(volume_gain_db) <= 12:
         raise HTTPException(400, "Invalid caption settings.")
-    censor_profanity = bool(segment.get("censor_profanity"))
-    remove_pauses = bool(segment.get("remove_pauses"))
-    suffix = ("" if captions_preset == "none" else f"_captions-{captions_preset}") + ("" if layout == "original" else f"_{layout}") + ("_censored" if censor_profanity else "") + ("_dynamic" if remove_pauses else "")
+    censor_profanity = bool(segment.get("censor_profanity")) if censor_profanity is None else bool(censor_profanity)
+    remove_pauses = bool(segment.get("remove_pauses")) if remove_pauses is None else bool(remove_pauses)
+    if hook_seconds and remove_pauses:
+        raise HTTPException(400, "Opening hook and pause removal cannot be combined yet. Turn off pause removal for this export.")
+    suffix = ("" if captions_preset == "none" else f"_captions-{captions_preset}") + ("" if layout == "original" else f"_{layout}") + (f"_hook-{hook_seconds:.0f}s" if hook_seconds else "") + ("_censored" if censor_profanity else "") + ("_dynamic" if remove_pauses else "") + ("_voice" if microphone_enhancement else "") + ("_levelled" if normalize_loudness else "")
     fallback = f"{Path(segment['original_name']).stem}_{start:.0f}-{end:.0f}{suffix}"
     destination = _available_export_path(_safe_export_name(filename, fallback))
     requested_rectangles = (camera_x, camera_y, camera_width, camera_height, game_x, game_y, game_width, game_height)
@@ -2465,7 +2604,27 @@ def _export_segment_locked(segment_id: str, lead_in_seconds: float, lead_out_sec
                 raise HTTPException(400, f"{label} layout area must fit inside the source frame.")
     captions_path = None
     try:
-        word_timestamps = json.loads(segment.get("word_timestamps") or "[]")
+        if caption_word_timestamps is not None:
+            if len(caption_word_timestamps) > 6000:
+                raise HTTPException(400, "Too many caption words supplied for export.")
+            word_timestamps = [word for word in caption_word_timestamps if isinstance(word, dict)]
+        else:
+            word_timestamps = json.loads(segment.get("word_timestamps") or "[]")
+        caption_transcript = segment["transcript"] if caption_text is None else caption_text
+        if hook_seconds:
+            split_at = end - start - hook_seconds
+            remapped_words = []
+            for word in word_timestamps:
+                if word.get("start") is None or word.get("end") is None:
+                    continue
+                left, right = float(word["start"]) - start, float(word["end"]) - start
+                if right <= 0 or left >= end - start:
+                    continue
+                if left >= split_at:
+                    remapped_words.append({**word, "start": start + left - split_at, "end": start + right - split_at})
+                elif right <= split_at:
+                    remapped_words.append({**word, "start": start + hook_seconds + left, "end": start + hook_seconds + right})
+            word_timestamps = remapped_words
         pause_ranges = pause_trim_ranges(word_timestamps, end - start, start) if remove_pauses else [(0.0, end - start)]
         output_duration = sum(right - left for left, right in pause_ranges)
         if remove_pauses and len(pause_ranges) > 1:
@@ -2478,8 +2637,8 @@ def _export_segment_locked(segment_id: str, lead_in_seconds: float, lead_out_sec
             word_timestamps = [{**word, "start": start + float(word["start"]), "end": start + float(word["end"])} for word in remapped]
         if captions_preset != "none":
             captions_path = settings.work_dir / f"{segment_id}-{captions_preset}.ass"
-            write_caption_ass(captions_path, segment["transcript"], output_duration, captions_preset, word_timestamps, start, caption_position, base_color, active_color, censor_profanity, outline_enabled, outline_color, glow_enabled, opacity, font_family)
-        export_clip(Path(segment["path"]), destination, start, end, captions_path, layout, audio_track, word_timestamps, segment["transcript"], censor_profanity, camera_rect, game_rect, pause_ranges)
+            write_caption_ass(captions_path, caption_transcript, output_duration, captions_preset, word_timestamps, start, caption_position, base_color, active_color, censor_profanity, outline_enabled, outline_color, glow_enabled, opacity, font_family, int(max_lines))
+        export_clip(Path(segment["path"]), destination, start, end, captions_path, layout, audio_track, word_timestamps, caption_transcript, censor_profanity, camera_rect, game_rect, pause_ranges, microphone_enhancement, normalize_loudness, volume_gain_db, hook_seconds)
     except MediaError as exc:
         destination.unlink(missing_ok=True)
         raise HTTPException(500, f"Unable to export clip: {exc}") from exc
@@ -2542,6 +2701,40 @@ def audio_preview(segment_id: str, audio_track: int = 1, remove_pauses: bool = F
                 export_audio_preview(source, destination, segment["start_seconds"], segment["end_seconds"], audio_track, pause_ranges)
             except MediaError as exc:
                 raise HTTPException(500, f"Unable to prepare audio preview: {exc}") from exc
+    return FileResponse(destination, media_type="audio/mpeg", filename=destination.name)
+
+
+@app.get("/api/segments/{segment_id}/composer-audio-preview")
+def composer_audio_preview(segment_id: str, audio_track: int = 1, censor_profanity: bool = False, remove_pauses: bool = False, microphone_enhancement: bool = False, normalize_loudness: bool = False, volume_gain_db: float = 0):
+    """Render an exact audio-only Composer preview with the export settings."""
+    if not -12 <= float(volume_gain_db) <= 12:
+        raise HTTPException(400, "Volume correction must be between -12 dB and +12 dB.")
+    segment, source, archive = _resolve_audio_preview(segment_id, audio_track, remove_pauses)
+    if archive is not None or source is None:
+        raise HTTPException(409, "An exact Composer audio preview needs the original recording. Archived review audio cannot be reprocessed.")
+    settings_key = json.dumps({
+        "track": audio_track, "censor": bool(censor_profanity), "pauses": bool(remove_pauses),
+        "voice": bool(microphone_enhancement), "normalize": bool(normalize_loudness), "gain": round(float(volume_gain_db), 2),
+    }, sort_keys=True)
+    digest = hashlib.sha256(settings_key.encode("utf-8")).hexdigest()[:16]
+    destination = settings.previews_dir / f"composer-{segment_id}-{digest}.mp3"
+    with _media_output_lock:
+        if not destination.is_file():
+            try:
+                start, end = float(segment["start_seconds"]), float(segment["end_seconds"])
+                words = json.loads(segment.get("word_timestamps") or "[]")
+                pause_ranges = pause_trim_ranges(words, end - start, start) if remove_pauses else [(0.0, end - start)]
+                if remove_pauses and len(pause_ranges) > 1:
+                    relative_words = [
+                        {**word, "start": float(word["start"]) - start, "end": float(word["end"]) - start}
+                        for word in words if word.get("start") is not None and word.get("end") is not None
+                    ]
+                    remapped = remap_words_for_kept_ranges(relative_words, pause_ranges)
+                    words = [{**word, "start": start + float(word["start"]), "end": start + float(word["end"])} for word in remapped]
+                export_audio_preview(source, destination, start, end, audio_track, pause_ranges, words, segment["transcript"], censor_profanity, microphone_enhancement, normalize_loudness, volume_gain_db)
+            except MediaError as exc:
+                destination.unlink(missing_ok=True)
+                raise HTTPException(500, f"Unable to render Composer audio preview: {exc}") from exc
     return FileResponse(destination, media_type="audio/mpeg", filename=destination.name)
 
 
@@ -2761,8 +2954,8 @@ def update_export_defaults(body: ExportDefaultsUpdate):
 def update_caption_defaults(body: CaptionDefaultsUpdate):
     with db.connection() as con:
         con.execute(
-            "UPDATE caption_defaults SET captions_preset=?, base_color=?, active_color=?, font_family=?, outline_enabled=?, outline_color=?, glow_enabled=?, opacity=?, updated_at=? WHERE id=1",
-            (body.captions_preset, body.base_color.upper(), body.active_color.upper(), body.font_family, int(body.outline_enabled), body.outline_color.upper(), int(body.glow_enabled), body.opacity, db.now()),
+            "UPDATE caption_defaults SET captions_preset=?, base_color=?, active_color=?, font_family=?, outline_enabled=?, outline_color=?, glow_enabled=?, opacity=?, max_lines=?, updated_at=? WHERE id=1",
+            (body.captions_preset, body.base_color.upper(), body.active_color.upper(), body.font_family, int(body.outline_enabled), body.outline_color.upper(), int(body.glow_enabled), body.opacity, body.max_lines, db.now()),
         )
     return caption_defaults()
 
@@ -2774,13 +2967,13 @@ def caption_favorites():
 
 @app.post("/api/caption-favorites", status_code=201)
 def create_caption_favorite(body: CaptionFavoriteCreate):
-    favorite = {"id": str(uuid.uuid4()), "name": body.name.strip(), "captions_preset": body.captions_preset, "base_color": body.base_color.upper(), "active_color": body.active_color.upper(), "font_family": body.font_family, "outline_enabled": int(body.outline_enabled), "outline_color": body.outline_color.upper(), "glow_enabled": int(body.glow_enabled), "opacity": body.opacity, "created_at": db.now()}
+    favorite = {"id": str(uuid.uuid4()), "name": body.name.strip(), "captions_preset": body.captions_preset, "base_color": body.base_color.upper(), "active_color": body.active_color.upper(), "font_family": body.font_family, "outline_enabled": int(body.outline_enabled), "outline_color": body.outline_color.upper(), "glow_enabled": int(body.glow_enabled), "opacity": body.opacity, "max_lines": body.max_lines, "created_at": db.now()}
     if not favorite["name"]:
         raise HTTPException(400, "Favorite name is required.")
     try:
         with db.connection() as con:
             con.execute(
-                "INSERT INTO caption_favorites (id, name, captions_preset, base_color, active_color, font_family, outline_enabled, outline_color, glow_enabled, opacity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO caption_favorites (id, name, captions_preset, base_color, active_color, font_family, outline_enabled, outline_color, glow_enabled, opacity, max_lines, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(favorite.values()),
             )
     except Exception as exc:

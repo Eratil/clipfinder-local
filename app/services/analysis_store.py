@@ -121,6 +121,8 @@ def _projection(record: dict[str, Any]) -> dict[str, Any]:
         "extended_reading_likelihood": float(record.get("extended_reading_likelihood") or 0),
         "extended_hook_score": int(record.get("extended_hook_score") if record.get("extended_hook_score") is not None else -1),
         "extended_ending_score": int(record.get("extended_ending_score") if record.get("extended_ending_score") is not None else -1),
+        "opening_clarity_score": int(record.get("opening_clarity_score") if record.get("opening_clarity_score") is not None else -1),
+        "extended_punchline_score": int(record.get("extended_punchline_score") if record.get("extended_punchline_score") is not None else -1),
         "extended_story_signals": json.dumps(record.get("extended_story_signals") or [], ensure_ascii=False),
         "boundary_signals": json.dumps(record.get("boundary_signals") or [], ensure_ascii=False),
         "context_signals": json.dumps(record.get("context_signals") or [], ensure_ascii=False),

@@ -38,7 +38,7 @@ def segment(timed_words):
 
 
 def test_default_graph_has_dependency_safe_order():
-    assert FEATURE_SCHEMA_VERSION == "2"
+    assert FEATURE_SCHEMA_VERSION == "3"
     order = FEATURE_GRAPH.topological_order
     positions = {name: index for index, name in enumerate(order)}
     for name, dependencies in FEATURE_GRAPH.dependencies.items():
@@ -256,7 +256,12 @@ def test_dynamic_tags_are_rebuilt_from_current_evidence(segment):
         GAME_REACTION_TAG, CHAT_QUESTION_TAG, CHAT_QUESTION_ANSWER_TAG,
     })
 
+    # A weak correlation is not enough to label the clip as a game reaction.
     segment.update({"game_reaction_score": 10, "chat_question_match_score": 80})
+    below_threshold = recompute_segment_features(segment, {"game_reaction_score", "chat_question_match_score"})
+    assert GAME_REACTION_TAG not in below_threshold.updates["tags"]
+
+    segment.update({"game_reaction_score": 12, "chat_question_match_score": 80})
     rebuilt = recompute_segment_features(segment, {"game_reaction_score", "chat_question_match_score"})
     assert {GAME_REACTION_TAG, CHAT_QUESTION_TAG, CHAT_QUESTION_ANSWER_TAG}.issubset(rebuilt.updates["tags"])
 

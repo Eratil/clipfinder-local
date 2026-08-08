@@ -4,7 +4,10 @@ from app.services.tagging import (
     CHAT_QUESTION_ANSWER_TAG,
     CHAT_QUESTION_TAG,
     assess_clip_quality,
+    assess_extended_punchline,
     assess_extended_reading_likelihood,
+    assess_extended_story_shape,
+    assess_opening_clarity,
     assess_self_containment,
     assess_short_potential,
     calibrate_quality_score,
@@ -49,6 +52,29 @@ def test_complete_sentence_is_more_self_contained_than_cut_thought():
     complete = "Nie kupiłbym tej gry ponownie, ponieważ zakończenie zupełnie mnie rozczarowało."
     cut = "Ale ja tego nie kupię, bo"
     assert assess_self_containment(complete) > assess_self_containment(cut, before="Rozmawialiśmy wcześniej o cenie.", after="to nie ma żadnego sensu.")
+
+
+def test_story_shape_requires_more_than_punctuation():
+    ordinary_hook, ordinary_ending, _ = assess_extended_story_shape(
+        "Dzisiaj grałem trochę w tę grę i później poszedłem dalej."
+    )
+    strong_hook, strong_ending, signals = assess_extended_story_shape(
+        "Co jest, to jest absolutnie najgorszy moment tej walki! W końcu wygrałem, więc jednak się udało."
+    )
+    assert strong_hook > ordinary_hook
+    assert strong_ending > ordinary_ending
+    assert {"clear opening hook", "resolved ending or payoff"}.issubset(signals)
+
+
+def test_opening_clarity_and_punchline_require_actual_evidence():
+    weak_opening, _ = assess_opening_clarity("No wiec eee, dalej sobie gramy.")
+    strong_opening, opening_signals = assess_opening_clarity("Co jest? Ten boss wlasnie zrobil cos niemozliwego!")
+    plain_ending, _ = assess_extended_punchline("Mowie o tej walce i potem idziemy dalej do nastepnego miejsca.")
+    punchline, punchline_signals = assess_extended_punchline("Myslalem, ze to koniec, ale jednak w koncu wygralem. No i prosze!")
+    assert strong_opening > weak_opening
+    assert "clear first-two-seconds premise" in opening_signals
+    assert punchline > plain_ending
+    assert "clear punchline or outcome" in punchline_signals
 
 
 def test_ordinary_quality_cannot_reach_99_without_exceptional_evidence():
@@ -99,6 +125,33 @@ def test_short_potential_rewards_complete_attention_trigger():
     )
     assert exceptional > ordinary
     assert exceptional >= 95
+
+
+def test_verified_viewer_answer_counts_as_a_short_attention_trigger():
+    answer, signals = assess_short_potential(
+        "Moim zdaniem warto zagrać, bo fabuła naprawdę dobrze prowadzi tę historię.",
+        0,
+        16,
+        [CHAT_QUESTION_ANSWER_TAG],
+        quality_score=70,
+        logical_sense_score=78,
+        context_score=72,
+        self_contained_score=80,
+        extended_completeness_score=78,
+    )
+    no_answer, _ = assess_short_potential(
+        "Moim zdaniem warto zagrać, bo fabuła naprawdę dobrze prowadzi tę historię.",
+        0,
+        16,
+        [],
+        quality_score=70,
+        logical_sense_score=78,
+        context_score=72,
+        self_contained_score=80,
+        extended_completeness_score=78,
+    )
+    assert "answer with context" in signals
+    assert answer > no_answer
 
 
 def test_game_voice_chat_sequence_scores_higher_than_game_voice_only():

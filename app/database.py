@@ -26,7 +26,7 @@ SEGMENT_MACHINE_COLUMNS = (
     "short_potential_score", "short_potential_signals", "reading_likelihood",
     "text_reading_likelihood", "visual_reading_likelihood",
     "extended_reading_likelihood", "extended_hook_score",
-    "extended_ending_score", "extended_story_signals",
+    "extended_ending_score", "opening_clarity_score", "extended_punchline_score", "extended_story_signals",
     "boundary_signals", "context_signals",
     "audio_event_score", "game_reaction_score", "voice_expression_score",
     "moment_reaction_score", "moment_reaction_stage", "vision_score",
@@ -156,6 +156,8 @@ def initialize() -> None:
                 extended_reading_likelihood REAL NOT NULL DEFAULT 0,
                 extended_hook_score INTEGER NOT NULL DEFAULT -1,
                 extended_ending_score INTEGER NOT NULL DEFAULT -1,
+                opening_clarity_score INTEGER NOT NULL DEFAULT -1,
+                extended_punchline_score INTEGER NOT NULL DEFAULT -1,
                 extended_story_signals TEXT NOT NULL DEFAULT '[]',
                 boundary_signals TEXT NOT NULL DEFAULT '[]',
                 context_signals TEXT NOT NULL DEFAULT '[]',
@@ -226,6 +228,18 @@ def initialize() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_segment_reviews_rating_updated
                 ON segment_reviews(rating, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS publication_feedback (
+                segment_id TEXT PRIMARY KEY REFERENCES segments(id) ON DELETE CASCADE,
+                platform TEXT NOT NULL DEFAULT '',
+                published_url TEXT NOT NULL DEFAULT '',
+                views INTEGER NOT NULL DEFAULT 0 CHECK(views >= 0),
+                average_watch_percent REAL NOT NULL DEFAULT 0 CHECK(average_watch_percent >= 0 AND average_watch_percent <= 1000),
+                shares INTEGER NOT NULL DEFAULT 0 CHECK(shares >= 0),
+                comments INTEGER NOT NULL DEFAULT 0 CHECK(comments >= 0),
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_publication_feedback_platform_updated
+                ON publication_feedback(platform, updated_at DESC);
             CREATE TABLE IF NOT EXISTS chat_settings (
                 video_id TEXT PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
                 source_name TEXT NOT NULL DEFAULT '',
@@ -328,6 +342,7 @@ def initialize() -> None:
                 outline_color TEXT NOT NULL DEFAULT '#000000',
                 glow_enabled INTEGER NOT NULL DEFAULT 0,
                 opacity INTEGER NOT NULL DEFAULT 100,
+                max_lines INTEGER NOT NULL DEFAULT 2,
                 updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS caption_favorites (
@@ -341,6 +356,7 @@ def initialize() -> None:
                 outline_color TEXT NOT NULL DEFAULT '#000000',
                 glow_enabled INTEGER NOT NULL DEFAULT 0,
                 opacity INTEGER NOT NULL DEFAULT 100,
+                max_lines INTEGER NOT NULL DEFAULT 2,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS export_defaults (
@@ -561,6 +577,10 @@ def initialize() -> None:
             con.execute("ALTER TABLE segments ADD COLUMN extended_hook_score INTEGER NOT NULL DEFAULT -1")
         if "extended_ending_score" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN extended_ending_score INTEGER NOT NULL DEFAULT -1")
+        if "opening_clarity_score" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN opening_clarity_score INTEGER NOT NULL DEFAULT -1")
+        if "extended_punchline_score" not in columns:
+            con.execute("ALTER TABLE segments ADD COLUMN extended_punchline_score INTEGER NOT NULL DEFAULT -1")
         if "extended_story_signals" not in columns:
             con.execute("ALTER TABLE segments ADD COLUMN extended_story_signals TEXT NOT NULL DEFAULT '[]'")
         if "boundary_signals" not in columns:
@@ -663,6 +683,7 @@ def initialize() -> None:
                 "outline_color": "TEXT NOT NULL DEFAULT '#000000'",
                 "glow_enabled": "INTEGER NOT NULL DEFAULT 0",
                 "opacity": "INTEGER NOT NULL DEFAULT 100",
+                "max_lines": "INTEGER NOT NULL DEFAULT 2",
             }.items():
                 if name not in caption_columns:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
@@ -674,7 +695,7 @@ def initialize() -> None:
             if name not in export_columns:
                 con.execute(f"ALTER TABLE export_defaults ADD COLUMN {name} REAL NOT NULL DEFAULT {default}")
         con.execute(
-            "INSERT OR IGNORE INTO caption_defaults (id, captions_preset, base_color, active_color, font_family, outline_enabled, outline_color, glow_enabled, opacity, updated_at) VALUES (1, 'highlight', '#FFFFFF', '#FFFF00', 'Inter', 1, '#000000', 0, 100, ?)",
+            "INSERT OR IGNORE INTO caption_defaults (id, captions_preset, base_color, active_color, font_family, outline_enabled, outline_color, glow_enabled, opacity, max_lines, updated_at) VALUES (1, 'highlight', '#FFFFFF', '#FFFF00', 'Inter', 1, '#000000', 0, 100, 2, ?)",
             (now(),),
         )
         con.execute(

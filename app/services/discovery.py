@@ -10,7 +10,7 @@ import numpy as np
 
 from app import database as db
 from app.services.media import is_profanity
-from app.services.tag_taxonomy import canonicalize_tags
+from app.services.tag_taxonomy import GAME_REACTION_MIN_SCORE, canonicalize_tags
 
 
 PROFILE_DEFINITIONS = {
@@ -19,6 +19,10 @@ PROFILE_DEFINITIONS = {
     "conversation": {"name": "Conversation - stories and opinions", "tag_weights": {"wyrażanie opinii": 9, "rekomendacja": 7, "pytanie": 8, "humor": 5}},
     "horror": {"name": "Horror - surprise and tension", "tag_weights": {"zaskoczenie": 10, "gniew": 5, "złość": 5, "humor": 3}},
     "game_quote_reaction": {"name": "Game quote/event -> your reaction", "tag_weights": {"reakcja na grę": 16, "zaskoczenie": 7, "humor": 5, "radość": 4}},
+    "funny_moments": {"name": "Funny moments - setup and punchline", "tag_weights": {"humor": 12, "zaskoczenie": 7, "radość": 5, "forma: puenta": 8}},
+    "game_reactions": {"name": "Game reactions - event then your response", "tag_weights": {"reakcja na grę": 16, "zaskoczenie": 8, "gniew": 6, "radość": 5, "humor": 5}},
+    "chat_interactions": {"name": "Chat interactions - question and response", "tag_weights": {"odpowiedź na pytanie widza": 16, "pytanie widza": 8, "wyrażanie opinii": 6, "humor": 5}},
+    "opinions": {"name": "Opinions - thesis, argument and conclusion", "tag_weights": {"wyrażanie opinii": 13, "forma: opinia": 11, "forma: krytyka": 8, "rekomendacja": 7, "forma: rada": 7}},
 }
 
 PREFERENCE_FEATURES = (
@@ -248,23 +252,40 @@ def _mean_top_similarity(vector: np.ndarray, examples: np.ndarray, count: int = 
 
 
 def is_disallowed_reading(candidate: dict) -> bool:
-    """Hide likely game/note reading unless chat proves a short reply worked."""
+    """Hide likely reading unless a short viewer question and reply are verified."""
     reading = float(candidate.get("reading_likelihood") or 0)
     if reading < 0.48:
         return False
     duration = max(0.0, float(candidate.get("end_seconds", candidate.get("end", 0)) or 0) - float(candidate.get("start_seconds", candidate.get("start", 0)) or 0))
     chat = int(candidate.get("chat_reaction_score") or 0)
     joy = int(candidate.get("chat_joy_score") or 0)
-    # Intentional exception: a short quoted viewer comment may remain only
-    # when the following answer clearly entertained the chat.
-    return not (duration <= 24 and chat >= 7 and joy >= 3)
+    # A generic chat surge is not enough: it may be caused by an unrelated
+    # alert or game event. Keep a short read-aloud fragment only if the chat
+    # pipeline independently matched an earlier viewer question to the spoken
+    # reply, then the answer entertained the chat.
+    question_match = float(candidate.get("chat_question_match_score") or 0)
+    return not (duration <= 24 and question_match >= 40 and chat >= 7 and joy >= 3)
 
 
-def _duration_adjustment(candidate: dict, tags: list[str], chat_score: int) -> tuple[float, str]:
+def _duration_adjustment(candidate: dict, tags: list[str], chat_score: int, profile: str) -> tuple[float, str]:
     """Prefer concise clips while allowing complete opinions and answers."""
     duration = max(0.0, float(candidate.get("end_seconds", candidate.get("end", 0)) or 0) - float(candidate.get("start_seconds", candidate.get("start", 0)) or 0))
     long_form = bool({"forma: opinia", "forma: rada", "forma: krytyka", "forma: historia", "forma: puenta"}.intersection(tags))
     long_form = long_form or (chat_score >= 8 and int(candidate.get("logical_sense_score") or 0) >= 60)
+    if profile in {"funny_moments", "game_reactions"}:
+        if 6 <= duration <= 24:
+            return 6.0, "tight reaction length"
+        if 24 < duration <= 34:
+            return -3.0, "reaction is starting to run long"
+        if duration > 34:
+            return -16.0, "too long for a fast reaction"
+    if profile in {"chat_interactions", "opinions"}:
+        if 12 <= duration <= 42:
+            return 6.0, "complete conversational length"
+        if 42 < duration <= 60:
+            return 1.0, "long but usable answer"
+        if duration > 60:
+            return -12.0, "too long for a focused answer"
     if 8 <= duration <= 26:
         return 8.0, "concise length"
     if 26 < duration <= 32:
@@ -320,6 +341,8 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
         context = _known_candidate_score(candidate, "context_score")
         self_contained = _known_candidate_score(candidate, "self_contained_score")
         completeness = _known_candidate_score(candidate, "extended_completeness_score")
+        opening_clarity = _known_candidate_score(candidate, "opening_clarity_score")
+        punchline = _known_candidate_score(candidate, "extended_punchline_score")
         # Question matching is optional evidence. Unknown and a measured zero
         # both give no bonus, while zero remains distinguishable in stored
         # preference features.
@@ -343,7 +366,7 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
             - float(candidate.get("start_seconds", candidate.get("start", 0)) or 0),
         )
         excluded_reading = is_disallowed_reading(candidate)
-        duration_value, duration_reason = _duration_adjustment(candidate, tags, int(chat))
+        duration_value, duration_reason = _duration_adjustment(candidate, tags, int(chat), profile)
 
         # Editorial quality is the stable backbone. It intentionally contains
         # the baseline so components always sum to the raw score shown in
@@ -360,7 +383,7 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
             + (completeness - 50.0) * 0.045
             + max(0.0, question_match - 50.0) * 0.035
         )
-        strong_emotion = bool({"humor", "gniew", "zaskoczenie", "radość", "złość"}.intersection(tags)) or game_reaction >= 7 or voice_expression >= 9
+        strong_emotion = bool({"humor", "gniew", "zaskoczenie", "radość", "złość"}.intersection(tags)) or game_reaction >= GAME_REACTION_MIN_SCORE or voice_expression >= 9
         happy_chat = chat_joy >= 4 and chat >= 5
         if not strong_emotion and logical_sense < 42:
             if happy_chat:
@@ -395,7 +418,7 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
             weight for tag, weight in definition["tag_weights"].items() if tag in tags
         )
         if "reakcja na grę" in tags:
-            tag_value += {"general": 6, "soulslike": 10, "horror": 8}.get(profile, 4)
+            tag_value += {"general": 6, "soulslike": 10, "horror": 8, "game_reactions": 12}.get(profile, 4)
         tag_value = min(8.0, float(tag_value))
         profile_value = tag_value
         if profile == "game_quote_reaction":
@@ -403,6 +426,33 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
                 profile_value += 7.0 + min(4.0, game_reaction * 0.25)
             else:
                 profile_value -= 12.0
+        elif profile == "funny_moments":
+            if punchline >= 66:
+                profile_value += 7.0
+            elif "humor" in tags and punchline < 52:
+                profile_value -= 7.0
+            if chat_joy >= 6:
+                profile_value += min(3.0, chat_joy * 0.25)
+        elif profile == "game_reactions":
+            if moment_stage in {"game -> voice", "game -> voice -> chat"}:
+                profile_value += 8.0 + min(3.0, game_reaction * 0.2)
+            else:
+                profile_value -= 14.0
+        elif profile == "chat_interactions":
+            if question_match >= 40:
+                profile_value += 9.0 + min(3.0, (question_match - 40.0) * 0.08)
+            else:
+                profile_value -= 10.0
+            if chat >= 7 and chat_authors >= 2:
+                profile_value += 2.0
+        elif profile == "opinions":
+            opinion_tag = bool({"forma: opinia", "forma: krytyka", "rekomendacja", "forma: rada"}.intersection(tags))
+            if opinion_tag and opening_clarity >= 60 and completeness >= 65:
+                profile_value += 7.0
+            elif opinion_tag:
+                profile_value -= 5.0
+            else:
+                profile_value -= 7.0
         profile_component = _bounded_component("profile", profile_value)
 
         # All views of the user's decisions share one bounded component. The
@@ -484,7 +534,7 @@ def score_candidates(candidates: list[dict], reference: list[list[float]] | None
             reasons.append(f"similar to your {profile} rejections{suffix}")
         elif len(accepted_rows) >= 4 and len(rejected_rows) >= 4 and feedback_value >= 3:
             reasons.append(f"fits your {profile} review pattern")
-        if game_reaction >= 7:
+        if game_reaction >= GAME_REACTION_MIN_SCORE:
             reasons.append("game event followed by microphone reaction")
         elif voice_expression >= 7:
             reasons.append("expressive vocal delivery")

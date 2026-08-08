@@ -28,18 +28,21 @@ from app.services.tagging import (
     assess_clip_quality,
     assess_context,
     assess_extended_completeness,
+    assess_extended_punchline,
     assess_extended_reading_likelihood,
     assess_extended_story_shape,
     assess_logical_sense,
+    assess_opening_clarity,
     assess_self_containment,
     assess_short_potential,
     calibrate_quality_score,
     enrich_tags,
     score_moment_reaction,
 )
+from app.services.tag_taxonomy import GAME_REACTION_MIN_SCORE
 
 
-FEATURE_SCHEMA_VERSION = "2"
+FEATURE_SCHEMA_VERSION = "3"
 
 SOURCE_TRANSCRIPT = "source:transcript"
 SOURCE_TIMING = "source:timing"
@@ -216,6 +219,8 @@ def _compute_extended_analysis(state: dict[str, Any]) -> dict[str, Any]:
             "extended_reading_likelihood": 0.0,
             "extended_hook_score": -1,
             "extended_ending_score": -1,
+            "opening_clarity_score": -1,
+            "extended_punchline_score": -1,
             "extended_story_signals": [],
             "extended_completeness_score": -1,
         }
@@ -229,6 +234,8 @@ def _compute_extended_analysis(state: dict[str, Any]) -> dict[str, Any]:
     hook, ending, story_signals = assess_extended_story_shape(
         _text(state), _words(state), before, after,
     )
+    opening, opening_signals = assess_opening_clarity(_text(state), _words(state))
+    punchline, punchline_signals = assess_extended_punchline(_text(state))
     completeness = assess_extended_completeness(
         _text(state), before, after, boundary_signals,
     )
@@ -237,7 +244,9 @@ def _compute_extended_analysis(state: dict[str, Any]) -> dict[str, Any]:
         "extended_reading_likelihood": round(extended_reading, 3),
         "extended_hook_score": int(hook),
         "extended_ending_score": int(ending),
-        "extended_story_signals": list(dict.fromkeys(story_signals)),
+        "opening_clarity_score": int(opening),
+        "extended_punchline_score": int(punchline),
+        "extended_story_signals": list(dict.fromkeys(story_signals + opening_signals + punchline_signals)),
         "extended_completeness_score": max(1, min(99, int(completeness))),
     }
 
@@ -318,7 +327,7 @@ def _compute_tag_enrichment(state: dict[str, Any]) -> dict[str, Any]:
         moment_reaction_score=_int(state, "moment_reaction_score"),
         moment_reaction_stage=str(state.get("moment_reaction_stage") or ""),
     )
-    if _int(state, "game_reaction_score") >= 7:
+    if _int(state, "game_reaction_score") >= GAME_REACTION_MIN_SCORE:
         enriched.append(GAME_REACTION_TAG)
     if _int(state, "chat_question_match_score") >= 40:
         enriched.extend((CHAT_QUESTION_TAG, CHAT_QUESTION_ANSWER_TAG))
@@ -348,7 +357,7 @@ def _compute_quality(state: dict[str, Any]) -> dict[str, Any]:
     voice_expression = _int(state, "voice_expression_score")
     tags = _tags(state)
 
-    if game_reaction >= 7:
+    if game_reaction >= GAME_REACTION_MIN_SCORE:
         score = min(99, score + min(10, game_reaction))
         signals.append("game sound followed by microphone reaction")
     elif _voice_led(tags) and voice_expression >= 7:
@@ -422,6 +431,10 @@ def _compute_short_potential(state: dict[str, Any]) -> dict[str, Any]:
         context_score=_int(state, "context_score", default=-1),
         self_contained_score=_int(state, "self_contained_score", default=-1),
         extended_completeness_score=_int(state, "extended_completeness_score", default=-1),
+        extended_hook_score=_int(state, "extended_hook_score", default=-1),
+        extended_ending_score=_int(state, "extended_ending_score", default=-1),
+        opening_clarity_score=_int(state, "opening_clarity_score", default=-1),
+        extended_punchline_score=_int(state, "extended_punchline_score", default=-1),
         game_reaction_score=_int(state, "game_reaction_score"),
         voice_expression_score=_int(state, "voice_expression_score"),
         moment_reaction_score=_int(state, "moment_reaction_score"),
@@ -443,7 +456,7 @@ DEFAULT_NODES: tuple[FeatureNode, ...] = (
         (SOURCE_TRANSCRIPT, SOURCE_TIMING, SOURCE_CONTEXT, SOURCE_MODE, "speech_quality"),
         (
             "extended_reading_likelihood", "extended_hook_score",
-            "extended_ending_score", "extended_story_signals",
+            "extended_ending_score", "opening_clarity_score", "extended_punchline_score", "extended_story_signals",
             "extended_completeness_score",
         ),
         _compute_extended_analysis,

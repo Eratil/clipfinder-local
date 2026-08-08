@@ -102,7 +102,7 @@ def _caption_words(transcript: str, word_timestamps: list[dict], clip_start: flo
         if item.get("word") and item.get("start") is not None and item.get("end") is not None
     ]
     if words:
-        return words
+        return sorted(words, key=lambda item: (item["start"], item["end"]))
     tokens = transcript.split()
     if not tokens:
         return [{"start": 0.0, "end": duration, "word": "..."}]
@@ -182,6 +182,7 @@ def write_caption_ass(
     glow_enabled: bool = False,
     opacity: int = 100,
     font_family: str = "Inter",
+    max_lines: int = 2,
 ) -> None:
     """Create an ASS subtitle track with optional outline, glow and text opacity."""
     # The fractional positions deliberately use a centred anchor, so their
@@ -194,8 +195,8 @@ def write_caption_ass(
     }
     if preset not in CAPTION_PRESETS or position not in alignments or font_family not in CAPTION_FONT_FAMILIES:
         raise MediaError("Unknown caption preset")
-    if not 20 <= int(opacity) <= 100:
-        raise MediaError("Caption opacity must be between 20 and 100")
+    if not 20 <= int(opacity) <= 100 or not 1 <= int(max_lines) <= 4:
+        raise MediaError("Caption opacity or line limit is invalid")
     config = CAPTION_PRESETS[preset]
     primary = _ass_color(base_color, opacity)
     secondary = _ass_color(base_color, opacity)
@@ -232,26 +233,64 @@ def write_caption_ass(
             continue
         phrases.append(phrase)
         index += 1
+
+    # ASS will auto-wrap text, but a long sentence could then occupy most of
+    # the screen. Create timed caption blocks with explicit line breaks and a
+    # strict line cap instead. The character estimate is deliberately a bit
+    # conservative so proportional fonts and Polish words do not unexpectedly
+    # create an extra fifth line.
+    # Vertical 1080x1920 exports enlarge ASS glyphs relative to PlayResY.
+    # Keep each explicit line deliberately short enough for the narrow output,
+    # rather than relying on the player's automatic wrapping.
+    max_characters_per_line = max(14, int(1000 / (float(config["size"]) * 0.78)))
+
+    def split_phrase(phrase_words: list[dict]) -> list[list[list[dict]]]:
+        visual_lines: list[list[dict]] = []
+        current_line: list[dict] = []
+        current_length = 0
+        for item in phrase_words:
+            word = str(item["word"])
+            next_length = current_length + (1 if current_line else 0) + len(word)
+            if current_line and next_length > max_characters_per_line:
+                visual_lines.append(current_line)
+                current_line = [item]
+                current_length = len(word)
+            else:
+                current_line.append(item)
+                current_length = next_length
+        if current_line:
+            visual_lines.append(current_line)
+        return [visual_lines[offset:offset + int(max_lines)] for offset in range(0, len(visual_lines), int(max_lines))]
+
+    caption_blocks = [block for phrase in phrases for block in split_phrase(phrase)]
     lines = []
     display_word = lambda word: censor_word(word) if censor_profanity else word
-    for phrase in phrases:
+    for caption_lines in caption_blocks:
+        phrase = [word for line in caption_lines for word in line]
         phrase_start = max(0, phrase[0]["start"])
         phrase_end = min(duration, max(phrase[-1]["end"], phrase_start + 0.2))
         if config["word_highlight"]:
             for word_index, word in enumerate(phrase):
                 next_start = phrase[word_index + 1]["start"] if word_index + 1 < len(phrase) else phrase_end
-                text = position_overrides.get(position, "") + " ".join(
-                    (r"{\c" + highlighted + r"\fscx" + str(config["scale"]) + r"\fscy" + str(config["scale"]) + r"}" + _ass_text(display_word(item["word"])) + r"{\r}")
-                    if index == word_index else _ass_text(display_word(item["word"]))
-                    for index, item in enumerate(phrase)
-                )
+                current_index = 0
+                rendered_lines = []
+                for caption_line in caption_lines:
+                    rendered_words = []
+                    for item in caption_line:
+                        rendered_words.append(
+                            r"{\c" + highlighted + r"\fscx" + str(config["scale"]) + r"\fscy" + str(config["scale"]) + r"}" + _ass_text(display_word(item["word"])) + r"{\r}"
+                            if current_index == word_index else _ass_text(display_word(item["word"]))
+                        )
+                        current_index += 1
+                    rendered_lines.append(" ".join(rendered_words))
+                text = position_overrides.get(position, "") + r"\N".join(rendered_lines)
                 lines.append(f"Dialogue: 0,{_ass_time(max(phrase_start, word['start']))},{_ass_time(max(next_start, word['end']))},Default,,0,0,0,,{text}")
             continue
         else:
-            text = position_overrides.get(position, "") + " ".join(_ass_text(display_word(word["word"])) for word in phrase)
+            text = position_overrides.get(position, "") + r"\N".join(" ".join(_ass_text(display_word(word["word"])) for word in caption_line) for caption_line in caption_lines)
         lines.append(f"Dialogue: 0,{_ass_time(phrase_start)},{_ass_time(phrase_end)},Default,,0,0,0,,{text}")
     header = (
-        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n"
+        "[Script Info]\nScriptType: v4.00+\nWrapStyle: 2\nPlayResX: 1920\nPlayResY: 1080\n\n"
         "[V4+ Styles]\n"
         "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,"
         "Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,"
@@ -299,9 +338,28 @@ def _censored_audio_ranges(words: list[dict], duration: float) -> list[tuple[flo
     return ranges
 
 
-def _audio_censor_filter(audio_stream: str, ranges: list[tuple[float, float]], duration: float) -> str:
-    conditions = "+".join(f"between(t,{left:.3f},{right:.3f})" for left, right in ranges)
-    return f"[{audio_stream}]asetpts=PTS-STARTPTS,volume=0:enable='{conditions}'[aout]"
+def _audio_processing_filter(
+    audio_stream: str,
+    censor_ranges: list[tuple[float, float]],
+    microphone_enhancement: bool,
+    normalize_loudness: bool,
+    volume_gain_db: float,
+) -> str:
+    """Return a single audio chain so optional Composer tools can stack safely."""
+    filters = ["asetpts=PTS-STARTPTS"]
+    if censor_ranges:
+        conditions = "+".join(f"between(t,{left:.3f},{right:.3f})" for left, right in censor_ranges)
+        filters.append(f"volume=0:enable='{conditions}'")
+    if microphone_enhancement:
+        # Conservative cleanup for speech: remove rumble, suppress harsh high
+        # frequencies and gently reduce very large volume peaks. It is kept
+        # optional because an all-sounds track also contains game audio.
+        filters.extend(("highpass=f=80", "lowpass=f=14000", "acompressor=threshold=-18dB:ratio=2.2:attack=12:release=180:makeup=2"))
+    if normalize_loudness:
+        filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+    if abs(float(volume_gain_db)) >= 0.01:
+        filters.append(f"volume={float(volume_gain_db):.2f}dB")
+    return f"[{audio_stream}]{','.join(filters)}[aout]"
 
 
 def pause_trim_ranges(words: list[dict], duration: float, clip_start: float = 0.0, threshold: float = 0.85, padding: float = 0.12) -> list[tuple[float, float]]:
@@ -361,7 +419,20 @@ def _pause_trim_graph(video_stream: str, audio_stream: str, ranges: list[tuple[f
     return stages, "basev", "basea"
 
 
-def export_clip(source: Path, target: Path, start: float, end: float, captions_path: Path | None = None, layout: str = "original", audio_track: int = 1, word_timestamps: list[dict] | None = None, transcript: str = "", censor_profanity: bool = False, camera_rect: tuple[float, float, float, float] = (0.78, 0.03, 0.11, 0.11), game_rect: tuple[float, float, float, float] = (0.22, 0.0, 0.56, 1.0), pause_ranges: list[tuple[float, float]] | None = None) -> None:
+def _hook_reorder_graph(video_stream: str, audio_stream: str, duration: float, hook_seconds: float) -> tuple[list[str], str, str]:
+    """Move the final part of an input clip before its earlier part."""
+    split_at = duration - hook_seconds
+    stages = [
+        f"[{video_stream}]trim=start={split_at:.3f}:end={duration:.3f},setpts=PTS-STARTPTS[vhook]",
+        f"[{audio_stream}]atrim=start={split_at:.3f}:end={duration:.3f},asetpts=PTS-STARTPTS[ahook]",
+        f"[{video_stream}]trim=start=0:end={split_at:.3f},setpts=PTS-STARTPTS[vbody]",
+        f"[{audio_stream}]atrim=start=0:end={split_at:.3f},asetpts=PTS-STARTPTS[abody]",
+        "[vhook][ahook][vbody][abody]concat=n=2:v=1:a=1[basev][basea]",
+    ]
+    return stages, "basev", "basea"
+
+
+def export_clip(source: Path, target: Path, start: float, end: float, captions_path: Path | None = None, layout: str = "original", audio_track: int = 1, word_timestamps: list[dict] | None = None, transcript: str = "", censor_profanity: bool = False, camera_rect: tuple[float, float, float, float] = (0.78, 0.03, 0.11, 0.11), game_rect: tuple[float, float, float, float] = (0.22, 0.0, 0.56, 1.0), pause_ranges: list[tuple[float, float]] | None = None, microphone_enhancement: bool = False, normalize_loudness: bool = False, volume_gain_db: float = 0, hook_seconds: float = 0) -> None:
     """Export an exact clip in its original format or a 1080x1920 short layout."""
     if audio_track < 1:
         raise MediaError("Invalid audio track")
@@ -376,14 +447,23 @@ def export_clip(source: Path, target: Path, start: float, end: float, captions_p
     words = _caption_words(transcript, word_timestamps or [], start, duration)
     pause_ranges = pause_ranges or [(0.0, duration)]
     trim_pauses = len(pause_ranges) > 1
+    hook_seconds = max(0.0, float(hook_seconds))
+    if hook_seconds and (hook_seconds >= duration - 0.49 or trim_pauses):
+        raise MediaError("Opening hook requires a clip longer than the hook and cannot be combined with pause removal")
     output_duration = sum(right - left for left, right in pause_ranges) if trim_pauses else duration
     censor_ranges = _censored_audio_ranges(words, output_duration) if censor_profanity else []
     graph_stages: list[str] = []
     video_stream, audio_stream = "0:v", selected_audio
     if trim_pauses:
         graph_stages, video_stream, audio_stream = _pause_trim_graph(video_stream, audio_stream, pause_ranges)
-    audio_filter = _audio_censor_filter(audio_stream, censor_ranges, output_duration) if censor_ranges else ""
-    audio_map = "[aout]" if audio_filter else (f"[{audio_stream}]" if trim_pauses else selected_audio)
+    elif hook_seconds:
+        graph_stages, video_stream, audio_stream = _hook_reorder_graph(video_stream, audio_stream, duration, hook_seconds)
+    has_timeline_graph = trim_pauses or bool(hook_seconds)
+    if not -12 <= float(volume_gain_db) <= 12:
+        raise MediaError("Volume correction must be between -12 dB and +12 dB")
+    needs_audio_processing = bool(censor_ranges or microphone_enhancement or normalize_loudness or abs(float(volume_gain_db)) >= 0.01)
+    audio_filter = _audio_processing_filter(audio_stream, censor_ranges, microphone_enhancement, normalize_loudness, volume_gain_db) if needs_audio_processing else ""
+    audio_map = "[aout]" if audio_filter else (f"[{audio_stream}]" if has_timeline_graph else selected_audio)
     if layout == "portrait_split":
         camera = _crop_filter(camera_rect)
         game = f"{_crop_filter(game_rect)},scale=1080:1280:force_original_aspect_ratio=increase,crop=1080:1280"
@@ -401,14 +481,14 @@ def export_clip(source: Path, target: Path, start: float, end: float, captions_p
             raise MediaError("Unknown clip layout")
         if caption_filter:
             filters.append(caption_filter)
-        if trim_pauses or audio_filter:
+        if has_timeline_graph or audio_filter:
             graph_stages.append(f"[{video_stream}]{','.join(filters) if filters else 'null'}[outv]")
             if audio_filter:
                 graph_stages.append(audio_filter)
             command.extend(["-filter_complex", ";".join(graph_stages), "-map", "[outv]", "-map", audio_map])
         elif filters:
             command.extend(["-vf", ",".join(filters)])
-        if not trim_pauses and not audio_filter:
+        if not has_timeline_graph and not audio_filter:
             command.extend(["-map", "0:v:0", "-map", selected_audio])
     command.extend([
         "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-c:a", "aac", "-b:a", "192k",
@@ -417,20 +497,35 @@ def export_clip(source: Path, target: Path, start: float, end: float, captions_p
     run(command)
 
 
-def export_audio_preview(source: Path, target: Path, start: float, end: float, audio_track: int = 1, pause_ranges: list[tuple[float, float]] | None = None) -> None:
-    """Create a small cached mono MP3 for fast candidate review."""
+def export_audio_preview(source: Path, target: Path, start: float, end: float, audio_track: int = 1, pause_ranges: list[tuple[float, float]] | None = None, word_timestamps: list[dict] | None = None, transcript: str = "", censor_profanity: bool = False, microphone_enhancement: bool = False, normalize_loudness: bool = False, volume_gain_db: float = 0) -> None:
+    """Create a cached MP3 preview, optionally using the same audio tools as export."""
     if audio_track < 1:
         raise MediaError("Invalid audio track")
-    command = ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(source)]
+    if not -12 <= float(volume_gain_db) <= 12:
+        raise MediaError("Volume correction must be between -12 dB and +12 dB")
+    duration = end - start
+    command = ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)]
     selected_audio = f"0:a:{audio_track - 1}"
-    pause_ranges = pause_ranges or [(0.0, end - start)]
+    pause_ranges = pause_ranges or [(0.0, duration)]
+    stages: list[str] = []
     if len(pause_ranges) > 1:
-        stages, inputs = [], []
+        inputs = []
         for index, (left, right) in enumerate(pause_ranges):
             stages.append(f"[{selected_audio}]atrim=start={left:.3f}:end={right:.3f},asetpts=PTS-STARTPTS[a{index}]")
             inputs.append(f"[a{index}]")
-        stages.append("".join(inputs) + f"concat=n={len(pause_ranges)}:v=0:a=1[aout]")
+        stages.append("".join(inputs) + f"concat=n={len(pause_ranges)}:v=0:a=1[basea]")
+        audio_stream = "basea"
+    else:
+        audio_stream = selected_audio
+    words = _caption_words(transcript, word_timestamps or [], start, duration)
+    output_duration = sum(right - left for left, right in pause_ranges)
+    censor_ranges = _censored_audio_ranges(words, output_duration) if censor_profanity else []
+    needs_processing = bool(censor_ranges or microphone_enhancement or normalize_loudness or abs(float(volume_gain_db)) >= 0.01)
+    if needs_processing:
+        stages.append(_audio_processing_filter(audio_stream, censor_ranges, microphone_enhancement, normalize_loudness, volume_gain_db))
         command.extend(["-filter_complex", ";".join(stages), "-map", "[aout]"])
+    elif stages:
+        command.extend(["-filter_complex", ";".join(stages), "-map", "[basea]"])
     else:
         command.extend(["-map", selected_audio])
     command.extend(["-vn", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "96k", str(target)])

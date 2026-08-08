@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ClipFinder Local</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260804-statistics" />
+    <link rel="stylesheet" href="/static/style.css?v=20260808-sidebar-width-lock-v4" />
   </head>
   <body class="clip-editor-closed">
     <main>
@@ -114,6 +114,23 @@
                   <option value="cinematic">Cinematic - dark subtitle band</option>
                   <option value="karaoke_punch">Karaoke Punch - stronger word bounce</option>
                   <option value="minimal_center">Minimal Center - quiet centered text</option>
+                </select>
+              </label>
+              <label>Caption position
+                <select id="global-caption-position">
+                  <option value="top">Top</option>
+                  <option value="two_fifths">2/5 height</option>
+                  <option value="middle">Middle</option>
+                  <option value="four_fifths">4/5 height</option>
+                  <option value="bottom">Bottom</option>
+                </select>
+              </label>
+              <label>Maximum caption lines
+                <select id="global-caption-max-lines">
+                  <option value="1">1 line</option>
+                  <option value="2" selected>2 lines</option>
+                  <option value="3">3 lines</option>
+                  <option value="4">4 lines</option>
                 </select>
               </label>
               <label>Caption font
@@ -236,6 +253,7 @@
           </article>
           <article class="library-card statistics-card"><h3>Why clips are rejected</h3><div id="statistics-reasons" class="statistics-list"></div></article>
           <article class="library-card statistics-card"><h3>Approved vs rejected scores</h3><p class="hint">A large gap means this score helps selection. A small or reversed gap is a signal that it needs tuning.</p><div id="statistics-scores" class="statistics-list"></div></article>
+          <article class="library-card statistics-card"><h3>Calibration report</h3><p class="hint">This compares reviewed clips only. It indicates which scores currently separate your approvals from rejections.</p><div id="statistics-calibration" class="statistics-list"></div></article>
           <article class="library-card statistics-card"><h3>Tags and decisions</h3><p class="hint">Shows the most frequent tags and how often clips with that tag are approved or rejected.</p><div id="statistics-tags" class="statistics-list"></div></article>
           <article class="library-card statistics-card"><h3>Analysis modes and reading filter</h3><div id="statistics-diagnostics" class="statistics-list"></div></article>
         </div>
@@ -402,14 +420,15 @@
       <div id="clip-editor-empty" class="hint">Click any candidate card to edit its range, captions, review status and export.</div>
       <div id="clip-editor-form" hidden>
         <div id="clip-editor-edit-tab" class="editor-tab-pane" role="tabpanel">
+          <section class="library-card clip-composer-launcher">
+            <h3>Clip composer</h3>
+            <p class="hint">Open a focused preview of this clip to prepare its timing, layout, captions and future edits.</p>
+            <button id="open-clip-composer" type="button" class="quiet">Open Clip composer</button>
+          </section>
           <div class="clip-editor-fields">
             <label>Start (seconds)<input id="editor-start" type="number" min="0" step="0.1" /></label>
             <label>End (seconds)<input id="editor-end" type="number" min="0" step="0.1" /></label>
             <button id="editor-save-range" class="quiet">Save range</button>
-            <label>Caption position
-              <select id="editor-caption-position"><option value="bottom">Bottom</option><option value="four_fifths">4/5 height</option><option value="middle">Middle</option><option value="two_fifths">2/5 height</option><option value="top">Top</option></select>
-            </label>
-            <div id="editor-caption-position-preview" class="caption-position-preview" data-position="bottom" aria-label="Caption height preview"><span>Test captions</span></div>
             <label>Clip status
               <select id="editor-rating-select"><option value="unrated">Not reviewed</option><option value="accepted">Approved</option><option value="rejected">Rejected</option></select>
             </label>
@@ -431,6 +450,19 @@
           <label class="check pause-trim-toggle"><input id="editor-remove-pauses" type="checkbox" /> Remove long pauses from preview and exported video</label>
           <label>Export file name (optional)<input id="editor-export-name" maxlength="120" placeholder="e.g. funny-reaction-01" /></label>
           <button id="editor-export" class="quiet">Approve before export</button>
+          <section class="library-card publication-feedback-card">
+            <h3>Published clip results</h3>
+            <p class="hint">Optional manual feedback. Save results after publishing so future calibration can compare predicted quality with real performance.</p>
+            <div class="clip-editor-fields">
+              <label>Platform<select id="editor-publication-platform"><option value="">Not published yet</option><option value="TikTok">TikTok</option><option value="YouTube Shorts">YouTube Shorts</option><option value="Other">Other</option></select></label>
+              <label>Published URL<input id="editor-publication-url" type="url" maxlength="2000" placeholder="https://..." /></label>
+              <label>Views<input id="editor-publication-views" type="number" min="0" step="1" /></label>
+              <label>Average watch (%)<input id="editor-publication-watch" type="number" min="0" max="1000" step="0.1" /></label>
+              <label>Shares<input id="editor-publication-shares" type="number" min="0" step="1" /></label>
+              <label>Comments<input id="editor-publication-comments" type="number" min="0" step="1" /></label>
+              <button id="editor-save-publication-feedback" type="button" class="quiet">Save published results</button>
+            </div>
+          </section>
         </div>
         <div id="clip-editor-analysis-tab" class="editor-tab-pane" role="tabpanel" hidden>
           <h3>Detailed scoring</h3>
@@ -446,6 +478,8 @@
               <div><dt>Context</dt><dd>Compares the surrounding speech before and after the fragment. A score falls when the clip begins or ends in the middle of a thought.</dd></div>
               <div><dt>Self-contained</dt><dd>Measures whether a new viewer can understand the clip without previous conversation. Complete sentences and an understandable point increase it.</dd></div>
               <div><dt>Extended completeness</dt><dd>Available after Extended analysis. It performs an extra check of sentence boundaries, a complete ending and whether the clip reaches its point or punchline.</dd></div>
+              <div><dt>Opening clarity</dt><dd>Available after Extended analysis. Checks whether the first two spoken seconds establish a clear premise, question, surprise or opinion. Stream alerts and overlays are ignored.</dd></div>
+              <div><dt>Punchline / outcome</dt><dd>Available after Extended analysis. Separately checks for a late turn, reveal, joke, success, failure or other outcome near the end.</dd></div>
             </dl>
           </section>
           <h3>Tag feedback</h3>
@@ -464,6 +498,173 @@
       <div class="dialog-head"><strong id="dialog-title">Full recording</strong><button id="close-dialog" class="quiet">Close</button></div>
       <video id="full-video" controls preload="metadata"></video>
       <p id="dialog-transcript" class="hint"></p>
+    </dialog>
+    <dialog id="clip-composer-dialog" class="clip-composer-dialog">
+      <div class="dialog-head"><div><strong>Clip composer</strong><p id="clip-composer-title" class="hint">Focused clip preview</p></div><button id="close-clip-composer" class="quiet" type="button">Close</button></div>
+      <div class="clip-composer-workspace">
+        <aside class="clip-composer-panel clip-composer-caption-panel" aria-label="Caption settings">
+          <div class="composer-tabs" role="tablist" aria-label="Composer tools">
+            <button type="button" class="quiet composer-tab active" data-composer-tab="captions" role="tab" aria-selected="true" aria-label="Captions" title="Captions">▤</button>
+            <button type="button" class="quiet composer-tab" data-composer-tab="layout" role="tab" aria-selected="false" aria-label="Layout" title="Layout">▧</button>
+            <button type="button" class="quiet composer-tab" data-composer-tab="audio" role="tab" aria-selected="false" aria-label="Audio" title="Audio">♪</button>
+            <button type="button" class="quiet composer-tab" data-composer-tab="timing" role="tab" aria-selected="false" aria-label="Timing" title="Timing">◷</button>
+          </div>
+          <section class="composer-tab-pane" data-composer-pane="captions" role="tabpanel">
+          <h3>Captions</h3>
+          <p class="hint">Starts with the current Global caption settings. Changes here affect only this composer preview.</p>
+          <label>Caption type
+            <select id="composer-caption-preset">
+              <option value="none">No captions</option>
+              <option value="clean">Clean - outlined</option>
+              <option value="highlight">Word highlight - large yellow</option>
+              <option value="minimal">Minimal - compact</option>
+              <option value="boxed_pop">Boxed Pop - bold caption card</option>
+              <option value="neon_gaming">Neon Gaming - colourful gaming glow</option>
+              <option value="cinematic">Cinematic - dark subtitle band</option>
+              <option value="karaoke_punch">Karaoke Punch - stronger word bounce</option>
+              <option value="minimal_center">Minimal Center - quiet centered text</option>
+            </select>
+          </label>
+            <label>Caption position
+            <select id="composer-caption-position">
+              <option value="top">Top</option>
+              <option value="two_fifths">2/5 height</option>
+              <option value="middle">Middle</option>
+              <option value="four_fifths">4/5 height</option>
+              <option value="bottom">Bottom</option>
+            </select>
+            </label>
+            <label>Maximum caption lines
+              <select id="composer-caption-max-lines">
+                <option value="1">1 line</option>
+                <option value="2" selected>2 lines</option>
+                <option value="3">3 lines</option>
+                <option value="4">4 lines</option>
+              </select>
+            </label>
+            <label>Caption font
+            <select id="composer-caption-font-family">
+              <option value="Bungee" style="font-family:'ClipFinder Bungee'">Bungee - graffiti/display</option>
+              <option value="Cinzel" style="font-family:'ClipFinder Cinzel'">Cinzel - old book</option>
+              <option value="Pixelify Sans" style="font-family:'ClipFinder Pixelify Sans'">Pixelify Sans - pixel art</option>
+              <option value="Inter" style="font-family:'ClipFinder Inter'">Inter</option>
+              <option value="Montserrat" style="font-family:'ClipFinder Montserrat'">Montserrat</option>
+              <option value="Poppins" style="font-family:'ClipFinder Poppins'">Poppins</option>
+              <option value="Lato" style="font-family:'ClipFinder Lato'">Lato</option>
+              <option value="Roboto Condensed" style="font-family:'ClipFinder Roboto Condensed'">Roboto Condensed</option>
+              <option value="Oswald" style="font-family:'ClipFinder Oswald'">Oswald</option>
+              <option value="Nunito" style="font-family:'ClipFinder Nunito'">Nunito</option>
+              <option value="Noto Sans" style="font-family:'ClipFinder Noto Sans'">Noto Sans</option>
+            </select>
+          </label>
+          <div class="clip-composer-colours">
+            <label>Sentence colour<input id="composer-caption-base-color" type="color" value="#ffffff" /></label>
+            <label>Spoken word colour<input id="composer-caption-active-color" type="color" value="#ffff00" /></label>
+          </div>
+          <label class="check switch"><input id="composer-caption-outline-enabled" type="checkbox" /> Add outline</label>
+          <label>Outline colour<input id="composer-caption-outline-color" type="color" value="#000000" /></label>
+          <label class="check switch"><input id="composer-caption-glow-enabled" type="checkbox" /> Add light glow</label>
+          <label>Text opacity <span id="composer-caption-opacity-value">100%</span><input id="composer-caption-opacity" type="range" min="20" max="100" step="1" value="100" /></label>
+          <label>Saved caption colours and fonts
+            <select id="composer-caption-favorite"><option value="">Choose a saved favourite</option></select>
+          </label>
+          <form id="composer-caption-favorite-form" class="composer-favorite-form">
+            <input id="composer-caption-favorite-name" placeholder="Favourite name, e.g. yellow gaming" required />
+            <button class="quiet" type="submit">Save current colours as favorite</button>
+          </form>
+          </section>
+          <section class="composer-tab-pane" data-composer-pane="layout" role="tabpanel" hidden>
+            <h3>Clip layout</h3>
+            <p class="hint">Starts with the current Global layout. Changes here only affect this composer preview.</p>
+            <label>Clip layout
+              <select id="composer-layout">
+                <option value="original">Original (default)</option>
+                <option value="portrait_camera">Vertical - calibrated camera center</option>
+                <option value="portrait_game">Vertical - calibrated gameplay center</option>
+                <option value="portrait_split">Vertical - camera top, gameplay bottom</option>
+              </select>
+            </label>
+            <p id="composer-layout-description" class="hint">The preview uses the saved camera and gameplay areas from Global settings. It does not change export settings.</p>
+            <div class="composer-layout-calibration">
+              <h4>Layout calibration for this clip</h4>
+              <p class="hint">Uses this recording and the current frame from the selected clip. Pause or seek the preview, then capture the frame and draw camera or gameplay areas.</p>
+              <div id="composer-layout-capture-wrap" class="composer-layout-capture-wrap" hidden>
+                <canvas id="composer-layout-capture" width="640" height="360" aria-label="Current clip frame for layout calibration"></canvas>
+                <canvas id="composer-layout-overlay" aria-label="Layout calibration overlay"></canvas>
+              </div>
+              <div class="prompt-row">
+                <button id="composer-capture-layout-frame" class="quiet" type="button">Capture current frame</button>
+                <button id="composer-calibrate-camera" class="quiet" type="button">Draw camera area</button>
+                <button id="composer-calibrate-game" class="quiet" type="button">Draw gameplay area</button>
+              </div>
+              <p id="composer-layout-calibration-status" class="hint">The selected clip frame will be used for calibration.</p>
+              <form id="composer-layout-preset-form" class="composer-layout-preset-form">
+                <input id="composer-layout-preset-name" maxlength="80" placeholder="Layout name, e.g. game camera bottom" required />
+                <button class="quiet" type="submit">Save this layout</button>
+              </form>
+            </div>
+          </section>
+          <section class="composer-tab-pane" data-composer-pane="audio" role="tabpanel" hidden>
+            <h3>Audio</h3>
+            <p class="hint">These settings affect only the MP4 exported from this Composer. The interactive preview keeps the original audio so it remains responsive.</p>
+            <label class="check switch"><input id="composer-audio-censor-profanity" type="checkbox" /> Mute profanity from the middle of the word and mask it in captions</label>
+            <label class="check switch"><input id="composer-audio-remove-pauses" type="checkbox" /> Remove long pauses from the exported video</label>
+            <label class="check switch"><input id="composer-audio-microphone-enhancement" type="checkbox" /> Improve voice clarity</label>
+            <p class="hint">Voice clarity removes low rumble, softens harsh high frequencies and gently controls loud peaks. On a mixed track it also changes game audio.</p>
+            <label class="check switch"><input id="composer-audio-normalize-loudness" type="checkbox" /> Normalize loudness for Shorts</label>
+            <label>Volume correction <span id="composer-audio-volume-value">0 dB</span><input id="composer-audio-volume-gain" type="range" min="-12" max="12" step="0.5" value="0" /></label>
+            <p id="composer-audio-live-status" class="hint">Changes to voice clarity and volume are heard live in the video preview.</p>
+            <button id="composer-audio-render-preview" type="button" class="quiet">Render exact audio preview</button>
+            <p id="composer-audio-render-status" class="hint"></p>
+            <audio id="composer-audio-exact-preview" controls hidden></audio>
+          </section>
+          <section class="composer-tab-pane" data-composer-pane="timing" role="tabpanel" hidden>
+            <h3>Clip timing</h3>
+            <p class="hint">These edits affect only this Composer preview and its export. Your saved analysis stays unchanged.</p>
+            <label>Clip range on the recording</label>
+            <div id="composer-range-axis" class="composer-range-axis" style="--range-start:0%;--range-end:100%;">
+              <div class="composer-range-selection" aria-hidden="true"></div>
+              <input id="composer-timing-start-range" type="range" min="0" max="1" step="0.1" value="0" aria-label="Clip start" />
+              <input id="composer-timing-end-range" type="range" min="0" max="1" step="0.1" value="1" aria-label="Clip end" />
+            </div>
+            <div class="composer-timing-readout">
+              <span><strong>Start</strong> <output id="composer-timing-start">0:00</output></span>
+              <span><strong>End</strong> <output id="composer-timing-end">0:00</output></span>
+            </div>
+            <button id="composer-refresh-captions" class="quiet" type="button">Refresh captions</button>
+            <p id="composer-caption-refresh-status" class="hint">Captions match the current clip range.</p>
+            <label>Opening hook start <output id="composer-hook-value">Off</output></label>
+            <div id="composer-hook-axis" class="composer-hook-axis" style="--hook-start:100%;">
+              <div class="composer-hook-selection" aria-hidden="true"></div>
+              <input id="composer-hook-range" type="range" min="0" max="10" step="0.1" value="0" aria-label="Opening hook duration" />
+            </div>
+            <p id="composer-hook-status" class="hint">The selected ending plays first, followed by the rest of the clip.</p>
+            <label class="check switch"><input id="composer-loop-preview" type="checkbox" /> Loop final preview</label>
+          </section>
+        </aside>
+        <div class="clip-composer-stage">
+          <video id="clip-composer-video" controls preload="metadata"></video>
+          <div id="clip-composer-layout-frame" class="clip-composer-layout-frame">
+            <canvas id="clip-composer-layout-preview" width="360" height="640" hidden aria-label="Clip layout preview"></canvas>
+            <div id="clip-composer-caption" class="clip-composer-caption" aria-live="off"></div>
+          </div>
+        </div>
+        <aside class="clip-composer-panel clip-composer-timeline-panel" aria-label="Clip timeline">
+          <h3>Clip timeline</h3>
+          <p id="clip-composer-range" class="hint"></p>
+          <button id="clip-composer-play-toggle" type="button" class="quiet">Play preview</button>
+          <button id="clip-composer-rewind" type="button" class="quiet">Go to clip start</button>
+          <label>Preview position<input id="clip-composer-scrubber" type="range" min="0" max="1" step="0.1" value="0" /></label>
+          <section class="clip-composer-export" aria-label="Composer export">
+            <h3>Export from composer</h3>
+            <p class="hint">Exports with this composer's caption and layout settings. Unreviewed clips are approved automatically.</p>
+            <label>Export file name (optional)<input id="clip-composer-export-name" maxlength="120" placeholder="e.g. funny-reaction-01" /></label>
+            <button id="clip-composer-export" type="button">Approve and export MP4</button>
+          </section>
+          <p class="hint">This preview is masked to the selected clip. Future cut, hook, effect and sound tools will appear here.</p>
+        </aside>
+      </div>
+      <p class="hint composer-footer-hint">The preview is limited to the selected clip. Timing, reordering fragments, effects and audio tools will be added here without changing the original recording.</p>
     </dialog>
     <dialog id="diagnostics-dialog">
       <div class="dialog-head"><div><strong>Diagnostic report</strong><p class="hint">Contains technical state and recent errors, without recordings or transcripts.</p></div><button id="close-diagnostics" class="quiet">Close</button></div>
@@ -488,6 +689,6 @@
       <p class="hint quick-review-shortcuts"><kbd>A</kbd> approve &nbsp; <kbd>R</kbd> reject &nbsp; <kbd>←</kbd><kbd>→</kbd> previous / next</p>
       <div class="actions quick-review-actions"><button id="quick-review-approve">Approve</button><button id="quick-review-reject" class="quiet">Reject</button><button id="quick-review-previous" class="quiet">Previous</button><button id="quick-review-next" class="quiet">Next</button></div>
     </dialog>
-    <script src="/static/app.js?v=20260806-tag-cleanup"></script>
+    <script src="/static/app.js?v=20260808-composer-local-layout-v1"></script>
   </body>
 </html>

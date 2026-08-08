@@ -22,6 +22,11 @@ TIME_PATTERN = re.compile(r"^\s*\[?(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))
 TEXT_TIME_PATTERN = re.compile(r"^\s*\[?(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?\]?\s*(?:[-|]\s*)?(.*)$")
 REACTION_PATTERN = re.compile(r"\b(xd+|lol+|lmao|omg|o+\s*m+\s*g+|haha+|heh+|rip|gg|coo+|niee+|ja+\s*pier|what+)\b|[!?]{2,}", re.I)
 JOY_PATTERN = re.compile(r"\b(xd+|lol+|lmao|rofl|kekw|lul+w*|haha+|heh+|bek+a*|śmiesz|zajebist|kocham|dobre+|piękne+)\b|(?:🤣|😂|😄|😆|💀)", re.I)
+CHAT_ALERT_PATTERN = re.compile(
+    r"(?:^!|\b(?:follow(?:ed|er)?|raid(?:ed)?|sub(?:scribed|scriber)?|gift(?:ed)?|bits?|donat(?:ed|ion)|"
+    r"first\s+message|jest\s+już|wita(?:my|j)|nightbot|streamelements|streamlabs)\b)",
+    re.I,
+)
 VIEWER_QUESTION_PATTERN = re.compile(
     r"(?:\?|\b(?:co\s+sądzisz|co\s+myślisz|jak\s+(?:oceniasz|uważasz|sądzisz)|podoba\s+(?:ci|wam)\s+się|"
     r"czy\s+(?:to|ten|ta|jest|będzie|masz)|dlaczego\b|po\s+co\b|któr\w*\s+(?:wybierasz|polecasz)|"
@@ -73,6 +78,14 @@ def _looks_like_answer(transcript: str) -> bool:
         return False
     # A longer answer may contain a rhetorical question, so it is accepted.
     return not (len(words) < 10 and str(transcript or "").strip().endswith("?"))
+
+
+def _is_meaningful_chat_reaction(message: dict[str, Any]) -> bool:
+    """Reject commands and stream alert text before scoring chat evidence."""
+    text = str(message.get("message") or "").strip()
+    if not text or CHAT_ALERT_PATTERN.search(text):
+        return False
+    return bool(REACTION_PATTERN.search(text) or JOY_PATTERN.search(text))
 
 
 def _question_answer_match_score(question: str, answer: str, question_vector: list[float], answer_vector: list[float], context_score: int, self_contained_score: int) -> int:
@@ -313,9 +326,12 @@ def apply_chat_reactions(video_id: str, segment_ids: Iterable[str] | None = None
     updates = []
     for segment in segments:
         clip_start, clip_end = float(segment["start_seconds"]), float(segment["end_seconds"])
-        # Evaluate the whole spoken fragment, then retain a small delayed tail
-        # for messages that appear after its final line or punchline.
-        response_start = clip_start + max(0.0, delay - 2.0)
+        # A chat reaction is most likely to refer to the latter part of the
+        # clip: the answer, punchline or visible consequence. Starting at the
+        # midpoint prevents activity caused by the setup from being credited
+        # to the entire fragment. Keep a delayed tail for late messages.
+        clip_midpoint = clip_start + max(0.0, (clip_end - clip_start) * 0.5)
+        response_start = clip_midpoint + delay
         response_end = clip_end + delay + 18.0
         baseline_start = max(0.0, response_start - 70.0)
         baseline_end = max(baseline_start, response_start - 8.0)
@@ -326,28 +342,33 @@ def apply_chat_reactions(video_id: str, segment_ids: Iterable[str] | None = None
         baseline_rate = len(baseline) / max(1.0, baseline_end - baseline_start)
         expected = baseline_rate * (response_end - response_start)
         surge = (count + 1.0) / (expected + 1.0)
-        expressive = sum(1 for message in reaction if REACTION_PATTERN.search(message["message"]))
-        joy = sum(1 for message in reaction if JOY_PATTERN.search(message["message"]))
+        reactive_messages = [message for message in reaction if _is_meaningful_chat_reaction(message)]
+        expressive = sum(1 for message in reactive_messages if REACTION_PATTERN.search(message["message"]))
+        joy = sum(1 for message in reactive_messages if JOY_PATTERN.search(message["message"]))
+        reactive_authors = len({message["author"].strip().lower() for message in reactive_messages if message["author"].strip()})
         score = 0
         active_chat = count >= max(3, expected * 1.35)
-        if active_chat:
-            score += min(6, max(1, round((count - expected) * 1.4)))
-        if active_chat and unique >= 2:
-            score += min(5, unique)
-        if count >= max(4, expected * 1.55):
-            score += min(8, round((surge - 1) * 3.5))
+        # A message surge is only context. It becomes evidence of a good clip
+        # when distinct people actually react, rather than when commands,
+        # raids, first-message alerts or a generally busy chat happen nearby.
         if active_chat and expressive >= 2:
-            score += min(4, expressive)
+            score += min(6, max(2, round((count - expected) * 1.2)))
+        if active_chat and reactive_authors >= 2:
+            score += min(5, reactive_authors)
+        if active_chat and expressive >= 2 and count >= max(4, expected * 1.55):
+            score += min(6, round((surge - 1) * 3.0))
+        if active_chat and expressive >= 3:
+            score += min(3, expressive - 1)
         score = max(0, min(20, score))
         joy_score = 0
         if active_chat and joy:
             joy_score += min(6, joy * 2)
-        if active_chat and joy >= 2 and unique >= 2:
-            joy_score += min(4, unique)
+        if active_chat and joy >= 2 and reactive_authors >= 2:
+            joy_score += min(4, reactive_authors)
         if active_chat and joy and count >= max(3, expected * 1.5):
             joy_score += min(4, round(max(0.0, surge - 1) * 2.5))
         joy_score = max(0, min(14, joy_score))
-        previews = [{"author": message["author"], "message": message["message"], "seconds": message["seconds"]} for message in reaction[:4]]
+        previews = [{"author": message["author"], "message": message["message"], "seconds": message["seconds"]} for message in reactive_messages[:4]]
         answer_text = str(segment.get("transcript") or "")
         question_match_score = 0
         question_text = ""

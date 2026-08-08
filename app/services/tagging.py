@@ -8,6 +8,7 @@ from app.services.tag_taxonomy import (
     CHAT_QUESTION_TAG,
     CONTEXT_TAG_PREFIXES,
     GAME_REACTION_TAG,
+    GAME_REACTION_MIN_SCORE,
     canonicalize_tags,
     tag_category,
 )
@@ -48,6 +49,17 @@ EMOTION_OR_OPINION_TAGS = {
     "forma: opinia", "forma: krytyka", "forma: puenta",
 }
 _FILLERS = {"yyy", "eee", "hmm", "um", "jakby", "znaczy"}
+
+# NFKD decomposes most Polish diacritics, but not the stroked letter ``ł``.
+# Translate it first so keyword rules treat e.g. "udało się" and
+# "udalo sie" identically.
+_POLISH_ASCII_TRANSLATION = str.maketrans({"\u0142": "l", "\u0141": "L"})
+
+
+def _ascii_normalize(value: str) -> str:
+    return unicodedata.normalize(
+        "NFKD", (value or "").translate(_POLISH_ASCII_TRANSLATION)
+    ).encode("ascii", "ignore").decode("ascii")
 _TRAILING_CONNECTORS = {"a", "ale", "bo", "czy", "i", "jak", "że", "żeby", "więc", "to"}
 _COHERENCE_CONNECTORS = {"bo", "dlatego", "więc", "ale", "jednak", "potem", "teraz", "jeśli", "gdy", "ponieważ"}
 # Repeated objective/UI language is a strong signal that the streamer is
@@ -152,7 +164,7 @@ def enrich_tags(
 
 def score_moment_reaction(game_reaction_score: int, chat_reaction_score: int = 0, chat_joy_score: int = 0) -> tuple[int, str]:
     """Score a causal-looking game event, voice reaction, then chat response."""
-    if game_reaction_score < 7:
+    if game_reaction_score < GAME_REACTION_MIN_SCORE:
         return 0, ""
     score = min(16, int(game_reaction_score))
     stage = "game -> voice"
@@ -291,8 +303,12 @@ def assess_extended_story_shape(text: str, words: list[dict] | None = None, befo
         first_start = float(words[0].get("start") or 0.0)
         early_words = [str(word.get("word") or "") for word in words if float(word.get("start") or first_start) <= first_start + 3.5]
     early = " ".join(early_words) if early_words else " ".join(tokens[:12])
-    hook = 52
-    ending = 50
+    early_normalized = _ascii_normalize(early.lower())
+    # A grammatical sentence is not automatically a hook or payoff. Start
+    # from a neutral-low value and require explicit early tension/claim and a
+    # resolving ending before awarding those labels.
+    hook = 34
+    ending = 34
     signals: list[str] = []
     first_tokens = re.findall(r"[^\W_]+", early.lower())
     filler_count = sum(token in _FILLERS for token in first_tokens)
@@ -304,21 +320,48 @@ def assess_extended_story_shape(text: str, words: list[dict] | None = None, befo
         hook -= min(20, filler_count * 8)
     if len(first_tokens) >= 5:
         hook += 5
-    if re.search(r"[!?]", early) or re.search(r"\b(?:nie|co|kurwa|serio|naj|dlaczego|mysle|uwazam)\b", early, re.I):
+    hook_evidence = 0
+    if "?" in early or re.search(r"^(?:co|jak|dlaczego|czy|kto|gdzie)\b", early_normalized, re.I):
+        hook += 15
+        hook_evidence += 1
+    if re.search(r"\b(?:co jest|nie wierze|serio|niemozliwe|o kurwa|masakra)\b", early_normalized, re.I):
+        hook += 13
+        hook_evidence += 1
+    if re.search(r"\b(?:moim zdaniem|uwazam|mysle ze|dla mnie|najlepszy|najgorszy|absurd|problem jest)\b", early_normalized, re.I):
+        hook += 11
+        hook_evidence += 1
+    if re.search(r"\b(?:zobaczcie|sluchajcie|wyobrazcie sobie|teraz uwaga)\b", early_normalized, re.I):
         hook += 10
+        hook_evidence += 1
+    if "!" in early and hook_evidence:
+        hook += 4
+    if hook_evidence == 0:
+        hook = min(hook, 52)
     if len(tokens) < 6:
         hook -= 14
 
     complete_end = current.endswith((".", "!", "?"))
     if complete_end:
-        ending += 16
+        ending += 12
     else:
         ending -= 20
         signals.append("ending does not resolve the thought")
     if tokens[-1] in _TRAILING_CONNECTORS:
         ending -= 14
-    if re.search(r"\b(?:wiec|jednak|ale|dlatego|okazalo sie|najlepsze|najgorsze|koniec)\b", " ".join(tokens[-10:]), re.I):
-        ending += 7
+    closing_words = " ".join(tokens[-12:])
+    closing_normalized = _ascii_normalize(closing_words)
+    payoff_evidence = 0
+    if re.search(r"\b(?:wiec|jednak|dlatego|okazalo sie|w koncu|finalnie|koniec)\b", closing_normalized, re.I):
+        ending += 13
+        payoff_evidence += 1
+    if re.search(r"\b(?:najlepsze|najgorsze|absurdalne|genialne|beznadziejne|warto|nie warto)\b", closing_normalized, re.I):
+        ending += 10
+        payoff_evidence += 1
+    if re.search(r"\b(?:wygralem|przegralem|udalo sie|nie udalo sie|zginalem|dziala|nie dziala)\b", closing_normalized, re.I):
+        ending += 10
+        payoff_evidence += 1
+    if complete_end and payoff_evidence == 0:
+        ending = min(ending, 54)
     if after and not complete_end:
         ending -= 12
     if hook >= 66:
@@ -326,6 +369,112 @@ def assess_extended_story_shape(text: str, words: list[dict] | None = None, befo
     if ending >= 68:
         signals.append("resolved ending or payoff")
     return max(1, min(99, round(hook))), max(1, min(99, round(ending))), signals[:2]
+
+
+def assess_opening_clarity(text: str, words: list[dict] | None = None) -> tuple[int, list[str]]:
+    """Score whether the first two spoken seconds establish a clear premise.
+
+    This intentionally uses spoken content only. Stream alerts, emotes and
+    overlays can create plenty of motion in a recording, but must never count
+    as a content hook.
+    """
+    current = " ".join((text or "").split())
+    tokens = re.findall(r"[^\W_]+", current.lower())
+    if not tokens:
+        return 1, ["no spoken opening"]
+    early_words: list[str] = []
+    if words:
+        first_start = float(words[0].get("start") or 0.0)
+        early_words = [
+            str(word.get("word") or "")
+            for word in words
+            if float(word.get("start") or first_start) <= first_start + 2.0
+        ]
+    opening = " ".join(early_words) if early_words else " ".join(tokens[:7])
+    normalized = _ascii_normalize(opening.lower())
+    opening_tokens = re.findall(r"[a-z]+", normalized)
+    score = 26
+    signals: list[str] = []
+    if len(opening_tokens) >= 4:
+        score += 10
+    else:
+        score -= 12
+        signals.append("opening is too sparse")
+    if opening_tokens and opening_tokens[0] in {"a", "ale", "bo", "wiec", "i", "ze", "zeby", "to"}:
+        score -= 18
+        signals.append("opening starts mid-thought")
+    filler_count = sum(token in _FILLERS for token in opening_tokens)
+    if filler_count:
+        score -= min(18, filler_count * 9)
+        signals.append("filler-heavy opening")
+
+    premise_evidence = 0
+    if "?" in opening or re.search(r"^(?:co|jak|dlaczego|czy|kto|gdzie)\b", normalized, re.I):
+        score += 16
+        premise_evidence += 1
+    if re.search(r"\b(?:co jest|nie wierze|serio|niemozliwe|masakra|nagle)\b", normalized, re.I):
+        score += 13
+        premise_evidence += 1
+    if re.search(r"\b(?:moim zdaniem|uwazam|mysle ze|dla mnie|najlepszy|najgorszy|problem|dzisiaj)\b", normalized, re.I):
+        score += 11
+        premise_evidence += 1
+    if re.search(r"\b(?:zobaczcie|sluchajcie|wyobrazcie sobie|teraz uwaga)\b", normalized, re.I):
+        score += 10
+        premise_evidence += 1
+    if premise_evidence:
+        signals.append("clear first-two-seconds premise")
+    else:
+        score = min(score, 52)
+        signals.append("opening has no clear premise")
+    return max(1, min(99, round(score))), signals[:2]
+
+
+def assess_extended_punchline(text: str) -> tuple[int, list[str]]:
+    """Score an actual turn, outcome or comedic payoff near the ending.
+
+    A complete sentence is not enough: this feature looks for a late change of
+    direction, an outcome, or an explicit joke/reveal and is kept independent
+    from the general ending score.
+    """
+    current = " ".join((text or "").split())
+    tokens = re.findall(r"[^\W_]+", current.lower())
+    if len(tokens) < 8:
+        return 1, ["too little speech for a punchline"]
+    split_at = max(5, round(len(tokens) * 0.62))
+    setup = _ascii_normalize(" ".join(tokens[:split_at]))
+    closing = _ascii_normalize(" ".join(tokens[split_at:]))
+    score = 24
+    signals: list[str] = []
+    if current.endswith((".", "!", "?")):
+        score += 8
+    else:
+        score -= 16
+        signals.append("ending cuts off before payoff")
+
+    turn_evidence = 0
+    if re.search(r"\b(?:ale jednak|a jednak|tylko ze|okazalo sie|nagle|w koncu|finalnie|plot twist)\b", closing, re.I):
+        score += 23
+        turn_evidence += 1
+    if re.search(r"\b(?:wygralem|przegralem|udalo sie|nie udalo sie|zginalem|przegrana|wygrana|dziala|nie dziala)\b", closing, re.I):
+        score += 16
+        turn_evidence += 1
+    if re.search(r"\b(?:najlepsze jest|najgorsze jest|absurdalne|genialne|beznadziejne|oczywiscie ze nie|no i)\b", closing, re.I):
+        score += 15
+        turn_evidence += 1
+    if re.search(r"\b(?:haha+|heh+|xd+|lol+)\b", closing, re.I):
+        score += 10
+        turn_evidence += 1
+    if turn_evidence and not any(marker in setup for marker in ("ale jednak", "a jednak", "okazalo sie", "nagle", "w koncu")):
+        score += 7
+        signals.append("late turn or reveal")
+    if turn_evidence >= 2:
+        score += 8
+    if turn_evidence:
+        signals.append("clear punchline or outcome")
+    else:
+        score = min(score, 48)
+        signals.append("no verified punchline")
+    return max(1, min(99, round(score))), signals[:2]
 
 
 def assess_extended_reading_likelihood(text: str, before: str = "", after: str = "", base_likelihood: float = 0.0) -> float:
@@ -336,7 +485,7 @@ def assess_extended_reading_likelihood(text: str, before: str = "", after: str =
     when formal/document language is paired with directive or quote-like
     wording and there is no clear personal commentary.
     """
-    normalized = unicodedata.normalize("NFKD", " ".join((text or "").lower().split())).encode("ascii", "ignore").decode("ascii")
+    normalized = _ascii_normalize(" ".join((text or "").lower().split()))
     tokens = re.findall(r"[a-z]+", normalized)
     formal_hits = sum(1 for token in tokens if any(token.startswith(stem) for stem in _DOCUMENT_CUE_STEMS))
     directive_hits = len(re.findall(
@@ -382,7 +531,7 @@ def assess_clip_quality(text: str, words: list[dict], start: float, end: float, 
     repeated_phrases = Counter(" ".join(tokens[index:index + 3]) for index in range(max(0, len(tokens) - 2)))
     repeated_phrase_count = max(repeated_phrases.values(), default=0)
     ui_cues = sum(1 for token in tokens if any(token.startswith(stem) for stem in _READING_CUE_STEMS))
-    document_text = unicodedata.normalize("NFKD", text.lower()).encode("ascii", "ignore").decode("ascii")
+    document_text = _ascii_normalize(text.lower())
     document_tokens = re.findall(r"[a-z]+", document_text)
     document_cues = sum(1 for token in document_tokens if any(token.startswith(stem) for stem in _DOCUMENT_CUE_STEMS))
     if any(phrase in document_text for phrase in ("glos prawdy", "zabrania sie")):
@@ -470,7 +619,7 @@ def calibrate_quality_score(
     strong_delivery = (
         emotional_delivery
         or "expressive delivery" in quality_signals
-        or game_reaction_score >= 10
+        or game_reaction_score >= GAME_REACTION_MIN_SCORE
         or moment_reaction_score >= 10
         or voice_expression_score >= 10
     )
@@ -522,6 +671,10 @@ def assess_short_potential(
     context_score: int = -1,
     self_contained_score: int = -1,
     extended_completeness_score: int = -1,
+    extended_hook_score: int = -1,
+    extended_ending_score: int = -1,
+    opening_clarity_score: int = -1,
+    extended_punchline_score: int = -1,
     game_reaction_score: int = 0,
     voice_expression_score: int = 0,
     moment_reaction_score: int = 0,
@@ -540,86 +693,99 @@ def assess_short_potential(
     duration = max(0.1, float(end) - float(start))
     tag_set = set(tags or [])
     signals: list[str] = []
-    score = 18
 
+    # Structure is an eligibility gate, not proof that people would watch the
+    # clip.  The previous version added four correlated checks (logic,
+    # context, self-containment and extended completeness) independently,
+    # allowing a merely well-formed sentence to score like a strong short.
+    score = 20
+    structurally_strong = False
     if 8 <= duration <= 28:
-        score += 18
+        score += 15
         signals.append("short-friendly length")
     elif 5 <= duration <= 38:
-        score += 10
+        score += 8
         signals.append("usable short length")
     elif duration > 50:
-        score -= 18
+        score -= 20
         signals.append("too long for a short")
     elif duration > 38:
-        score -= 7
+        score -= 9
         signals.append("long for a short")
     elif duration < 4:
-        score -= 10
+        score -= 12
         signals.append("very brief clip")
 
-    if self_contained_score >= 78:
-        score += 23
+    if self_contained_score >= 78 and logical_sense_score >= 74 and context_score >= 62:
+        score += 18
+        structurally_strong = True
         signals.append("stands on its own")
-    elif self_contained_score >= 58:
-        score += 11
+    elif self_contained_score >= 58 and logical_sense_score >= 55:
+        score += 8
         signals.append("mostly self-contained")
-    elif 0 <= self_contained_score <= 38:
-        score -= 18
+    elif self_contained_score < 58 or logical_sense_score < 55:
+        score -= 14
         signals.append("needs surrounding context")
 
-    if logical_sense_score >= 74:
-        score += 14
-        signals.append("complete thought")
-    elif logical_sense_score >= 55:
-        score += 6
-    elif 0 <= logical_sense_score <= 38:
-        score -= 15
-        signals.append("unclear thought")
-
-    if context_score >= 72:
-        score += 7
-    elif 0 <= context_score <= 35:
-        score -= 8
-
     if extended_completeness_score >= 76:
-        score += 9
+        score += 8
         signals.append("verified complete ending")
     elif 0 <= extended_completeness_score <= 43:
-        score -= 13
+        score -= 15
         signals.append("incomplete ending")
 
     hook_tags = {"humor", "forma: puenta", "forma: opinia", "forma: historia", "forma: krytyka", "forma: decyzja"}
     emotional_tags = {tag for tag in tag_set if tag.startswith("emocja:")} | (tag_set & EMOTION_OR_OPINION_TAGS)
     has_content_hook = bool(tag_set & hook_tags)
-    has_answer = "forma: odpowied" in " ".join(tag_set).lower()
-    has_game_or_voice_reaction = game_reaction_score >= 10 or moment_reaction_score >= 10 or voice_expression_score >= 10
+    # This is assigned only after chat.py has semantically matched a viewer's
+    # earlier question to this spoken response.  Do not infer it from a
+    # question-shaped sentence or generic semantic tag.
+    has_answer = CHAT_QUESTION_ANSWER_TAG in tag_set
+    verified_game_reaction = (
+        game_reaction_score >= GAME_REACTION_MIN_SCORE
+        or moment_reaction_score >= GAME_REACTION_MIN_SCORE
+    )
+    expressive_voice = voice_expression_score >= 10
     has_chat_reaction = chat_reaction_score >= 12 or chat_joy_score >= 8
-    has_attention_trigger = has_content_hook or bool(emotional_tags) or has_answer or has_game_or_voice_reaction or has_chat_reaction
+    content_interest = has_content_hook or bool(emotional_tags)
+    story_shape = extended_hook_score >= 66 and extended_ending_score >= 68
+    clear_opening = opening_clarity_score >= 64
+    punchline = extended_punchline_score >= 66
+    proof_count = sum((verified_game_reaction, expressive_voice, has_chat_reaction, has_answer, content_interest, story_shape, punchline))
+    attention_strength = 0
 
-    if has_content_hook:
-        score += 8
+    # These are independent reasons to keep watching.  Unlike the structural
+    # foundation above, they can raise a clip into the top range.
+    if content_interest:
+        attention_strength += 7
         signals.append("clear content hook")
-    if emotional_tags:
-        score += 6
+    if story_shape:
+        attention_strength += 10
+        signals.append("hook and payoff verified")
+    if clear_opening:
+        attention_strength += 6
+        signals.append("clear first-two-seconds premise")
+    if punchline:
+        attention_strength += 12
+        signals.append("late punchline or outcome verified")
     if has_answer:
-        score += 7
+        attention_strength += 12
         signals.append("answer with context")
-
-    if game_reaction_score >= 7 or moment_reaction_score >= 7:
-        score += 10
+    if verified_game_reaction:
+        attention_strength += 18
         signals.append("game moment to reaction")
-    elif voice_expression_score >= 7:
-        score += 8
+    if expressive_voice:
+        attention_strength += 8 if verified_game_reaction else 12
         signals.append("expressive voice")
     if chat_reaction_score >= 10:
-        score += 7
+        attention_strength += 8
         signals.append("chat reacted")
     if chat_joy_score >= 8:
-        score += 5
+        attention_strength += 6
         signals.append("chat amusement")
-    if quality_score >= 78:
-        score += 5
+    if proof_count >= 2:
+        attention_strength += 4
+    score += attention_strength
 
     if len(tokens) < 5:
         score -= 12
@@ -634,14 +800,12 @@ def assess_short_potential(
         score -= 14
         signals.append("reading cues")
 
-    # Short potential is intentionally stricter than quality.  A 99 is not
-    # merely a fluent fragment with several overlapping bonuses: it is a
-    # verified, concise, self-contained thought with a real reason to keep
-    # watching.  Without Extended verification a clip can still be excellent,
-    # but cannot claim the very top of the scale.
+    # A useful structure is necessary, but not enough.  A candidate without a
+    # concrete attention signal is capped as a clean excerpt rather than being
+    # presented as a likely Short.
     if self_contained_score < 58 or logical_sense_score < 55:
         score = min(score, 72)
-    elif self_contained_score < 72 or logical_sense_score < 70:
+    elif not structurally_strong:
         score = min(score, 82)
     if 0 <= context_score < 52:
         score = min(score, 86)
@@ -649,8 +813,10 @@ def assess_short_potential(
         score = min(score, 92)
     elif extended_completeness_score < 65:
         score = min(score, 88)
-    if not has_attention_trigger:
-        score = min(score, 87)
+    if attention_strength == 0:
+        score = min(score, 65)
+    elif proof_count == 1:
+        score = min(score, 88)
 
     exceptional = (
         8 <= duration <= 28
@@ -660,7 +826,10 @@ def assess_short_potential(
         and extended_completeness_score >= 82
         and quality_score >= 80
         and reading_likelihood < 0.20
-        and has_attention_trigger
+        and proof_count >= 2
+        and attention_strength >= 24
+        and clear_opening
+        and (punchline or has_answer or verified_game_reaction)
     )
     if exceptional:
         signals.append("exceptional short criteria met")
